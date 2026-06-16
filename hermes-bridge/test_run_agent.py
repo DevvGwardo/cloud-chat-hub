@@ -179,6 +179,9 @@ class RunAgentRepoModeTests(unittest.TestCase):
 
         self.assertIn("read_repo_file", tool_names)
         self.assertIn("list_user_repos", tool_names)
+        self.assertIn("git_log", tool_names)
+        self.assertIn("git_show", tool_names)
+        self.assertIn("git_diff", tool_names)
         self.assertNotIn("edit_repo_file", tool_names)
         self.assertNotIn("create_repo_file", tool_names)
         self.assertNotIn("delete_repo_file", tool_names)
@@ -1612,6 +1615,55 @@ class BrainMCPPooledCachingTests(unittest.TestCase):
 @unittest.skipUnless(HERMES_ADAPTER_AVAILABLE, "hermes_adapter not available (missing dependencies)")
 class HermesAdapterRepoToolProviderTests(unittest.TestCase):
     """Tests for RepoToolProvider brain caching behavior in hermes_adapter."""
+
+    def test_repo_tool_provider_registers_git_history_tools(self):
+        """Read-only repo mode should expose git history tools on the adapter path."""
+        from hermes_adapter import RepoToolProvider
+
+        with patch('hermes_adapter._brain_safe_get', return_value=None):
+            with patch('hermes_adapter._brain_safe_set', return_value=True):
+                with patch('hermes_adapter.registry') as mock_registry:
+                    provider = RepoToolProvider(
+                        github_pat="fake-pat",
+                        owner="octo",
+                        name="repo",
+                        file_tree=["README.md"],
+                        edit_intent=False,
+                        on_server_tool_event=None,
+                    )
+                    provider._register_tools()
+                    registered = {call.kwargs["name"] for call in mock_registry.register.call_args_list}
+                    self.assertIn("git_log", registered)
+                    self.assertIn("git_show", registered)
+                    self.assertIn("git_diff", registered)
+
+    def test_handle_git_log_formats_commits(self):
+        from hermes_adapter import RepoToolProvider
+
+        sample = [
+            {
+                "sha": "abc123def456",
+                "commit": {
+                    "message": "feat: add dashboard\n\nbody",
+                    "author": {"name": "Ada", "date": "2026-06-01T12:00:00Z"},
+                },
+            }
+        ]
+        with patch('hermes_adapter._brain_safe_get', return_value=None):
+            with patch('hermes_adapter._brain_safe_set', return_value=True):
+                provider = RepoToolProvider(
+                    github_pat="fake-pat",
+                    owner="octo",
+                    name="repo",
+                    file_tree=[],
+                    edit_intent=False,
+                    on_server_tool_event=None,
+                )
+                with patch.object(provider, "_github_get", return_value=(sample, None)):
+                    result = provider._handle_git_log({"max_count": 5})
+                self.assertIn("abc123de", result)
+                self.assertIn("Ada", result)
+                self.assertIn("feat: add dashboard", result)
 
     def test_repo_tool_provider_initializes_without_github_pat(self):
         """RepoToolProvider should initialize even when github_pat is None."""
