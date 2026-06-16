@@ -2795,6 +2795,9 @@ _TOOL_DISPLAY_NAMES: dict[str, str] = {
     "create_repo_file": "Creating file",
     "delete_repo_file": "Deleting file",
     "batch_edit_repo_files": "Editing files",
+    "git_log": "Viewing commit history",
+    "git_show": "Showing commit",
+    "git_diff": "Comparing refs",
 }
 
 # Tools that modify repository state — brain_claim protection applied in on_tool_start/end
@@ -5011,7 +5014,7 @@ async def workspace_mcp_uninstall(name: str, request: Request):
 async def workspace_mcp_telemetry(request: Request):
     """Live MCP dashboard snapshot: per-server connection status, tool-call
     metrics (counts, latency, errors), minute-bucketed activity, and a recent
-    global activity feed. All in-memory; resets on bridge restart."""
+    global activity feed. Metrics persist across bridge restarts via SQLite."""
     try:
         snap = mcp_telemetry.snapshot()
     except Exception as e:
