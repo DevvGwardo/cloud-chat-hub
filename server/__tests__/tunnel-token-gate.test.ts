@@ -36,7 +36,7 @@ async function createTestServer(host?: string) {
   const app = createApp({ serveFrontend: true })
 
   return await new Promise<{ close: () => Promise<void>; url: string }>((resolve) => {
-    const server = app.listen(0, host, () => {
+    const onListening = () => {
       const { port } = server.address() as AddressInfo
       resolve({
         url: `http://${host ?? '127.0.0.1'}:${port}`,
@@ -45,7 +45,8 @@ async function createTestServer(host?: string) {
             server.close((error) => (error ? closeReject(error) : closeResolve()))
           }),
       })
-    })
+    }
+    const server = host ? app.listen(0, host, onListening) : app.listen(0, onListening)
   })
 }
 
