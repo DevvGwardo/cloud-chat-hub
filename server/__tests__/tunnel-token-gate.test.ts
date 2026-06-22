@@ -23,6 +23,14 @@ vi.mock('../lib/tunnel', async (importOriginal) => {
   }
 })
 
+vi.mock('../lib/qr-display', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/qr-display')>()
+  return {
+    ...actual,
+    generateQrSvgDataUri: async (url: string) => `qr:${url}`,
+  }
+})
+
 async function createTestServer(host?: string) {
   const { createApp } = await import('../index')
   const app = createApp({ serveFrontend: true })
@@ -123,8 +131,7 @@ describe('public tunnel access token gate', () => {
       const body = (await res.json()) as { url: string; tunnelUrl: string; qrSvg: string }
       expect(body.url).toBe(`${TUNNEL_URL}/?key=${TOKEN}`)
       expect(body.tunnelUrl).toBe(`${TUNNEL_URL}/?key=${TOKEN}`)
-      const qrSvg = Buffer.from(body.qrSvg.split(',')[1] ?? '', 'base64').toString('utf8')
-      expect(qrSvg).toContain(TOKEN)
+      expect(body.qrSvg).toBe(`qr:${TUNNEL_URL}/?key=${TOKEN}`)
     } finally {
       await server.close()
     }
@@ -142,8 +149,7 @@ describe('public tunnel access token gate', () => {
       expect(body.tunnelUrl).toBe(TUNNEL_URL)
       expect(body.url).not.toContain(TOKEN)
       expect(body.tunnelUrl).not.toContain(TOKEN)
-      const qrSvg = Buffer.from(body.qrSvg.split(',')[1] ?? '', 'base64').toString('utf8')
-      expect(qrSvg).not.toContain(TOKEN)
+      expect(body.qrSvg).toBe(`qr:${TUNNEL_URL}`)
     } finally {
       await server.close()
     }
