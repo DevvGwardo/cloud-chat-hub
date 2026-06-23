@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import threading
 import types
 import unittest
 from unittest.mock import patch, MagicMock
@@ -2011,6 +2012,78 @@ class HermesAdapterFinalResponseTests(unittest.TestCase):
                 "🔄 Switched to fallback model: m1 via p1 → m2 via p2",
             )
             self.assertEqual(seen, [("p2", "m2")])
+    def test_repo_adapter_runs_serialize_global_repo_registry(self):
+        import hermes_adapter as ha
+
+        events = []
+        errors = []
+        active_owner = [None]
+        owner_lock = threading.Lock()
+        first_running = threading.Event()
+        release_first = threading.Event()
+
+        def fake_register_tools(provider):
+            with owner_lock:
+                active_owner[0] = provider.name
+                events.append(("register", provider.name))
+
+        def fake_deregister_tools(provider):
+            with owner_lock:
+                events.append(("deregister", provider.name))
+                active_owner[0] = None
+
+        class FakeRealAIAgent:
+            def __init__(self, **_kwargs):
+                with owner_lock:
+                    self.owner = active_owner[0]
+                events.append(("init", self.owner))
+
+            def run_conversation(self, **_kwargs):
+                events.append(("run_start", self.owner))
+                if self.owner == "repo-a":
+                    first_running.set()
+                    release_first.wait(timeout=2)
+                events.append(("run_end", self.owner))
+                return {"final_response": "ok", "api_calls": 1, "completed": True}
+
+        def run_repo_agent(repo_name):
+            try:
+                adapter = ha.HermesAgentAdapter(
+                    base_url="https://api.openai.com/v1",
+                    api_key="test-key",
+                    model="gpt-test",
+                    repo_mode=True,
+                    repo_edit_intent=True,
+                    github_pat="test-pat",
+                    github_repo_owner="octo",
+                    github_repo_name=repo_name,
+                )
+                adapter.run_conversation("test", [])
+            except Exception as exc:
+                errors.append(exc)
+
+        with patch.object(ha, "RealAIAgent", FakeRealAIAgent):
+            with patch.object(ha.RepoToolProvider, "_register_tools", fake_register_tools):
+                with patch.object(ha.RepoToolProvider, "_deregister_tools", fake_deregister_tools):
+                    with patch.object(ha, "_brain_safe_get", return_value=None):
+                        with patch.object(ha, "_brain_safe_set", return_value=True):
+                            first = threading.Thread(target=run_repo_agent, args=("repo-a",))
+                            second = threading.Thread(target=run_repo_agent, args=("repo-b",))
+
+                            first.start()
+                            self.assertTrue(first_running.wait(timeout=2))
+                            second.start()
+                            release_first.set()
+                            first.join(timeout=2)
+                            second.join(timeout=2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, [])
+
+        first_deregister = events.index(("deregister", "repo-a"))
+        second_register = events.index(("register", "repo-b"))
+        self.assertLess(first_deregister, second_register)
 
 
 # ---------------------------------------------------------------------------
