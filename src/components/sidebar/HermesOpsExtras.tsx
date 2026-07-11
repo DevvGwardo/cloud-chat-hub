@@ -5,7 +5,7 @@ import {
   Brain,
   ExternalLink,
   HardDrive,
-  Hook,
+  Cable,
   KeyRound,
   Loader2,
   Monitor,
@@ -617,7 +617,7 @@ export function HermesOpsExtras() {
       )}
 
       <OpsCard
-        icon={Hook}
+        icon={Cable}
         title="Shell hooks"
         body={
           hooks
