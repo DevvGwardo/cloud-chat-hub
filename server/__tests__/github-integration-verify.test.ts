@@ -124,6 +124,8 @@ describe('GitHub verification route', () => {
   it('verifies staged changes from a local clone without a GitHub PAT', async () => {
     const localRepoPath = mkdtempSync(join(tmpdir(), 'cloudchat-verify-local-'))
     execSync('git init', { cwd: localRepoPath })
+    execSync('git config user.email "ci@example.com"', { cwd: localRepoPath })
+    execSync('git config user.name "CI"', { cwd: localRepoPath })
     execSync('git commit --allow-empty -m init', { cwd: localRepoPath })
     execSync('git remote add origin https://github.com/octo/cloudchat.git', { cwd: localRepoPath })
 
