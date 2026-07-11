@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { FolderKanban, Link2, Loader2, Plus } from 'lucide-react';
 import {
+  activateHermesProject,
   bindHermesProjectBoard,
   createHermesProject,
   fetchHermesProjects,
-  useHermesProject,
   type HermesProject,
 } from '@/lib/hermes-api';
 import { cn } from '@/lib/utils';
@@ -61,7 +61,7 @@ export function HermesProjectsSwitcher() {
     setBusy(ref);
     setError(null);
     try {
-      const res = await useHermesProject(ref);
+      const res = await activateHermesProject(ref);
       setProjects(res.projects || []);
       setActiveSlug(res.active_slug ?? ref);
     } catch (err) {

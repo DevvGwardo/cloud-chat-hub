@@ -1,4 +1,3 @@
-import { logger } from './lib/logger';
 import type express from 'express';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';

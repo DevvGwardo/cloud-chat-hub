@@ -771,7 +771,7 @@ export async function fetchHermesProjects(includeArchived = false): Promise<Herm
   return hermesFetch<HermesProjectsList>(`/projects${suffix}`);
 }
 
-export async function useHermesProject(project: string): Promise<HermesProjectsList & { output?: string }> {
+export async function activateHermesProject(project: string): Promise<HermesProjectsList & { output?: string }> {
   return hermesFetch('/projects/use', {
     method: 'POST',
     body: JSON.stringify({ project }),

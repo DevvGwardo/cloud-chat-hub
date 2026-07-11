@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from 'express';
 import { readFile, stat } from 'fs/promises';
-import { resolve, relative, join } from 'path';
+import { resolve, relative } from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { sendJson } from '../lib/helpers';
