@@ -1,4 +1,5 @@
 // @vitest-environment node
+import os from 'os'
 import { request as httpRequest } from 'http'
 import type { AddressInfo } from 'net'
 import { describe, expect, it, vi } from 'vitest'
@@ -22,22 +23,40 @@ vi.mock('../lib/tunnel', async (importOriginal) => {
   }
 })
 
-async function createTestServer() {
+vi.mock('../lib/qr-display', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/qr-display')>()
+  return {
+    ...actual,
+    generateQrSvgDataUri: async (url: string) => `qr:${url}`,
+  }
+})
+
+async function createTestServer(host?: string) {
   const { createApp } = await import('../index')
   const app = createApp({ serveFrontend: true })
 
   return await new Promise<{ close: () => Promise<void>; url: string }>((resolve) => {
-    const server = app.listen(0, () => {
+    const onListening = () => {
       const { port } = server.address() as AddressInfo
       resolve({
-        url: `http://127.0.0.1:${port}`,
+        url: `http://${host ?? '127.0.0.1'}:${port}`,
         close: () =>
           new Promise<void>((closeResolve, closeReject) => {
             server.close((error) => (error ? closeReject(error) : closeResolve()))
           }),
       })
-    })
+    }
+    const server = host ? app.listen(0, host, onListening) : app.listen(0, onListening)
   })
+}
+
+function firstLanIp(): string | null {
+  for (const nets of Object.values(os.networkInterfaces())) {
+    for (const net of nets ?? []) {
+      if (net.family === 'IPv4' && !net.internal) return net.address
+    }
+  }
+  return null
 }
 
 // fetch/undici refuses to override the Host header, so tunnel-host requests
@@ -105,15 +124,46 @@ describe('public tunnel access token gate', () => {
     }
   })
 
-  it('embeds the keyed tunnel URL in /api/remote/info', async () => {
+  it('embeds the keyed tunnel URL in /api/remote/info for loopback desktop requests', async () => {
     const server = await createTestServer()
     try {
       const res = await fetch(`${server.url}/api/remote/info`)
       expect(res.ok).toBe(true)
-      const body = (await res.json()) as { url: string }
+      const body = (await res.json()) as { url: string; tunnelUrl: string; qrSvg: string }
       expect(body.url).toBe(`${TUNNEL_URL}/?key=${TOKEN}`)
+      expect(body.tunnelUrl).toBe(`${TUNNEL_URL}/?key=${TOKEN}`)
+      expect(body.qrSvg).toBe(`qr:${TUNNEL_URL}/?key=${TOKEN}`)
     } finally {
       await server.close()
     }
+  })
+
+  it('does not expose the tunnel token in non-loopback remote info responses', async () => {
+    const lanIp = firstLanIp()
+    if (!lanIp) return
+    const server = await createTestServer('0.0.0.0')
+    try {
+      const res = await fetch(`${server.url.replace('0.0.0.0', lanIp)}/api/remote/info`)
+      expect(res.ok).toBe(true)
+      const body = (await res.json()) as { url: string; tunnelUrl: string; qrSvg: string }
+      expect(body.url).toBe(TUNNEL_URL)
+      expect(body.tunnelUrl).toBe(TUNNEL_URL)
+      expect(body.url).not.toContain(TOKEN)
+      expect(body.tunnelUrl).not.toContain(TOKEN)
+      expect(body.qrSvg).toBe(`qr:${TUNNEL_URL}`)
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('classifies loopback addresses without trusting forwarded headers', async () => {
+    const { isLoopbackAddress } = await import('../index')
+
+    expect(isLoopbackAddress('127.0.0.1')).toBe(true)
+    expect(isLoopbackAddress('127.2.3.4')).toBe(true)
+    expect(isLoopbackAddress('::1')).toBe(true)
+    expect(isLoopbackAddress('::ffff:127.0.0.1')).toBe(true)
+    expect(isLoopbackAddress('192.168.1.40')).toBe(false)
+    expect(isLoopbackAddress('::ffff:10.0.0.5')).toBe(false)
   })
 })

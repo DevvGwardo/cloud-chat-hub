@@ -374,6 +374,69 @@ _REPO_TOOL_SCHEMAS = {
             "required": ["changes"],
         },
     },
+    "git_log": {
+        "name": "git_log",
+        "description": (
+            "View the repository's git commit history (read-only). Use this to understand "
+            "recent changes, who changed what, and when. Optionally filter to commits that "
+            "touched a specific file or directory."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Optional file or directory path to filter history to commits that touched it.",
+                },
+                "ref": {
+                    "type": "string",
+                    "description": "Optional branch, tag, or commit SHA to start from. Defaults to the repository's default branch.",
+                },
+                "max_count": {
+                    "type": "integer",
+                    "description": "How many commits to return (default 15, max 50).",
+                },
+            },
+        },
+    },
+    "git_show": {
+        "name": "git_show",
+        "description": (
+            "Show a single commit (read-only): its message, author, date, and the diff/patch "
+            "for each changed file. Use a SHA from git_log."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "sha": {
+                    "type": "string",
+                    "description": "The commit SHA (or ref) to show.",
+                },
+            },
+            "required": ["sha"],
+        },
+    },
+    "git_diff": {
+        "name": "git_diff",
+        "description": (
+            "Show the diff between two git refs (read-only), e.g. two branches, tags, or commit "
+            "SHAs. Returns the changed-files summary and per-file patches."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "base": {
+                    "type": "string",
+                    "description": "The base ref (branch, tag, or SHA) to compare from.",
+                },
+                "head": {
+                    "type": "string",
+                    "description": "The head ref (branch, tag, or SHA) to compare to.",
+                },
+            },
+            "required": ["base", "head"],
+        },
+    },
 }
 
 _REPO_EDIT_TOOLS = {"edit_repo_file", "create_repo_file", "delete_repo_file", "batch_edit_repo_files"}
@@ -413,6 +476,9 @@ class RepoToolProvider:
         "create_repo_file": "Creating file",
         "delete_repo_file": "Deleting file",
         "batch_edit_repo_files": "Editing files",
+        "git_log": "Viewing commit history",
+        "git_show": "Showing commit",
+        "git_diff": "Comparing refs",
     }
 
     def __init__(
@@ -465,7 +531,13 @@ class RepoToolProvider:
 
     def _register_tools(self):
         """Register repo tools into the real agent's tool registry."""
-        tools_to_register = ["list_user_repos", "read_repo_file"]
+        tools_to_register = [
+            "list_user_repos",
+            "read_repo_file",
+            "git_log",
+            "git_show",
+            "git_diff",
+        ]
         if self.edit_intent:
             tools_to_register.extend([
                 "edit_repo_file", "create_repo_file",
@@ -475,6 +547,9 @@ class RepoToolProvider:
         handlers = {
             "list_user_repos": self._handle_list_user_repos,
             "read_repo_file": self._handle_read_repo_file,
+            "git_log": self._handle_git_log,
+            "git_show": self._handle_git_show,
+            "git_diff": self._handle_git_diff,
             "edit_repo_file": self._handle_edit_repo_file,
             "create_repo_file": self._handle_create_repo_file,
             "delete_repo_file": self._handle_delete_repo_file,
@@ -700,6 +775,175 @@ class RepoToolProvider:
                 results.append(self._handle_edit_repo_file({"path": path, "content": content, "description": desc}))
         return "\n".join(results)
 
+    def _github_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.github_pat}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "Hermes-Agent",
+        }
+
+    def _github_creds_missing(self) -> Optional[str]:
+        missing = []
+        if not self.github_pat:
+            missing.append("GitHub PAT")
+        if not self.owner:
+            missing.append("repo owner")
+        if not self.name:
+            missing.append("repo name")
+        if missing:
+            return (
+                f"Error: Cannot access git history — missing GitHub credentials "
+                f"({', '.join(missing)}). The user needs to configure a GitHub "
+                f"Personal Access Token in Settings."
+            )
+        return None
+
+    def _github_get(self, sub_path: str, params: Optional[dict] = None):
+        encoded_owner = quote(self.owner or "", safe="")
+        encoded_repo = quote(self.name or "", safe="")
+        url = f"https://api.github.com/repos/{encoded_owner}/{encoded_repo}/{sub_path}"
+        try:
+            with httpx.Client(timeout=15) as client:
+                resp = client.get(url, headers=self._github_headers(), params=params or {})
+            if resp.status_code == 401:
+                return None, "Error: GitHub token is invalid or expired. The user should update their token in Settings."
+            if resp.status_code == 403:
+                return None, (
+                    f"Error: Access denied (HTTP 403) for {self.owner}/{self.name}. "
+                    f"The GitHub token may lack the required permissions (needs 'repo' scope for private repositories)."
+                )
+            if resp.status_code == 404:
+                return None, (
+                    f"Error: Not found (HTTP 404) for {self.owner}/{self.name}. "
+                    f"The repo, branch, or commit ref may not exist or the token may lack access. "
+                    f"Call list_user_repos to see accessible repositories."
+                )
+            resp.raise_for_status()
+            return resp.json(), None
+        except Exception as e:
+            return None, f"Error reaching the GitHub API: {e}"
+
+    @staticmethod
+    def _format_commit_patch(files: list, per_file_cap: int = 4000) -> str:
+        chunks = []
+        for f in files:
+            if not isinstance(f, dict):
+                continue
+            filename = f.get("filename", "?")
+            status = f.get("status", "modified")
+            add = f.get("additions", 0)
+            dele = f.get("deletions", 0)
+            header = f"diff --- {filename} ({status}, +{add} -{dele})"
+            patch = f.get("patch")
+            if patch:
+                if len(patch) > per_file_cap:
+                    patch = patch[:per_file_cap] + f"\n[... patch truncated, {len(patch) - per_file_cap} more chars ...]"
+                chunks.append(f"{header}\n{patch}")
+            else:
+                chunks.append(f"{header}\n(no textual diff available — binary or too large)")
+        return "\n\n".join(chunks) if chunks else "(no file changes)"
+
+    def _handle_git_log(self, args: dict, **kwargs) -> str:
+        path = args.get("path", "") or ""
+        ref = args.get("ref", "") or ""
+        max_count = args.get("max_count", 15)
+        label = path or ref or "recent commits"
+        self._emit_tool_marker("git_log", label)
+
+        creds_err = self._github_creds_missing()
+        if creds_err:
+            return creds_err
+        try:
+            per_page = max(1, min(int(max_count or 15), 50))
+        except (TypeError, ValueError):
+            per_page = 15
+        params: dict = {"per_page": per_page}
+        if path:
+            params["path"] = path
+        if ref:
+            params["sha"] = ref
+        data, err = self._github_get("commits", params)
+        if err:
+            return err
+        if not isinstance(data, list) or not data:
+            scope = f" touching '{path}'" if path else ""
+            return f"No commits found{scope}."
+        lines = []
+        for c in data:
+            if not isinstance(c, dict):
+                continue
+            sha = (c.get("sha") or "")[:8]
+            commit = c.get("commit") or {}
+            author = commit.get("author") or {}
+            name = author.get("name", "?")
+            date = (author.get("date", "") or "")[:10]
+            message = (commit.get("message", "") or "").split("\n", 1)[0]
+            lines.append(f"{sha}  {date}  {name}: {message}")
+        scope = f" touching '{path}'" if path else ""
+        ref_note = f" from '{ref}'" if ref else ""
+        return _cap(f"Last {len(lines)} commit(s){scope}{ref_note}:\n" + "\n".join(lines))
+
+    def _handle_git_show(self, args: dict, **kwargs) -> str:
+        sha = args.get("sha", "") or ""
+        self._emit_tool_marker("git_show", sha)
+
+        creds_err = self._github_creds_missing()
+        if creds_err:
+            return creds_err
+        if not sha:
+            return "Error: 'sha' is required. Use a SHA from git_log."
+        data, err = self._github_get(f"commits/{quote(sha, safe='')}")
+        if err:
+            return err
+        if not isinstance(data, dict):
+            return f"Error: Unexpected response for commit '{sha}'."
+        commit = data.get("commit") or {}
+        author = commit.get("author") or {}
+        full_sha = data.get("sha", sha)
+        message = commit.get("message", "")
+        name = author.get("name", "?")
+        email = author.get("email", "")
+        date = author.get("date", "")
+        files = data.get("files") if isinstance(data.get("files"), list) else []
+        stats = data.get("stats") or {}
+        header = (
+            f"commit {full_sha}\n"
+            f"Author: {name} <{email}>\n"
+            f"Date:   {date}\n"
+            f"Files:  {len(files)} changed, +{stats.get('additions', 0)} -{stats.get('deletions', 0)}\n\n"
+            f"{message}\n"
+        )
+        return _cap(header + "\n" + self._format_commit_patch(files))
+
+    def _handle_git_diff(self, args: dict, **kwargs) -> str:
+        base = args.get("base", "") or ""
+        head = args.get("head", "") or ""
+        self._emit_tool_marker("git_diff", f"{base}...{head}" if base and head else "")
+
+        creds_err = self._github_creds_missing()
+        if creds_err:
+            return creds_err
+        if not base or not head:
+            return "Error: both 'base' and 'head' refs are required."
+        basehead = f"{quote(base, safe='')}...{quote(head, safe='')}"
+        data, err = self._github_get(f"compare/{basehead}")
+        if err:
+            return err
+        if not isinstance(data, dict):
+            return f"Error: Unexpected response comparing '{base}...{head}'."
+        status = data.get("status", "?")
+        ahead = data.get("ahead_by", 0)
+        behind = data.get("behind_by", 0)
+        total = data.get("total_commits", 0)
+        files = data.get("files") if isinstance(data.get("files"), list) else []
+        header = (
+            f"Comparing {base}...{head}\n"
+            f"Status: {status} (ahead {ahead}, behind {behind}), {total} commit(s), "
+            f"{len(files)} file(s) changed\n"
+        )
+        return _cap(header + "\n" + self._format_commit_patch(files))
+
     def _read_github_file(self, path: str) -> str:
         """Read a file from GitHub API."""
         if not self.github_pat or not self.owner or not self.name:
@@ -843,7 +1087,8 @@ class RepoToolProvider:
 
         return (
             f"You are working on the GitHub repository {repo_full}.\n"
-            "You have tools to read, edit, create, and delete files in this repo.\n\n"
+            "You have tools to read, edit, create, and delete files in this repo.\n"
+            "You can also inspect git history with git_log, git_show, and git_diff.\n\n"
             "RULES:\n"
             "- Do NOT ask the user clarifying questions. Explore the repo yourself.\n"
             "- If a tool call fails (404), try alternative paths before giving up.\n"

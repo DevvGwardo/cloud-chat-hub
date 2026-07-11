@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { type Request } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
@@ -42,6 +42,22 @@ const PROJECT_ROOT = join(__serverDirname, '..');
 
 // Re-export for external consumers
 export { shouldDirectProxyCompatibleProvider } from './lib/hermes';
+
+export function isLoopbackAddress(address: string | null | undefined): boolean {
+  if (!address) return false;
+  const normalized = address.toLowerCase();
+  if (normalized === 'localhost' || normalized === '::1' || normalized === '0:0:0:0:0:0:0:1') {
+    return true;
+  }
+  if (normalized.startsWith('::ffff:')) {
+    return isLoopbackAddress(normalized.slice('::ffff:'.length));
+  }
+  return normalized === '127.0.0.1' || normalized.startsWith('127.');
+}
+
+function isLoopbackRequest(req: Request): boolean {
+  return isLoopbackAddress(req.socket.remoteAddress);
+}
 
 export const HEALTH_ROUTES = [
   '/functions/v1/chat',
@@ -234,27 +250,30 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
     // key so scanning the code authenticates the phone in one step.
     const keyedTunnelUrl = (t: ReturnType<typeof getTunnelState>) =>
       t.url && t.accessToken ? `${t.url}/?key=${t.accessToken}` : t.url;
+    const publicTunnelUrl = (t: ReturnType<typeof getTunnelState>, req: Request) =>
+      isLoopbackRequest(req) ? keyedTunnelUrl(t) : t.url;
 
     // JSON endpoint for the frontend component
-    app.get('/api/remote/info', async (_req, res) => {
+    app.get('/api/remote/info', async (req, res) => {
       const ip = getLanIp();
       const port = Number(process.env.PORT || 3001);
       const { lanUrl, localUrl } = formatConnectionInfo(ip, port);
       const tunnelState = getTunnelState();
+      const tunnelUrl = publicTunnelUrl(tunnelState, req);
       // Use tunnel URL if available (works from anywhere), otherwise LAN URL
       const url = tunnelState.running && tunnelState.url
-        ? keyedTunnelUrl(tunnelState)!
+        ? tunnelUrl!
         : (ip ? lanUrl : localUrl);
       const qrSvg = await generateQrSvgDataUri(url);
-      sendJson(res, 200, { url, lanUrl, localUrl, qrSvg, tunnelUrl: keyedTunnelUrl(tunnelState) });
+      sendJson(res, 200, { url, lanUrl, localUrl, qrSvg, tunnelUrl });
     });
 
     // Tunnel management endpoints
-    app.get('/api/remote/tunnel/status', (_req, res) => {
+    app.get('/api/remote/tunnel/status', (req, res) => {
       const t = getTunnelState();
       sendJson(res, 200, {
         running: t.running,
-        url: keyedTunnelUrl(t),
+        url: publicTunnelUrl(t, req),
         provider: t.provider,
         error: t.error,
         cloudflaredAvailable: cloudflaredAvailable(),
@@ -262,17 +281,17 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
       });
     });
 
-    app.post('/api/remote/tunnel/start', async (_req, res) => {
+    app.post('/api/remote/tunnel/start', async (req, res) => {
       const port = Number(process.env.PORT || 3001);
       // If already running, return current state
       const current = getTunnelState();
       if (current.running) {
-        sendJson(res, 200, { ...current, url: keyedTunnelUrl(current), accessToken: undefined });
+        sendJson(res, 200, { ...current, url: publicTunnelUrl(current, req), accessToken: undefined });
         return;
       }
       // Try to start
       const result = await startTunnel(port);
-      sendJson(res, result.running ? 200 : 500, { ...result, url: keyedTunnelUrl(result), accessToken: undefined });
+      sendJson(res, result.running ? 200 : 500, { ...result, url: publicTunnelUrl(result, req), accessToken: undefined });
     });
 
     app.post('/api/remote/tunnel/stop', (_req, res) => {
