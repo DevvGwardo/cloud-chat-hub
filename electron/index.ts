@@ -792,8 +792,10 @@ app.on('window-all-closed', () => {
 // Electron's main process ignores it by default, which leaves the window up
 // and causes `concurrently` to hang waiting for us. Translate the signal
 // into a proper quit so `before-quit` cleanup runs and electron-vite exits.
+let isQuitting = false
 if (is.dev) {
   const quitOnSignal = (signal: NodeJS.Signals) => {
+    if (isQuitting) return
     console.log(`[electron] received ${signal}, quitting`)
     app.quit()
   }
@@ -802,12 +804,24 @@ if (is.dev) {
   process.once('SIGHUP', () => quitOnSignal('SIGHUP'))
 }
 
+// Swallow pino transport teardown noise so it never surfaces as a crash modal.
+// thread-stream emits (doesn't throw) when the worker is ending, which becomes
+// an uncaughtException if nothing handles the stream error.
+process.on('uncaughtException', (err) => {
+  const msg = err instanceof Error ? err.message : String(err)
+  if (/worker is ending|worker has exited/i.test(msg)) {
+    return
+  }
+  console.error('[electron] uncaughtException:', err)
+})
+
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
 })
 
 // Cleanup preview-manager child processes on quit
 app.on('before-quit', () => {
+  isQuitting = true
   // Destroy mini browser view
   if (miniBrowserView) {
     if (mainWindow) {
@@ -822,6 +836,15 @@ app.on('before-quit', () => {
   }
   terminals.clear()
   // Tear down the Hermes bridge cleanly
-  stopBridge()
-  process.emit('SIGINT', 'SIGINT')
+  try {
+    stopBridge()
+  } catch (err) {
+    console.warn('[electron] stopBridge failed:', err)
+  }
+  // Notify embedded server stores to close DBs without going through pino.
+  try {
+    process.emit('SIGTERM', 'SIGTERM')
+  } catch {
+    /* ignore */
+  }
 })

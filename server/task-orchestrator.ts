@@ -7,6 +7,11 @@ import { spawn } from 'node:child_process';
 
 import { teamCoordinator } from './team-coordinator';
 import { analyzeTask } from './team-formation';
+import {
+  resolveExecutionBackend,
+  type ExecutionBackend,
+  type ExecutionRoute,
+} from './team-formation-routing';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -236,24 +241,15 @@ async function tick(): Promise<void> {
           `[orchestrator] Dispatched card "${card.title}" (${card.id}) → conversation ${conversationId}`,
         );
 
-        // Check if this card should use team dispatch
+        // Route by formation strategy → execution backend
         const taskText = `${card.title} ${card.spec ?? ''}`;
         const formation = analyzeTask(taskText, []);
-        if (card.teamMode || formation.strategy !== 'single_agent') {
-          logger.info(`[orchestrator] Card "${card.title}" qualifies for team dispatch (strategy=${formation.strategy}, reason="${formation.reason}")`);
-          void dispatchAsTeam(card).catch((err) => {
-            logger.error(`[orchestrator] Team dispatch failed for card ${card.id}, reverting:`, err);
-            state.activeTasks.delete(card.id);
-            updateCardStatus(card.id, 'ready').catch(() => {});
-          });
-        } else {
-          // Spawn background agent process
-          if (!card.id) {
-            logger.warn(`[orchestrator] Cannot spawn agent: missing card ID`);
-          } else {
-            void spawnKanbanAgent(card.id);
-          }
-        }
+        const route = resolveExecutionBackend(formation, { teamMode: card.teamMode });
+        void dispatchByRoute(card, route, formation).catch((err) => {
+          logger.error(`[orchestrator] Dispatch failed for card ${card.id} (${route.backend}), reverting:`, err);
+          state.activeTasks.delete(card.id);
+          updateCardStatus(card.id, 'ready').catch(() => {});
+        });
       } catch (err) {
         logger.error(`[orchestrator] Failed to dispatch card ${card.id}: ${err instanceof Error ? err.message : 'Unknown error'}`);
         // Roll back: remove from active tasks, set card back to ready
@@ -280,12 +276,19 @@ const SCRIPTS_DIR = (() => {
 
 /**
  * Spawn a background kanban agent process for a specific card.
- * The agent runs via the Python runner script which loads AIAgent from
- * the hermes-agent and processes the card autonomously.
+ * The agent runs via the Python runner script which loads HermesAgentAdapter
+ * (real Hermes agent) and processes the card autonomously.
  * The agent uses kanban_tools (kanban_read_current_card, kanban_update_status,
  * kanban_append_report) to report progress back to the kanban API.
  */
-async function spawnKanbanAgent(cardId: string): Promise<void> {
+interface SpawnKanbanAgentOptions {
+  useWorktree?: boolean;
+  executionBackend?: ExecutionBackend;
+}
+
+async function spawnKanbanAgent(cardId: string, options: SpawnKanbanAgentOptions = {}): Promise<void> {
+  const useWorktree = options.useWorktree === true;
+  const executionBackend = options.executionBackend;
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const venvDir = process.env.HERMES_BRIDGE_VENV || (() => {
     const candidates = [
@@ -312,6 +315,9 @@ async function spawnKanbanAgent(cardId: string): Promise<void> {
       ...process.env,
       KANBAN_CARD_ID: cardId,
       CLOUDCHAT_API_BASE: API_BASE,
+      ...(useWorktree || process.env.HERMES_WORKTREE === '1' ? { HERMES_WORKTREE: '1' } : {}),
+      ...(executionBackend ? { FORMATION_EXECUTION_BACKEND: executionBackend } : {}),
+      ...(executionBackend === 'review_pipeline' ? { HERMES_EXECUTION_MODE: 'swarm' } : {}),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
@@ -346,6 +352,71 @@ async function spawnKanbanAgent(cardId: string): Promise<void> {
   child.on('error', (err: Error) => {
     logger.error(`[orchestrator] Failed to spawn kanban agent: ${err.message}`);
   });
+}
+
+// ─── Formation-routed dispatch ──────────────────────────────────────────────
+
+async function dispatchAsFleetSwarm(card: CardRecord, formation: ReturnType<typeof analyzeTask>): Promise<void> {
+  const goal = [card.title, card.spec].filter((s) => s && String(s).trim()).join(': ');
+  const body: Record<string, unknown> = { goal };
+  if (formation.recommendedAgents?.length) {
+    body.workers = formation.recommendedAgents;
+  }
+
+  logger.info(
+    `[orchestrator] Routing card "${card.title}" (${card.id.slice(0, 12)}...) → fleet_swarm`,
+  );
+
+  const res = await fetch(`${API_BASE}/api/hermes/kanban/swarm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(120_000),
+  });
+  const data = await res.json().catch(() => ({})) as { ok?: boolean; error?: string };
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || `Fleet swarm create failed (${res.status})`);
+  }
+
+  await fetch(`${API_BASE}/api/hermes/kanban/${card.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      status: 'done',
+      reportPath: 'Delegated to Hermes fleet swarm graph',
+    }),
+  });
+  state.activeTasks.delete(card.id);
+  state.stats.completed++;
+
+  logger.info(`[orchestrator] Fleet swarm created for card "${card.title}"`);
+}
+
+async function dispatchByRoute(
+  card: CardRecord,
+  route: ExecutionRoute,
+  formation: ReturnType<typeof analyzeTask>,
+  options?: SpawnKanbanAgentOptions,
+): Promise<void> {
+  logger.info(
+    `[orchestrator] Card "${card.title}" strategy=${route.strategy} → backend=${route.backend} (${route.reason})`,
+  );
+
+  switch (route.backend) {
+    case 'fleet_swarm':
+      await dispatchAsFleetSwarm(card, formation);
+      return;
+    case 'review_pipeline':
+      void spawnKanbanAgent(card.id, { ...options, executionBackend: 'review_pipeline' });
+      return;
+    case 'team_fanout':
+      await dispatchAsTeam(card);
+      return;
+    case 'agent_loop':
+    default:
+      void spawnKanbanAgent(card.id, options);
+      return;
+  }
 }
 
 // ─── Team dispatch helper ───────────────────────────────────────────────────
@@ -423,7 +494,7 @@ export const taskOrchestrator = {
    * Spawns a Python subprocess that runs the Hermes AIAgent with
    * kanban tools. Does NOT create a chat panel or use any chat UI.
    */
-  async dispatchCard(cardId: string): Promise<{ ok: boolean; error?: string }> {
+  async dispatchCard(cardId: string, options?: { useWorktree?: boolean }): Promise<{ ok: boolean; error?: string }> {
     // Already running in this process — treat as success
     if (state.activeTasks.has(cardId)) {
       return { ok: true };
@@ -470,25 +541,15 @@ export const taskOrchestrator = {
       // Mark card as running
       await updateCardStatus(cardId, 'running');
 
-      // Check if this card should use team dispatch
+      // Route by formation strategy → execution backend
       const taskText = `${card.title} ${card.spec ?? ''}`;
       const formation = analyzeTask(taskText, []);
-      if (card.teamMode || formation.strategy !== 'single_agent') {
-        logger.info(
-          `[orchestrator] Dispatching card "${card.title}" (${cardId.slice(0, 12)}...) → team dispatch (${formation.strategy})`,
-        );
-        void dispatchAsTeam(card).catch((err) => {
-          logger.error(`[orchestrator] Team dispatch failed for card ${cardId}, reverting:`, err);
-          state.activeTasks.delete(cardId);
-          updateCardStatus(cardId, 'ready').catch(() => {});
-        });
-      } else {
-        // Spawn the background agent process
-        logger.info(
-          `[orchestrator] Dispatching card "${card.title}" (${cardId.slice(0, 12)}...) → background agent`,
-        );
-        void spawnKanbanAgent(cardId);
-      }
+      const route = resolveExecutionBackend(formation, { teamMode: card.teamMode });
+      void dispatchByRoute(card, route, formation, { useWorktree: options?.useWorktree === true }).catch((err) => {
+        logger.error(`[orchestrator] Dispatch failed for card ${cardId} (${route.backend}), reverting:`, err);
+        state.activeTasks.delete(cardId);
+        updateCardStatus(cardId, 'ready').catch(() => {});
+      });
 
       return { ok: true };
     } catch (err) {

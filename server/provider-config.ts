@@ -316,6 +316,32 @@ export function resolveHermesExecutionMode(_options?: {
   return 'agent-loop';
 }
 
+const HERMES_RUNS_TRUTHY = new Set(['1', 'true', 'yes', 'on']);
+
+function isHermesRunsTruthy(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value === 'string') {
+    return HERMES_RUNS_TRUTHY.has(value.trim().toLowerCase());
+  }
+  return false;
+}
+
+/** Phase 7: opt-in gateway /v1/runs transport (default off). */
+export function resolveHermesUseRuns(options?: {
+  envEnabled?: boolean;
+  headerValue?: string | string[] | undefined;
+  bodyValue?: unknown;
+}): boolean {
+  if (options?.envEnabled) return true;
+  const header = options?.headerValue;
+  if (Array.isArray(header)) {
+    if (header.some((v) => isHermesRunsTruthy(v))) return true;
+  } else if (isHermesRunsTruthy(header)) {
+    return true;
+  }
+  return isHermesRunsTruthy(options?.bodyValue);
+}
+
 export function resolveRuntimeProvider(
   provider: string,
   _options?: { activeRepo?: unknown }

@@ -1,10 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { X, Eye, EyeOff, Search, Check, Zap, ChevronDown, ChevronRight, ArrowLeft, ExternalLink, Github, Code2, TerminalSquare, RefreshCw, LayoutGrid, BookOpen, Settings, Plus, Trash2, MessageSquare, ImagePlus, ShieldCheck } from 'lucide-react';
+import { X, Eye, EyeOff, Search, Check, Zap, ChevronDown, ChevronRight, ArrowLeft, ExternalLink, Github, Code2, TerminalSquare, RefreshCw, LayoutGrid, BookOpen, Settings, Plus, MessageSquare, ImagePlus, ShieldCheck } from 'lucide-react';
 import { useSettingsStore, type Provider, type Language } from '@/stores/settings-store';
 import { COLOR_THEMES, ACCENT_COLORS } from '@/lib/themes';
 import { ChatSurfaceBackground } from '@/components/chat/ChatSurfaceBackground';
 import { useHermesStore } from '@/stores/hermes-store';
-import { discoverMCPTools } from '@/lib/mcp-connect';
 import { fetchHermesProviders, fetchHermesSavedProviders, type HermesProviderInfo, type HermesSavedProvider } from '@/lib/hermes-api';
 import { useUIStore } from '@/stores/ui-store';
 import { PROVIDERS, PROVIDER_ORDER, CATEGORY_LABELS, getVisibleModelOptions } from '@/lib/providers';
@@ -19,6 +18,13 @@ import {
 import { getLocalProviderRuntimeDetails, parseLocalProviderRuntimeError } from '@/lib/local-provider-runtime';
 import MessagingTab from './MessagingTab';
 import CursorComposerTab from './CursorComposerTab';
+import { MoaSettingsPanel } from './MoaSettingsPanel';
+import { FallbackSettingsPanel } from './FallbackSettingsPanel';
+import { GoalsSettingsPanel } from './GoalsSettingsPanel';
+import { OpenClawMigratePanel } from './OpenClawMigratePanel';
+import { AuthPoolSettingsPanel } from './AuthPoolSettingsPanel';
+import { PortalSettingsPanel } from './PortalSettingsPanel';
+import { HermesMcpSettingsPanel } from './HermesMcpSettingsPanel';
 import { useTour } from '@reactour/tour';
 import { prepareUiForTour } from '@/components/tour/TourController';
 import packageJson from '../../../package.json';
@@ -696,10 +702,6 @@ export const SettingsModal: React.FC = () => {
     setSwarmEnabled: setHermesSwarmEnabled,
     underlyingProvider: hermesUnderlyingProvider,
     setUnderlyingProvider: setHermesUnderlyingProvider,
-    mcpServers,
-    addMCPServer,
-    removeMCPServer,
-    toggleMCPServer,
   } = useHermesStore();
 
   const [showKey, setShowKey] = useState(false);
@@ -738,49 +740,6 @@ export const SettingsModal: React.FC = () => {
   // Hermes underlying-provider catalog (providers + models the agent can route to)
   const [hermesProviders, setHermesProviders] = useState<HermesProviderInfo[]>([]);
   const [savedProviders, setSavedProviders] = useState<HermesSavedProvider[]>([]);
-
-  // MCP server management state
-  const [mcpAddOpen, setMcpAddOpen] = useState(false);
-  const [mcpName, setMcpName] = useState('');
-  const [mcpUrl, setMcpUrl] = useState('');
-  const [mcpApiKey, setMcpApiKey] = useState('');
-  const [mcpConnecting, setMcpConnecting] = useState<string | null>(null);
-  const [mcpError, setMcpError] = useState<string | null>(null);
-
-  const handleConnectMCP = useCallback(async (serverId: string, url: string, apiKey?: string) => {
-    setMcpConnecting(serverId);
-    setMcpError(null);
-    const tools = await discoverMCPTools({ serverId, url, apiKey });
-    if (tools === null) {
-      const server = useHermesStore.getState().mcpServers.find((s) => s.id === serverId);
-      setMcpError(server?.lastError ?? 'Connection failed');
-    }
-    setMcpConnecting(null);
-  }, []);
-
-  const handleAddMCPServer = useCallback(() => {
-    if (!mcpName.trim() || !mcpUrl.trim()) return;
-    const id = `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const url = mcpUrl.trim();
-    const apiKey = mcpApiKey.trim() || undefined;
-    addMCPServer({
-      id,
-      name: mcpName.trim(),
-      url,
-      apiKey,
-      enabled: true,
-      tools: [],
-      transportType: 'http',
-      connectionStatus: 'disconnected',
-      errorCount: 0,
-    });
-    setMcpName('');
-    setMcpUrl('');
-    setMcpApiKey('');
-    setMcpAddOpen(false);
-    // Auto-connect to discover tools
-    handleConnectMCP(id, url, apiKey);
-  }, [mcpName, mcpUrl, mcpApiKey, addMCPServer, handleConnectMCP]);
 
   // Animation state: tracks whether the modal is mounted and whether it's visually open
   const [mounted, setMounted] = useState(false);
@@ -1322,6 +1281,16 @@ export const SettingsModal: React.FC = () => {
                   </div>
                 )}
 
+                <AuthPoolSettingsPanel
+                  fieldLabelClass={fieldLabelClass}
+                  settingsCardClass={settingsCardClass}
+                />
+
+                <PortalSettingsPanel
+                  fieldLabelClass={fieldLabelClass}
+                  settingsCardClass={settingsCardClass}
+                />
+
                 {/* Add provider placeholder */}
                 <button className="rounded-[10px] h-[42px] border border-[#2a2a2a] border-dashed w-full text-[13px] text-[#555555] hover:text-[#888888] hover:border-[#444444] transition-colors duration-100">
                   + Add provider
@@ -1569,6 +1538,11 @@ export const SettingsModal: React.FC = () => {
                             { key: 'terminal' as const, label: 'Terminal Access', desc: 'Allows shell command execution on your machine', warn: true },
                             { key: 'files' as const, label: 'File Operations', desc: 'Allows reading and writing files on your machine', warn: true },
                             { key: 'code_execution' as const, label: 'Code Execution', desc: 'Allows running arbitrary code on your machine', warn: true },
+                            { key: 'delegation' as const, label: 'Task Delegation', desc: 'Spawn in-process Hermes subagents via delegate_task', warn: true },
+                            { key: 'clarify' as const, label: 'Clarifying Questions', desc: 'Let the agent ask targeted questions before acting' },
+                            { key: 'context_engine' as const, label: 'Context Engine', desc: 'Advanced Hermes context compaction and retrieval' },
+                            { key: 'video' as const, label: 'Video Analysis', desc: 'Analyze video files with video_analyze' },
+                            { key: 'video_gen' as const, label: 'Video Generation', desc: 'Generate video via external providers' },
                           ]).map(({ key, label, desc, warn }) => (
                             <div key={key} className="flex items-center justify-between">
                               <div>
@@ -1600,15 +1574,15 @@ export const SettingsModal: React.FC = () => {
                     {activeProvider === 'hermes' && (
                       <div className={cn(settingsCardClass, 'space-y-3 px-5 py-5')}>
                         <div>
-                          <p className={fieldLabelClass}>Swarm Pipeline</p>
+                          <p className={fieldLabelClass}>Review Pipeline</p>
                           <p className="mt-1 text-xs text-muted-foreground">
                             Run an Architect → Implementor → Reviewer pipeline for multi-step tasks.
-                            Each phase is a separate agent that plans, implements, then reviews changes.
+                            Prefer Mixture of Agents for multi-model quality on a single agent loop.
                           </p>
                         </div>
                         <div className="flex items-center justify-between">
                           <div>
-                            <div className="text-sm text-foreground">Enable Swarm Mode</div>
+                            <div className="text-sm text-foreground">Enable Review Pipeline</div>
                             <div className="text-xs text-muted-foreground">
                               {hermesSwarm.enabled
                                 ? 'Messages will run through the 3-phase pipeline'
@@ -1634,158 +1608,41 @@ export const SettingsModal: React.FC = () => {
                     )}
 
                     {activeProvider === 'hermes' && (
-                      <div className={cn(settingsCardClass, 'space-y-3 px-5 py-5')}>
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <p className={fieldLabelClass}>MCP Servers</p>
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              Connect external tool servers to extend agent capabilities.
-                            </p>
-                          </div>
-                          <button
-                            onClick={() => setMcpAddOpen(!mcpAddOpen)}
-                            className="flex items-center gap-1.5 rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:border-[#3a3a3a] transition-colors"
-                          >
-                            <Plus size={12} />
-                            Add
-                          </button>
-                        </div>
+                      <MoaSettingsPanel
+                        fieldLabelClass={fieldLabelClass}
+                        settingsCardClass={settingsCardClass}
+                        textInputClass={textInputClass}
+                      />
+                    )}
 
-                        {mcpAddOpen && (
-                          <div className="space-y-2 rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] p-3">
-                            <input
-                              value={mcpName}
-                              onChange={(e) => setMcpName(e.target.value)}
-                              placeholder="Server name"
-                              className={cn(textInputClass, 'text-xs')}
-                            />
-                            <input
-                              value={mcpUrl}
-                              onChange={(e) => setMcpUrl(e.target.value)}
-                              placeholder="Server URL (e.g. http://localhost:8080/mcp)"
-                              className={cn(textInputClass, 'text-xs font-mono')}
-                            />
-                            <input
-                              value={mcpApiKey}
-                              onChange={(e) => setMcpApiKey(e.target.value)}
-                              placeholder="API key (optional)"
-                              type="password"
-                              className={cn(textInputClass, 'text-xs')}
-                            />
-                            <div className="flex gap-2 pt-1">
-                              <button
-                                onClick={handleAddMCPServer}
-                                disabled={!mcpName.trim() || !mcpUrl.trim()}
-                                className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-40 transition-colors"
-                              >
-                                Add & Connect
-                              </button>
-                              <button
-                                onClick={() => { setMcpAddOpen(false); setMcpName(''); setMcpUrl(''); setMcpApiKey(''); }}
-                                className="rounded-md border border-[#2a2a2a] px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          </div>
-                        )}
+                    {activeProvider === 'hermes' && (
+                      <FallbackSettingsPanel
+                        fieldLabelClass={fieldLabelClass}
+                        settingsCardClass={settingsCardClass}
+                        textInputClass={textInputClass}
+                      />
+                    )}
 
-                        {mcpError && (
-                          <p className="text-xs text-red-400">{mcpError}</p>
-                        )}
+                    {activeProvider === 'hermes' && (
+                      <GoalsSettingsPanel
+                        fieldLabelClass={fieldLabelClass}
+                        settingsCardClass={settingsCardClass}
+                        textInputClass={textInputClass}
+                      />
+                    )}
 
-                        {mcpServers.length === 0 && !mcpAddOpen && (
-                          <p className="text-xs text-muted-foreground/60 py-2">
-                            No MCP servers configured. Add one to give the agent extra tools.
-                          </p>
-                        )}
+                    {activeProvider === 'hermes' && (
+                      <OpenClawMigratePanel
+                        fieldLabelClass={fieldLabelClass}
+                        settingsCardClass={settingsCardClass}
+                      />
+                    )}
 
-                        <div className="space-y-2">
-                          {mcpServers.map((server) => (
-                            <div key={server.id} className="rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-3 py-2.5">
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <span
-                                    className={cn(
-                                      'inline-block h-2 w-2 shrink-0 rounded-full',
-                                      server.connectionStatus === 'connected' && 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.45)]',
-                                      server.connectionStatus === 'connecting' && 'bg-amber-500 animate-pulse',
-                                      server.connectionStatus === 'disconnected' && 'bg-muted-foreground/40',
-                                      server.connectionStatus === 'error' && 'bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.45)]',
-                                    )}
-                                  />
-                                  <div className="min-w-0">
-                                    <div className="flex items-center gap-2">
-                                      <span className="text-sm text-foreground truncate">{server.name}</span>
-                                      <span className="text-[9px] uppercase tracking-wider text-muted-foreground/40">
-                                        {server.transportType === 'http' ? 'HTTP' : 'STDIO'}
-                                      </span>
-                                    </div>
-                                    <div className="text-[10px] font-mono text-muted-foreground/60 truncate">{server.url}</div>
-                                  </div>
-                                </div>
-                                <div className="flex items-center gap-2 shrink-0">
-                                  <span className={cn(
-                                    'text-[10px] font-medium',
-                                    server.connectionStatus === 'connected' ? 'text-emerald-400/70' :
-                                    server.connectionStatus === 'error' ? 'text-red-400/70' :
-                                    'text-muted-foreground'
-                                  )}>
-                                    {server.tools.length} tool{server.tools.length !== 1 ? 's' : ''}
-                                  </span>
-                                  <button
-                                    onClick={() => handleConnectMCP(server.id, server.url, server.apiKey)}
-                                    disabled={mcpConnecting === server.id}
-                                    className="text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
-                                    title="Refresh tools"
-                                  >
-                                    <RefreshCw size={12} className={mcpConnecting === server.id ? 'animate-spin' : ''} />
-                                  </button>
-                                  <button
-                                    onClick={() => toggleMCPServer(server.id)}
-                                    className={cn(
-                                      toggleTrackClass,
-                                      server.enabled ? 'bg-primary' : 'bg-border'
-                                    )}
-                                  >
-                                    <span
-                                      className={cn(
-                                        toggleThumbClass,
-                                        server.enabled ? 'translate-x-[20px]' : 'translate-x-[3px]'
-                                      )}
-                                    />
-                                  </button>
-                                  <button
-                                    onClick={() => removeMCPServer(server.id)}
-                                    className="text-muted-foreground hover:text-red-400 transition-colors"
-                                    title="Remove server"
-                                  >
-                                    <Trash2 size={12} />
-                                  </button>
-                                </div>
-                              </div>
-                              {server.lastError && (
-                                <div className="mt-2 rounded-md border border-red-500/20 bg-red-500/8 px-2 py-1.5 text-[10px] text-red-300/80">
-                                  {server.lastError}
-                                </div>
-                              )}
-                              {server.tools.length > 0 && (
-                                <div className="mt-2 flex flex-wrap gap-1">
-                                  {server.tools.map((tool) => (
-                                    <span
-                                      key={tool.name}
-                                      className="inline-block rounded-md bg-[#1a1a1a] border border-[#2a2a2a] px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground"
-                                      title={tool.description}
-                                    >
-                                      {tool.name}
-                                    </span>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
+                    {activeProvider === 'hermes' && (
+                      <HermesMcpSettingsPanel
+                        fieldLabelClass={fieldLabelClass}
+                        settingsCardClass={settingsCardClass}
+                      />
                     )}
 
                     {activeProvider !== 'hermes' && activeProvider !== 'openclaw' && (

@@ -39,6 +39,7 @@ interface ProfilesState {
   createProfile: (name: string, cloneFrom?: string) => Promise<void>;
   deleteProfile: (name: string) => Promise<void>;
   fetchProfileDetail: (name: string) => Promise<void>;
+  updateProfileConfig: (name: string, content: string) => Promise<void>;
   getProfilesForRoomSelection: () => Profile[];
 }
 
@@ -124,12 +125,49 @@ export const useProfilesStore = create<ProfilesState>()(
       fetchProfileDetail: async (name: string) => {
         set({ detailLoading: true, selectedProfile: name });
         try {
-          const data = await apiFetch(`/api/hermes/profiles/${encodeURIComponent(name)}/detail`);
-          set({ profileDetail: data, detailLoading: false });
+          const encoded = encodeURIComponent(name);
+          const [detail, configRes, envRes] = await Promise.all([
+            apiFetch(`/api/hermes/profiles/${encoded}/detail`),
+            apiFetch(`/api/hermes/profiles/${encoded}/config`),
+            apiFetch(`/api/hermes/profiles/${encoded}/env`),
+          ]);
+
+          const config = (detail.config ?? configRes.parsed ?? {}) as Record<string, unknown>;
+          const envKeys: string[] = [];
+          if (envRes.exists && typeof envRes.content === 'string') {
+            for (const line of envRes.content.split('\n')) {
+              const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=/);
+              if (match) envKeys.push(match[1]);
+            }
+          }
+
+          const profileDetail: ProfileDetail = {
+            name: detail.name,
+            path: detail.path,
+            provider: String(config.provider ?? ''),
+            model: String(config.model ?? ''),
+            configYaml: configRes.content ?? '',
+            hasEnv: detail.hasEnv,
+            envKeys,
+            skillCount: detail.skillCount,
+            sessionCount: detail.sessionCount,
+            skills: Array.isArray(detail.skills) ? detail.skills : [],
+          };
+          set({ profileDetail, detailLoading: false });
         } catch (e) {
           console.error('Failed to fetch profile detail:', e);
           set({ detailLoading: false, profileDetail: null });
         }
+      },
+
+      updateProfileConfig: async (name: string, content: string) => {
+        const encoded = encodeURIComponent(name);
+        await apiFetch(`/api/hermes/profiles/${encoded}/config`, {
+          method: 'PUT',
+          body: JSON.stringify({ content }),
+        });
+        await get().fetchProfileDetail(name);
+        await get().fetchProfiles();
       },
 
       getProfilesForRoomSelection: () => {

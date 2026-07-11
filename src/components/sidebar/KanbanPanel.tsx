@@ -1,9 +1,11 @@
 import { useEffect, useState, useMemo, useRef } from 'react';
-import { Loader2, Play, Plus, Trash2, Columns3, Square, ExternalLink, Maximize2 } from 'lucide-react';
+import { Loader2, Play, Plus, Trash2, Columns3, Square, ExternalLink, Maximize2, Network, GitBranch } from 'lucide-react';
 import { useKanbanStore, type KanbanLane } from '@/stores/kanban-store';
+import { useHermesStore } from '@/stores/hermes-store';
 import { useUIStore } from '@/stores/ui-store';
 import { useTaskOrchestratorStore } from '@/stores/task-orchestrator-store';
 import { getApiBaseUrl } from '@/lib/api';
+import { createKanbanSwarm } from '@/lib/hermes-api';
 import { cn } from '@/lib/utils';
 import { toast } from '@/lib/toast';
 
@@ -65,6 +67,11 @@ export function KanbanPanel() {
   const [dispatching, setDispatching] = useState<Set<string>>(new Set());
   const [dispatched, setDispatched] = useState<Set<string>>(new Set());
   const [changingStatus, setChangingStatus] = useState<string | null>(null);
+  const [swarmBusy, setSwarmBusy] = useState(false);
+  const [swarmOpen, setSwarmOpen] = useState(false);
+  const [swarmGoal, setSwarmGoal] = useState('');
+  const useWorktree = useHermesStore((s) => s.useWorktree);
+  const setUseWorktree = useHermesStore((s) => s.setUseWorktree);
 
   useEffect(() => {
     fetchCards();
@@ -150,6 +157,7 @@ export function KanbanPanel() {
       const res = await fetch(`${getApiBaseUrl()}/api/hermes/orchestrator/dispatch-card/${encodeURIComponent(cardId)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ useWorktree }),
       });
 
       if (!res.ok) {
@@ -175,32 +183,127 @@ export function KanbanPanel() {
     }
   };
 
+  const handleSwarm = async () => {
+    const goal = swarmGoal.trim();
+    if (!goal) {
+      toast.error('Enter a fleet swarm goal');
+      return;
+    }
+    setSwarmBusy(true);
+    try {
+      const res = await createKanbanSwarm({ goal });
+      if (!res.ok) {
+        toast.error(res.error || 'Fleet swarm create failed');
+      } else {
+        toast.success('Fleet swarm created');
+        setSwarmGoal('');
+        setSwarmOpen(false);
+        await fetchCards();
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Fleet swarm create failed');
+    } finally {
+      setSwarmBusy(false);
+    }
+  };
+
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2">
-        <div className="flex items-center gap-1.5">
-          <span className="text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
-            Kanban
+        <div className="flex min-w-0 flex-col">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Kanban
+            </span>
+            <span className="text-[11px] font-mono text-muted-foreground/50">{cards.length}</span>
+          </div>
+          <span className="truncate text-[9px] font-mono text-muted-foreground/45">
+            Hermes ~/.hermes/kanban.db
           </span>
-          <span className="text-[11px] font-mono text-muted-foreground/50">{cards.length}</span>
         </div>
         <div className="flex items-center gap-1.5">
           <button
+            type="button"
+            onClick={() => setUseWorktree(!useWorktree)}
+            title="Isolated git worktree for this agent run"
+            aria-pressed={useWorktree}
+            className={cn(
+              'inline-flex min-h-8 items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors',
+              useWorktree
+                ? 'border-primary/40 bg-primary/10 text-primary'
+                : 'border-border/40 text-muted-foreground/70 hover:border-border/70 hover:text-foreground',
+            )}
+          >
+            <GitBranch className="h-3 w-3" />
+            Worktree
+          </button>
+          <button
+            type="button"
+            onClick={() => setSwarmOpen((o) => !o)}
+            disabled={swarmBusy}
+            title="Create fleet swarm — Hermes multi-profile graph"
+            aria-expanded={swarmOpen}
+            className="inline-flex min-h-8 items-center gap-1 rounded-md border border-border/40 px-2 py-1 text-[11px] font-medium text-muted-foreground/70 transition-colors hover:border-border/70 hover:text-foreground disabled:opacity-50"
+          >
+            {swarmBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Network className="h-3 w-3" />}
+            Fleet swarm
+          </button>
+          <button
+            type="button"
             onClick={() => setKanbanFullscreen(true)}
             title="Open full board"
-            className="inline-flex items-center gap-1 rounded-md border border-border/40 px-1.5 py-0.5 text-[9px] font-medium text-muted-foreground/60 transition-colors hover:border-border/70 hover:text-foreground"
+            className="inline-flex min-h-8 items-center gap-1 rounded-md border border-border/40 px-2 py-1 text-[11px] font-medium text-muted-foreground/70 transition-colors hover:border-border/70 hover:text-foreground"
           >
-            <Maximize2 className="h-2.5 w-2.5" />
+            <Maximize2 className="h-3 w-3" />
             Board
           </button>
           <OrchestratorToggle />
         </div>
       </div>
 
+      {swarmOpen && (
+        <div className="px-3 pb-2">
+          <div className="rounded-md border border-border/40 bg-background/40 p-2 space-y-1.5">
+            <label className="text-[10px] uppercase tracking-wide text-muted-foreground/60">
+              Fleet board goal
+            </label>
+            <input
+              value={swarmGoal}
+              onChange={(e) => setSwarmGoal(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void handleSwarm();
+                if (e.key === 'Escape') setSwarmOpen(false);
+              }}
+              placeholder="e.g. Harden auth and add tests"
+              className="w-full rounded-md border border-border/40 bg-background/60 px-2 py-1.5 text-[12px] outline-none placeholder:text-muted-foreground/35 focus:border-primary/30"
+              autoFocus
+            />
+            <div className="flex justify-end gap-1.5">
+              <button
+                type="button"
+                onClick={() => setSwarmOpen(false)}
+                className="rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSwarm()}
+                disabled={swarmBusy || !swarmGoal.trim()}
+                className="rounded-md border border-primary/40 bg-primary/10 px-2 py-1 text-[11px] font-medium text-foreground disabled:opacity-50"
+              >
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="px-3 pb-2">
         <div className="rounded-lg border border-border/40 bg-background/30 px-2.5 py-2 text-[10px] leading-relaxed text-muted-foreground/65">
-          Cards are local planning items. Use <span className="font-medium text-foreground/75">Run</span> to dispatch as a background agent task.
+          Native Hermes board (shared SQLite). Use <span className="font-medium text-foreground/75">Run</span> for
+          Spark dispatch or <span className="font-medium text-foreground/75">Fleet swarm</span> for Hermes multi-profile graph.
         </div>
       </div>
 

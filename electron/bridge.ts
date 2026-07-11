@@ -362,11 +362,16 @@ export async function startBridge(): Promise<BridgeStartResult> {
 
     console.log(`[bridge] spawning ${python} ${join(source, 'main.py')}`)
 
+    // Share the launch token with the in-process Node server so admin proxies
+    // can authenticate when the bridge is bound beyond loopback.
+    process.env.HERMES_BRIDGE_TOKEN = BRIDGE_TOKEN
+
     bridgeProcess = spawn(python, ['main.py'], {
       cwd: source,
       env: {
         ...process.env,
         HERMES_PORT: String(BRIDGE_PORT),
+        HERMES_BRIDGE_HOST: process.env.HERMES_BRIDGE_HOST || '127.0.0.1',
         HERMES_BRIDGE_TOKEN: BRIDGE_TOKEN,
         HERMES_BRIDGE_VERSION: app.getVersion(),
         // Ensure the bridge can find its lazily-installed deps.

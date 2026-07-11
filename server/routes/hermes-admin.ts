@@ -1,14 +1,62 @@
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { logger } from '../lib/logger';
-import type { Express, Request, Response } from 'express';
-import { sendJson } from '../lib/helpers';
+import type { Express, NextFunction, Request, Response } from 'express';
+import { isSocketLoopback, sendJson } from '../lib/helpers';
 import { getProfileFromRequest } from '../lib/hermes-profiles';
 
 // Admin/health endpoints live at the bridge root, not under /v1 (which only
 // serves OpenAI-compatible chat). Strip a trailing /v1 so these proxies work
 // whether HERMES_BRIDGE_URL is configured with or without it.
 const HERMES_BRIDGE_URL = (process.env.HERMES_BRIDGE_URL || 'http://localhost:3002').replace(/\/v1\/?$/, '');
+
+/** Paths that mutate Hermes home / run installers — local UI + tunnel only. */
+const DESTRUCTIVE_HERMES_OPS = new Set([
+  'PUT /api/hermes/moa',
+  'PUT /api/hermes/fallback',
+  'PUT /api/hermes/goals',
+  'PUT /api/hermes/tool-search',
+  'POST /api/hermes/checkpoints/prune',
+  'POST /api/hermes/checkpoints/restore',
+  'POST /api/hermes/curator/run',
+  'POST /api/hermes/computer-use/install',
+  'POST /api/hermes/pets/select',
+  'POST /api/hermes/bundles/create',
+  'POST /api/hermes/bundles/delete',
+  'POST /api/hermes/bundles/reload',
+  'POST /api/hermes/plugins/enable',
+  'POST /api/hermes/plugins/disable',
+  'POST /api/hermes/claw/migrate',
+  'POST /api/hermes/kanban/swarm',
+  'POST /api/hermes/projects',
+  'POST /api/hermes/projects/use',
+  'POST /api/hermes/projects/bind-board',
+  'POST /api/hermes/auth/pool/reset',
+  'POST /api/hermes/auth/pool/remove',
+  'POST /api/hermes/auth/pool/add',
+  'POST /api/hermes/portal/oauth/start',
+]);
+
+function requireLocalHermesMutation(req: Request, res: Response, next: NextFunction): void {
+  const key = `${req.method.toUpperCase()} ${req.path}`;
+  if (!DESTRUCTIVE_HERMES_OPS.has(key)) {
+    next();
+    return;
+  }
+  // Tunnel traffic terminates on loopback after the Host-based token gate in
+  // createApp. LAN clients connecting directly have a non-loopback socket.
+  if (isSocketLoopback(req)) {
+    next();
+    return;
+  }
+  logger.warn(`[hermes-admin] blocked non-local mutating request: ${key}`);
+  sendJson(res, 403, { error: 'This Hermes operation is only available from the local app or an authenticated tunnel.' });
+}
+
+function bridgeAuthHeaders(): Record<string, string> {
+  const token = (process.env.HERMES_BRIDGE_TOKEN || '').trim();
+  return token ? { 'X-Hermes-Bridge-Token': token } : {};
+}
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -74,6 +122,7 @@ async function proxyTo(
       headers: {
         'Content-Type': 'application/json',
         'X-Hermes-Profile': profile,
+        ...bridgeAuthHeaders(),
         ...options?.headers,
       },
     });
@@ -169,6 +218,9 @@ export function registerHermesAdminRoute(app: Express) {
       : ''
   );
 
+  // Local/tunnel-only gate for destructive Hermes ops (LAN clients blocked).
+  app.use(requireLocalHermesMutation);
+
   // ─── Health / Detection ───────────────────────────────────────────────
   // Same-origin proxy for bridge detection so the frontend never has to reach
   // the bridge directly. A phone loading the app over LAN/tunnel can't resolve
@@ -187,6 +239,293 @@ export function registerHermesAdminRoute(app: Express) {
 
   app.get('/api/hermes/providers', async (req: Request, res: Response) => {
     await proxyTo(req, res, '/v1/providers');
+  });
+
+  // ─── Mixture of Agents ─────────────────────────────────────────────────
+
+  app.get('/api/hermes/moa', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/moa');
+  });
+
+  app.put('/api/hermes/moa', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/moa', {
+      method: 'PUT',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  // ─── Ops: fallback, checkpoints, memory, curator, goals, … ─────────────
+
+  app.get('/api/hermes/fallback', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/fallback');
+  });
+
+  app.put('/api/hermes/fallback', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/fallback', {
+      method: 'PUT',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  app.get('/api/hermes/checkpoints', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/checkpoints');
+  });
+
+  app.post('/api/hermes/checkpoints/prune', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/checkpoints/prune', { method: 'POST', body: '{}' });
+  });
+
+  app.post('/api/hermes/checkpoints/restore', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/checkpoints/restore', {
+      method: 'POST',
+      body: JSON.stringify(req.body ?? {}),
+    });
+  });
+
+  app.get('/api/hermes/memory/status', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/memory/status');
+  });
+
+  app.get('/api/hermes/curator/status', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/curator/status');
+  });
+
+  app.post('/api/hermes/curator/run', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/curator/run', { method: 'POST', body: '{}' });
+  });
+
+  app.get('/api/hermes/computer-use/status', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/computer-use/status');
+  });
+
+  app.get('/api/hermes/bundles', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/bundles');
+  });
+
+  app.get('/api/hermes/bundles/:name', async (req: Request, res: Response) => {
+    const name = encodeURIComponent(String(req.params.name || ''));
+    await proxyTo(req, res, `/bundles/${name}`);
+  });
+
+  app.post('/api/hermes/bundles/create', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/bundles/create', {
+      method: 'POST',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  app.post('/api/hermes/bundles/delete', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/bundles/delete', {
+      method: 'POST',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  app.post('/api/hermes/bundles/reload', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/bundles/reload', { method: 'POST', body: '{}' });
+  });
+
+  app.get('/api/hermes/dashboard/url', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/dashboard/url');
+  });
+
+  app.get('/api/hermes/goals', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/goals');
+  });
+
+  app.put('/api/hermes/goals', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/goals', {
+      method: 'PUT',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  app.get('/api/hermes/tool-search', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/tool-search');
+  });
+
+  app.put('/api/hermes/tool-search', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/tool-search', {
+      method: 'PUT',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  app.get('/api/hermes/insights', async (req: Request, res: Response) => {
+    await proxyTo(req, res, `/insights${getQuerySuffix(req)}`);
+  });
+
+  app.get('/api/hermes/journey', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/journey');
+  });
+
+  app.post('/api/hermes/computer-use/install', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/computer-use/install', { method: 'POST', body: '{}' });
+  });
+
+  app.get('/api/hermes/computer-use/doctor', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/computer-use/doctor');
+  });
+
+  app.get('/api/hermes/pets', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/pets');
+  });
+
+  app.get('/api/hermes/pets/gallery', async (req: Request, res: Response) => {
+    await proxyTo(req, res, `/pets/gallery${getQuerySuffix(req)}`);
+  });
+
+  app.post('/api/hermes/pets/select', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/pets/select', {
+      method: 'POST',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  app.get('/api/hermes/plugins', async (req: Request, res: Response) => {
+    await proxyTo(req, res, `/plugins${getQuerySuffix(req)}`);
+  });
+
+  app.post('/api/hermes/plugins/enable', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/plugins/enable', {
+      method: 'POST',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  app.post('/api/hermes/plugins/disable', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/plugins/disable', {
+      method: 'POST',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  app.get('/api/hermes/hooks', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/hooks');
+  });
+
+  app.get('/api/hermes/hooks/doctor', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/hooks/doctor');
+  });
+
+  app.get('/api/hermes/lsp/status', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/lsp/status');
+  });
+
+  app.post('/api/hermes/claw/migrate', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/claw/migrate', {
+      method: 'POST',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  app.get('/api/hermes/gateway/capabilities', async (req: Request, res: Response) => {
+    await proxyTo(req, res, `/gateway/capabilities${getQuerySuffix(req)}`);
+  });
+
+  app.post('/api/hermes/kanban/swarm', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/kanban/swarm', {
+      method: 'POST',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  app.get('/api/hermes/projects', async (req: Request, res: Response) => {
+    await proxyTo(req, res, `/projects${getQuerySuffix(req)}`);
+  });
+
+  app.post('/api/hermes/projects', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/projects', {
+      method: 'POST',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  app.post('/api/hermes/projects/use', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/projects/use', {
+      method: 'POST',
+      body: JSON.stringify(req.body ?? {}),
+    });
+  });
+
+  app.post('/api/hermes/projects/bind-board', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/projects/bind-board', {
+      method: 'POST',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  app.get('/api/hermes/security/audit', async (req: Request, res: Response) => {
+    await proxyTo(req, res, `/security/audit${getQuerySuffix(req)}`);
+  });
+
+  app.get('/api/hermes/secrets/status', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/secrets/status');
+  });
+
+  // ─── Auth credential pool (hermes auth) ─────────────────────────────────
+
+  app.get('/api/hermes/auth/pool', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/auth/pool');
+  });
+
+  app.get('/api/hermes/auth/pool/:provider/status', async (req: Request, res: Response) => {
+    await proxyTo(req, res, `/auth/pool/${encodeURIComponent(req.params.provider)}/status`);
+  });
+
+  app.post('/api/hermes/auth/pool/reset', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/auth/pool/reset', {
+      method: 'POST',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  app.post('/api/hermes/auth/pool/remove', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/auth/pool/remove', {
+      method: 'POST',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  app.post('/api/hermes/auth/pool/add', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/auth/pool/add', {
+      method: 'POST',
+      body: JSON.stringify(req.body),
+    });
+  });
+
+  // ─── Nous Portal (hermes portal) ─────────────────────────────────────────
+
+  app.get('/api/hermes/portal/info', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/portal/info');
+  });
+
+  app.get('/api/hermes/portal/status', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/portal/status');
+  });
+
+  app.get('/api/hermes/portal/tools', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/portal/tools');
+  });
+
+  app.get('/api/hermes/portal/open-url', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/portal/open-url');
+  });
+
+  app.get('/api/hermes/portal/open', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/portal/open');
+  });
+
+  app.post('/api/hermes/portal/oauth/start', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/portal/oauth/start', { method: 'POST' });
+  });
+
+  app.get('/api/hermes/portal/oauth/poll/:sessionId', async (req: Request, res: Response) => {
+    await proxyTo(
+      req,
+      res,
+      `/portal/oauth/poll/${encodeURIComponent(req.params.sessionId)}`,
+    );
   });
 
   // ─── Cron Jobs ──────────────────────────────────────────────────────────
@@ -246,6 +585,13 @@ export function registerHermesAdminRoute(app: Express) {
   app.delete('/api/hermes/sessions/:id', async (req: Request, res: Response) => {
     await proxyTo(req, res, `/sessions/${encodeURIComponent(req.params.id)}`, {
       method: 'DELETE',
+    });
+  });
+
+  app.post('/api/hermes/sessions/:id/fork', async (req: Request, res: Response) => {
+    await proxyTo(req, res, `/sessions/${encodeURIComponent(req.params.id)}/fork`, {
+      method: 'POST',
+      body: JSON.stringify(req.body ?? {}),
     });
   });
 
@@ -367,6 +713,10 @@ export function registerHermesAdminRoute(app: Express) {
   // Live MCP dashboard telemetry (status, metrics, activity) and per-server logs.
   app.get('/api/hermes/workspace/mcp-telemetry', async (req: Request, res: Response) => {
     await proxyTo(req, res, '/workspace/mcp-telemetry');
+  });
+
+  app.get('/api/hermes/workspace/mcp-tool-index', async (req: Request, res: Response) => {
+    await proxyTo(req, res, '/workspace/mcp-tool-index');
   });
 
   app.get('/api/hermes/workspace/mcp-servers/:name/logs', async (req: Request, res: Response) => {

@@ -498,6 +498,7 @@ const headerSecondaryLabel = selectedCronJobId
           baseRepo={prActiveRepo.baseName}
           baseBranch={prActiveRepo.defaultBranch}
           files={pendingFiles}
+          localRepoPath={prActiveRepo?.localPath ?? null}
           initialPullRequest={prModalMode === 'review' ? prPullRequest : null}
           onPullRequestCreated={handlePullRequestCreated}
           onSuccess={handlePrSuccess}

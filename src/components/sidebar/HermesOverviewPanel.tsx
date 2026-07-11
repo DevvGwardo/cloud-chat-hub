@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Activity, Check, Code2, Database, Loader2, Orbit, RefreshCw, Rocket, Sparkles, X } from 'lucide-react';
-import { fetchHermesWorkspaceOverview, type HermesWorkspaceOverview } from '@/lib/hermes-api';
+import { Activity, Check, Code2, Database, ExternalLink, Loader2, Orbit, RefreshCw, Rocket, Sparkles, X } from 'lucide-react';
+import { fetchHermesDashboardUrl, fetchHermesWorkspaceOverview, type HermesWorkspaceOverview } from '@/lib/hermes-api';
+import { openExternalUrl } from '@/lib/open-external';
 import { relativeTime } from '@/lib/relative-time';
 import { formatCompactNumber, formatBytes } from '@/components/sidebar/hermesSidebarUtils';
 import { SlotNumber } from '@/components/ui/SlotNumber';
@@ -17,6 +18,7 @@ export function HermesOverviewPanel() {
   const [overview, setOverview] = useState<HermesWorkspaceOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [dashboardUrl, setDashboardUrl] = useState('http://127.0.0.1:9119');
 
   const loadOverview = async () => {
     setLoading(true);
@@ -33,6 +35,11 @@ export function HermesOverviewPanel() {
 
   useEffect(() => {
     void loadOverview();
+    void fetchHermesDashboardUrl()
+      .then((dash) => {
+        if (dash.ok && dash.url) setDashboardUrl(dash.url);
+      })
+      .catch(() => undefined);
   }, []);
 
   if (loading && !overview) {
@@ -61,13 +68,24 @@ export function HermesOverviewPanel() {
             {overview?.hermes_home ?? '~/.hermes'}
           </p>
         </div>
-        <button
-          onClick={() => { void loadOverview(); }}
-          className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground/60 transition-colors hover:bg-[hsl(var(--sidebar-active))] hover:text-foreground"
-          title="Refresh overview"
-        >
-          <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => openExternalUrl(dashboardUrl)}
+            className="inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[10px] text-muted-foreground/60 transition-colors hover:bg-[hsl(var(--sidebar-active))] hover:text-foreground"
+            title="Open Hermes dashboard"
+          >
+            <ExternalLink className="h-3 w-3" />
+            Dashboard
+          </button>
+          <button
+            onClick={() => { void loadOverview(); }}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground/60 transition-colors hover:bg-[hsl(var(--sidebar-active))] hover:text-foreground"
+            title="Refresh overview"
+          >
+            <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
+          </button>
+        </div>
       </div>
 
       {error && (

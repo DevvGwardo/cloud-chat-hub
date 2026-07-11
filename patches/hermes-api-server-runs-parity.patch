@@ -1,0 +1,188 @@
+diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
+index 5ba09d674..23076409c 100644
+--- a/gateway/platforms/api_server.py
++++ b/gateway/platforms/api_server.py
+@@ -109,6 +109,44 @@ _TRUE_REQUEST_BOOL_STRINGS = frozenset({"1", "true", "yes", "on"})
+ _FALSE_REQUEST_BOOL_STRINGS = frozenset({"0", "false", "no", "off"})
+ 
+ 
++def _validate_run_cwd(cwd: str) -> Optional[str]:
++    """Validate an absolute existing directory for /v1/runs cwd override.
++
++    Rejects relative paths, missing directories, and any ``..`` segment.
++    """
++    raw = str(cwd or "").strip()
++    if not raw:
++        return None
++    try:
++        path = Path(raw).expanduser()
++        if not path.is_absolute():
++            return None
++        if any(part == ".." for part in path.parts):
++            return None
++        resolved = path.resolve(strict=True)
++        if not resolved.is_dir():
++            return None
++        return str(resolved)
++    except (OSError, ValueError):
++        return None
++
++
++def _parse_run_toolsets(body: Dict[str, Any]) -> Optional[List[str]]:
++    """Parse enabled_toolsets / toolsets from a /v1/runs request body."""
++    raw = body.get("enabled_toolsets")
++    if raw is None:
++        raw = body.get("toolsets")
++    if raw is None:
++        return None
++    if isinstance(raw, str):
++        items = [part.strip() for part in raw.split(",") if part.strip()]
++    elif isinstance(raw, list):
++        items = [str(item).strip() for item in raw if str(item).strip()]
++    else:
++        return None
++    return sorted(set(items)) if items else None
++
++
+ def _coerce_request_bool(value: Any, default: bool = False) -> bool:
+     """Normalize boolean-like API payload values.
+ 
+@@ -1241,6 +1279,9 @@ class APIServerAdapter(BasePlatformAdapter):
+         tool_complete_callback=None,
+         gateway_session_key: Optional[str] = None,
+         route: Optional[Dict[str, Any]] = None,
++        enabled_toolsets_override: Optional[List[str]] = None,
++        provider_override: Optional[str] = None,
++        reasoning_config_override: Optional[Dict[str, Any]] = None,
+     ) -> Any:
+         """
+         Create an AIAgent instance using the gateway's runtime config.
+@@ -1273,7 +1314,11 @@ class APIServerAdapter(BasePlatformAdapter):
+         from hermes_cli.tools_config import _get_platform_tools
+ 
+         runtime_kwargs = _resolve_runtime_agent_kwargs()
+-        reasoning_config = GatewayRunner._load_reasoning_config()
++        reasoning_config = (
++            reasoning_config_override
++            if reasoning_config_override is not None
++            else GatewayRunner._load_reasoning_config()
++        )
+         model = _resolve_gateway_model()
+ 
+         # When the primary provider's auth fails (expired token / 429 quota
+@@ -1333,8 +1378,34 @@ class APIServerAdapter(BasePlatformAdapter):
+                 gateway_session_key or session_id,
+             )
+ 
++        provider_override_name = str(provider_override or "").strip().lower()
++        if provider_override_name and provider_override_name not in {"auto", "default"}:
++            if not session_override:
++                try:
++                    from gateway.run import _resolve_runtime_agent_kwargs_for_provider
++
++                    provider_kwargs = _resolve_runtime_agent_kwargs_for_provider(
++                        provider_override_name
++                    )
++                    provider_kwargs.pop("model", None)
++                    runtime_kwargs.update(provider_kwargs)
++                except Exception:
++                    runtime_kwargs["provider"] = provider_override_name
++                logger.debug(
++                    "api_server provider override applied: provider=%s",
++                    runtime_kwargs.get("provider"),
++                )
++            else:
++                logger.debug(
++                    "api_server provider override skipped: session /model override wins for %s",
++                    gateway_session_key or session_id,
++                )
++
+         user_config = _load_gateway_config()
+-        enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
++        if enabled_toolsets_override:
++            enabled_toolsets = sorted(enabled_toolsets_override)
++        else:
++            enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+ 
+         max_iterations = _current_max_iterations()
+ 
+@@ -1493,6 +1564,8 @@ class APIServerAdapter(BasePlatformAdapter):
+                 "run_events_sse": True,
+                 "run_stop": True,
+                 "run_approval_response": True,
++                "runs_parity": True,
++                "spark_runs_overrides": True,
+                 "tool_progress_events": True,
+                 "approval_events": True,
+                 "session_resources": True,
+@@ -3992,6 +4065,7 @@ class APIServerAdapter(BasePlatformAdapter):
+         chat_id: str = "",
+         session_key: str = "",
+         session_id: str = "",
++        cwd: str = "",
+     ) -> list:
+         """Bind session contextvars for an API-server agent run.
+ 
+@@ -4015,6 +4089,7 @@ class APIServerAdapter(BasePlatformAdapter):
+             chat_id=chat_id,
+             session_key=session_key,
+             session_id=session_id,
++            cwd=cwd,
+             async_delivery=False,
+         )
+ 
+@@ -4285,6 +4360,36 @@ class APIServerAdapter(BasePlatformAdapter):
+         # Per-client model routing for /v1/runs (see model_routes).
+         route = self._resolve_route(body.get("model"))
+ 
++        cwd_raw = body.get("cwd")
++        if cwd_raw is None:
++            cwd_raw = body.get("working_directory")
++        run_cwd: Optional[str] = None
++        if cwd_raw is not None:
++            run_cwd = _validate_run_cwd(str(cwd_raw))
++            if run_cwd is None:
++                return web.json_response(
++                    _openai_error(
++                        "Invalid 'cwd' / 'working_directory': must be an absolute "
++                        "existing directory without '..'"
++                    ),
++                    status=400,
++                )
++
++        run_toolsets = _parse_run_toolsets(body)
++
++        run_provider: Optional[str] = None
++        raw_provider = body.get("provider")
++        if raw_provider is not None:
++            provider_name = str(raw_provider).strip().lower()
++            if provider_name and provider_name not in {"auto", "default"}:
++                run_provider = provider_name
++
++        run_reasoning_config: Optional[Dict[str, Any]] = None
++        if "reasoning_effort" in body:
++            from hermes_constants import parse_reasoning_effort
++
++            run_reasoning_config = parse_reasoning_effort(body.get("reasoning_effort"))
++
+         async def _run_and_close():
+             try:
+                 self._set_run_status(run_id, "running")
+@@ -4295,6 +4400,9 @@ class APIServerAdapter(BasePlatformAdapter):
+                     tool_progress_callback=event_cb,
+                     gateway_session_key=gateway_session_key,
+                     route=route,
++                    enabled_toolsets_override=run_toolsets,
++                    provider_override=run_provider,
++                    reasoning_config_override=run_reasoning_config,
+                 )
+                 self._active_run_agents[run_id] = agent
+ 
+@@ -4343,6 +4451,7 @@ class APIServerAdapter(BasePlatformAdapter):
+                         approval_token = set_current_session_key(approval_session_key)
+                         session_tokens = self._bind_api_server_session(
+                             session_key=approval_session_key,
++                            cwd=run_cwd or "",
+                         )
+                         register_gateway_notify(approval_session_key, _approval_notify)
+                         r = agent.run_conversation(

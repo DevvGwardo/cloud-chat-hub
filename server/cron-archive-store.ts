@@ -1,4 +1,3 @@
-import { logger } from './lib/logger';
 import type express from 'express';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
@@ -99,8 +98,18 @@ export function registerCronArchiveRoutes(app: express.Express) {
   const shutdown = () => {
     if (isShuttingDown) return;
     isShuttingDown = true;
-    try { logger.info('[cron-archive] Closing database connection'); } catch { /* logger already closed */ }
-    store.close();
+    // Don't use pino here — Electron quit can already be tearing the transport down.
+    try {
+      // eslint-disable-next-line no-console
+      console.log('[cron-archive] Closing database connection');
+    } catch {
+      /* ignore */
+    }
+    try {
+      store.close();
+    } catch {
+      /* already closed */
+    }
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

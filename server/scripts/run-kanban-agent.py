@@ -3,9 +3,9 @@
 Kanban Background Agent Runner
 
 Spawned as a subprocess by the Node.js server to run a kanban card
-as a background agent task. Uses the hermes-bridge AIAgent which has
-kanban tools (kanban_read_current_card, kanban_update_status,
-kanban_append_report) registered so the agent can report back.
+as a background agent task. Uses HermesAgentAdapter (real Hermes agent)
+with CloudChat kanban/team tools registered against the Express API so
+the agent can report back.
 
 Usage:
     KANBAN_CARD_ID=<uuid> CLOUDCHAT_API_BASE=http://localhost:3001 \
@@ -57,6 +57,157 @@ def _api_fetch(path: str, method: str = "GET", body: dict | None = None) -> dict
     return None
 
 
+def _register_fleet_tools(registry) -> None:
+    """Override native kanban.db handlers with CloudChat Express API tools."""
+    from kanban_tools import (
+        KANBAN_TOOL_DEFINITIONS,
+        kanban_read_current_card,
+        kanban_update_status,
+        kanban_append_report,
+        kanban_show,
+        kanban_complete,
+        kanban_block,
+        kanban_heartbeat,
+        kanban_comment,
+        kanban_list,
+        kanban_create,
+        kanban_link,
+        kanban_unblock,
+    )
+    from team_tools import (
+        TEAM_TOOL_DEFINITIONS,
+        team_delegate_to_agent,
+        team_report_progress,
+        team_query_context,
+        team_publish_finding,
+        team_request_help,
+        team_signal_completion,
+    )
+
+    native_kanban = {
+        "kanban_show",
+        "kanban_complete",
+        "kanban_block",
+        "kanban_heartbeat",
+        "kanban_comment",
+        "kanban_list",
+        "kanban_create",
+        "kanban_link",
+        "kanban_unblock",
+    }
+
+    kanban_handlers = {
+        "kanban_read_current_card": lambda _args: kanban_read_current_card(),
+        "kanban_update_status": lambda args: kanban_update_status(
+            args.get("status", ""),
+            args.get("report_summary"),
+        ),
+        "kanban_append_report": lambda args: kanban_append_report(args.get("notes", "")),
+        "kanban_show": lambda _args: kanban_show(),
+        "kanban_complete": lambda args: kanban_complete(
+            args.get("summary", ""),
+            args.get("metadata"),
+            args.get("artifacts"),
+        ),
+        "kanban_block": lambda args: kanban_block(args.get("reason", "")),
+        "kanban_heartbeat": lambda args: kanban_heartbeat(args.get("note")),
+        "kanban_comment": lambda args: kanban_comment(
+            args.get("task_id"),
+            args.get("body", ""),
+        ),
+        "kanban_list": lambda args: kanban_list(
+            args.get("assignee"),
+            args.get("status"),
+            args.get("limit", 50),
+        ),
+        "kanban_create": lambda args: kanban_create(
+            args.get("title", ""),
+            args.get("assignee", ""),
+            args.get("body"),
+            args.get("parents"),
+            args.get("skills"),
+        ),
+        "kanban_link": lambda args: kanban_link(
+            args.get("parent_id", ""),
+            args.get("child_id", ""),
+        ),
+        "kanban_unblock": lambda args: kanban_unblock(args.get("task_id", "")),
+    }
+
+    kanban_count = 0
+    for tool_def in KANBAN_TOOL_DEFINITIONS:
+        fn_spec = tool_def["function"]
+        name = fn_spec["name"]
+        handler = kanban_handlers.get(name)
+        if handler is None:
+            continue
+        registry.register(
+            name=name,
+            toolset="kanban",
+            schema=fn_spec,
+            handler=handler,
+            check_fn=lambda: True,
+            override=name in native_kanban,
+            emoji="📋",
+        )
+        kanban_count += 1
+
+    team_handlers = {
+        "team_delegate_to_agent": lambda args: team_delegate_to_agent(
+            args.get("agent_name", ""),
+            args.get("subtask", ""),
+            args.get("context", ""),
+        ),
+        "team_report_progress": lambda args: team_report_progress(
+            args.get("summary", ""),
+            args.get("blockers"),
+        ),
+        "team_query_context": lambda args: team_query_context(
+            args.get("query_str", ""),
+            args.get("tags"),
+        ),
+        "team_publish_finding": lambda args: team_publish_finding(
+            args.get("title", ""),
+            args.get("content", ""),
+            args.get("tags", []),
+            args.get("importance", 2),
+        ),
+        "team_request_help": lambda args: team_request_help(
+            args.get("question", ""),
+            args.get("target_agent"),
+        ),
+        "team_signal_completion": lambda args: team_signal_completion(
+            args.get("final_summary", ""),
+        ),
+    }
+
+    team_count = 0
+    for tool_def in TEAM_TOOL_DEFINITIONS:
+        fn_spec = tool_def["function"]
+        name = fn_spec["name"]
+        handler = team_handlers.get(name)
+        if handler is None:
+            continue
+        registry.register(
+            name=name,
+            toolset="team",
+            schema=fn_spec,
+            handler=handler,
+            check_fn=lambda: bool(TEAM_ID),
+            emoji="👥",
+        )
+        team_count += 1
+
+    if team_count:
+        registry.register_toolset_alias("team", "team")
+
+    print(
+        f"[kanban-runner] Registered {kanban_count} kanban + {team_count} team "
+        "fleet tools (Express API)",
+        flush=True,
+    )
+
+
 def _get_card() -> dict | None:
     """Fetch the kanban card by ID."""
     data = _api_fetch("/api/hermes/kanban?status=")
@@ -86,7 +237,7 @@ def main():
     # 2. Set env var so kanban_tools can find the card
     os.environ["KANBAN_CARD_ID"] = KANBAN_CARD_ID
 
-    # 3. Import the hermes-bridge AIAgent (has kanban tools baked in)
+    # 3. Import HermesAgentAdapter (real Hermes agent — one brain policy)
     bridge_dir = os.environ.get(
         "HERMES_BRIDGE_DIR",
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "hermes-bridge"),
@@ -96,12 +247,14 @@ def main():
         sys.path.insert(0, bridge_dir)
 
     try:
-        from run_agent import AIAgent
-        print("[kanban-runner] Loaded hermes-bridge AIAgent", flush=True)
+        from hermes_adapter import HermesAgentAdapter, registry
+        print("[kanban-runner] Loaded HermesAgentAdapter", flush=True)
     except Exception as e:
-        print(f"[kanban-runner] ERROR loading AIAgent: {e}", flush=True)
+        print(f"[kanban-runner] ERROR loading HermesAgentAdapter: {e}", flush=True)
         traceback.print_exc()
         sys.exit(1)
+
+    _register_fleet_tools(registry)
 
     # 4. Look up the LLM provider config from hermes config
     config_path = os.path.expanduser("~/.hermes/config.yaml")
@@ -166,6 +319,22 @@ def main():
             except Exception as clone_err:
                 print(f"[kanban-runner] Clone error: {clone_err}", flush=True)
                 work_dir = None
+
+    # Optional: branch into an isolated git worktree (matches hermes --worktree)
+    wt_info = None
+    if os.environ.get("HERMES_WORKTREE", "").strip().lower() in ("1", "true", "yes"):
+        try:
+            from worktree_support import maybe_setup_worktree, cleanup_worktree
+
+            wt_root = work_dir or os.getcwd()
+            wt_info = maybe_setup_worktree(wt_root)
+            if wt_info:
+                work_dir = wt_info.get("path") or work_dir
+                print(f"[kanban-runner] Worktree active: {work_dir}", flush=True)
+            else:
+                print("[kanban-runner] HERMES_WORKTREE set but worktree setup failed", flush=True)
+        except Exception as wt_err:
+            print(f"[kanban-runner] Worktree setup error: {wt_err}", flush=True)
 
     # 6. Build the system prompt from card
     system_prompt_lines = [
@@ -233,6 +402,12 @@ def main():
             "- team_request_help — ask for help from another agent",
             "- team_signal_completion — signal your subtask is done (use this instead of kanban_complete)",
         ])
+    exec_backend = os.environ.get("FORMATION_EXECUTION_BACKEND", "").strip()
+    if exec_backend == "review_pipeline":
+        system_prompt_lines.extend([
+            "",
+            "Execution mode: review_pipeline — work in architect → implementor → reviewer phases.",
+        ])
     system_prompt_lines.extend([
         "",
         "When you complete the task, call kanban_complete with a summary of what was accomplished."
@@ -273,8 +448,8 @@ def main():
             toolsets.append("team")
         print(f"[kanban-runner] Using toolsets: {toolsets}", flush=True)
 
-        print(f"[kanban-runner] Creating AIAgent (model={llm_model})...", flush=True)
-        agent = AIAgent(
+        print(f"[kanban-runner] Creating HermesAgentAdapter (model={llm_model})...", flush=True)
+        agent = HermesAgentAdapter(
             base_url=llm_base_url,
             api_key=llm_api_key,
             model=llm_model,
@@ -324,6 +499,13 @@ def main():
             body={"status": "blocked", "reportPath": f"Agent error: {str(e)}"},
         )
         sys.exit(1)
+    finally:
+        if wt_info:
+            try:
+                from worktree_support import cleanup_worktree
+                cleanup_worktree(wt_info)
+            except Exception as wt_cleanup_err:
+                print(f"[kanban-runner] Worktree cleanup error: {wt_cleanup_err}", flush=True)
 
     print(f"[kanban-runner] Done processing card {KANBAN_CARD_ID[:12]}...", flush=True)
 

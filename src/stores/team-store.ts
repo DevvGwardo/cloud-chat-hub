@@ -44,6 +44,7 @@ export interface Team {
   subtasks: Subtask[];
   context: ContextEntry[];
   delegations: Delegation[];
+  needsRecovery?: boolean;
 }
 
 // ─── API response type helpers ──────────────────────────────────────────────
@@ -104,6 +105,7 @@ interface ApiTeamDetail {
   status: string;
   sharedContext: Record<string, unknown>;
   createdAt: number;
+  needsRecovery?: boolean;
 }
 
 // ─── Mapping helpers ────────────────────────────────────────────────────────
@@ -237,6 +239,7 @@ function mapTeamDetail(api: ApiTeamDetail): Team {
     subtasks: (api.subtasks ?? []).map(mapSubtask),
     context: [],
     delegations: (api.delegations ?? []).map(mapDelegation),
+    needsRecovery: Boolean(api.needsRecovery),
   };
 }
 
@@ -335,6 +338,7 @@ export const useTeamStore = create<TeamState>()((set, get) => ({
         subtasks: (t.subtasks ?? []).map(mapSubtask),
         context: [],
         delegations: (t.delegations ?? []).map(mapDelegation),
+        needsRecovery: Boolean(t.needsRecovery),
       };
       set((s) => ({ teams: [...s.teams, team] }));
       return team;

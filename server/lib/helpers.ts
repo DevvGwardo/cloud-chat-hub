@@ -154,3 +154,17 @@ export function getClientIp(req: express.Request): string {
     || req.socket?.remoteAddress
     || 'unknown';
 }
+
+/**
+ * True when the TCP peer is loopback. Prefer this over getClientIp() for
+ * local-only gates — X-Forwarded-For is forgeable when trust proxy is on.
+ */
+export function isSocketLoopback(req: express.Request): boolean {
+  const addr = (req.socket?.remoteAddress || '').toLowerCase();
+  return (
+    addr === '127.0.0.1'
+    || addr === '::1'
+    || addr === '::ffff:127.0.0.1'
+    || addr.endsWith('127.0.0.1')
+  );
+}

@@ -1,5 +1,37 @@
 import { describe, expect, it } from 'vitest';
-import { formatMissingRepoFileError } from '@/hooks/chat-utils';
+import {
+  formatFallbackSwitchToast,
+  formatMissingRepoFileError,
+  isFallbackSwitchData,
+  parseFallbackSwitchDelta,
+} from '@/hooks/chat-utils';
+
+describe('chat-utils fallback switch', () => {
+  it('parses structured fallback_switch deltas', () => {
+    expect(parseFallbackSwitchDelta({ provider: 'openai', model: 'gpt-4.1-mini' })).toEqual({
+      provider: 'openai',
+      model: 'gpt-4.1-mini',
+    });
+  });
+
+  it('rejects in-progress switch payloads without provider/model', () => {
+    expect(parseFallbackSwitchDelta({ type: 'fallback_switch' })).toBeNull();
+    expect(parseFallbackSwitchDelta(null)).toBeNull();
+  });
+
+  it('formats toast copy', () => {
+    expect(formatFallbackSwitchToast({ provider: 'deepseek', model: 'deepseek-v4-flash' })).toBe(
+      'Switched to deepseek/deepseek-v4-flash',
+    );
+  });
+
+  it('recognizes normalized proxy data items', () => {
+    expect(
+      isFallbackSwitchData({ type: 'fallback_switch', provider: 'openrouter', model: 'anthropic/claude-sonnet-4' }),
+    ).toBe(true);
+    expect(isFallbackSwitchData({ type: 'agent_status', status: { label: 'x' } })).toBe(false);
+  });
+});
 
 describe('chat-utils repo path recovery', () => {
   it('prefers examples from the same top-level area for missing repo paths', () => {

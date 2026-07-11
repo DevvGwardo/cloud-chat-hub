@@ -1,4 +1,7 @@
+import { execFileSync } from 'node:child_process';
 import { formatDataStreamPart } from 'ai';
+import { existsSync } from 'fs';
+import { isAbsolute, join } from 'path';
 import { getManagedRepoClone } from '../repo-clone-manager';
 import { OPENAI_COMPATIBLE } from '../provider-config';
 
@@ -41,6 +44,46 @@ export function isValidGitHubPAT(pat: unknown): pat is string {
   // Fine-grained tokens (github_pat_) can exceed 255 chars, so no upper bound
   // Token body accepts alphanumeric, dots, underscores, and hyphens
   return /^(ghp_|github_pat_|gho_|ghs_|ghr_)[a-zA-Z0-9._-]+$/.test(pat.trim());
+}
+
+/** Absolute path to a git checkout the server may use for local-only repo workflows. */
+export function resolveAttachedLocalRepoPath(rawPath: unknown): string | null {
+  if (typeof rawPath !== 'string') {
+    return null;
+  }
+
+  const normalizedPath = rawPath.trim();
+  if (!normalizedPath || !isAbsolute(normalizedPath)) {
+    return null;
+  }
+
+  return existsSync(join(normalizedPath, '.git')) ? normalizedPath : null;
+}
+
+/** True when `git remote get-url origin` points at github.com/{owner}/{repo}. */
+export function localRepoMatchesGithub(repoPath: string, owner: string, repo: string): boolean {
+  try {
+    validateGitHubIdentifier(owner, 'owner');
+    validateGitHubIdentifier(repo, 'repo');
+  } catch {
+    return false;
+  }
+  try {
+    const remote = execFileSync('git', ['-C', repoPath, 'remote', 'get-url', 'origin'], {
+      encoding: 'utf8',
+      timeout: 5_000,
+    }).trim().toLowerCase();
+    const expected = `${owner}/${repo}`.toLowerCase();
+    return (
+      remote.includes(`github.com/${expected}`)
+      || remote.includes(`github.com:${expected}`)
+      || remote.endsWith(`/${expected}.git`)
+      || remote.endsWith(`:${expected}.git`)
+      || remote.endsWith(`/${expected}`)
+    );
+  } catch {
+    return false;
+  }
 }
 
 export interface GitHubRepoPayload {

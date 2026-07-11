@@ -10,6 +10,16 @@ export interface HermesToolsets {
   terminal: boolean;
   files: boolean;
   code_execution: boolean;
+  /** Hermes in-process subagents via delegate_task */
+  delegation: boolean;
+  /** Ask clarifying questions before acting */
+  clarify: boolean;
+  /** Hermes context-engine toolset (advanced context compaction) */
+  context_engine?: boolean;
+  /** Analyze video files (video_analyze) */
+  video?: boolean;
+  /** Generate video via external providers */
+  video_gen?: boolean;
 }
 
 /** A single tool exposed by an MCP server. */
@@ -103,6 +113,7 @@ export const HERMES_REASONING_EFFORTS: HermesReasoningEffort[] = [
 
 interface HermesState {
   toolsets: HermesToolsets;
+  /** Legacy Spark-side MCP list (Settings modal). Hermes chat uses config.yaml via the bridge. */
   mcpServers: MCPServer[];
   swarm: SwarmState;
   /** Loop mode state, keyed by panel id so each chat loops independently. */
@@ -145,8 +156,19 @@ interface HermesState {
   bumpMCPServerError: (id: string, error: string) => void;
   resetMCPServerErrors: (id: string) => void;
 
-  /** Build the custom tool definitions for all enabled MCP servers. */
+  /**
+   * Build custom tool definitions from the legacy Spark zustand MCP list (Settings modal).
+   * Hermes chat uses config.yaml MCP via the bridge — not this path.
+   */
   getCustomToolDefinitions: () => CustomToolDefinition[];
+
+  /** When true, Hermes chat runs in an isolated git worktree (local repo required). */
+  useWorktree: boolean;
+  setUseWorktree: (enabled: boolean) => void;
+
+  /** Phase 7: opt-in gateway /v1/runs transport (default off). */
+  useRuns: boolean;
+  setUseRuns: (enabled: boolean) => void;
 
   /** Loop mode controls — scoped per panel id. */
   getLoop: (panelId: string) => LoopState;
@@ -174,6 +196,11 @@ const defaultToolsets: HermesToolsets = {
   terminal: true,
   files: true,
   code_execution: true,
+  delegation: true,
+  clarify: true,
+  context_engine: false,
+  video: false,
+  video_gen: false,
 };
 
 export const DEFAULT_LOOP_STATE: LoopState = {
@@ -204,6 +231,8 @@ export const useHermesStore = create<HermesState>()(
       underlyingProvider: '',
       followAgentModel: true,
       reasoningEffort: 'medium',
+      useWorktree: false,
+      useRuns: false,
 
       setToolset: (key, enabled) =>
         set((state) => ({
@@ -218,6 +247,12 @@ export const useHermesStore = create<HermesState>()(
 
       setReasoningEffort: (effort) =>
         set(() => ({ reasoningEffort: effort })),
+
+      setUseWorktree: (enabled) =>
+        set(() => ({ useWorktree: enabled })),
+
+      setUseRuns: (enabled) =>
+        set(() => ({ useRuns: enabled })),
 
       getEnabledToolsets: () => {
         const ts = get().toolsets;
@@ -410,6 +445,8 @@ export const useHermesStore = create<HermesState>()(
         underlyingProvider: state.underlyingProvider,
         followAgentModel: state.followAgentModel,
         reasoningEffort: state.reasoningEffort,
+        useWorktree: state.useWorktree,
+        useRuns: state.useRuns,
       }),
       merge: (persisted, current) => {
         const merged = { ...current, ...(persisted as Partial<HermesState>) };
@@ -417,6 +454,8 @@ export const useHermesStore = create<HermesState>()(
         // state is now per-panel under `loops`).
         delete (merged as Record<string, unknown>).loop;
         if (!merged.loops) merged.loops = {};
+        // Ensure new toolset keys default on for existing installs
+        merged.toolsets = { ...defaultToolsets, ...(merged.toolsets || {}) };
         // Backward compatibility: ensure MCP servers have new required fields
         if (merged.mcpServers) {
           merged.mcpServers = merged.mcpServers.map((s) => ({

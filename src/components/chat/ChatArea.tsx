@@ -5,6 +5,7 @@ import { MessageBubble } from './MessageBubble';
 import { ChatInput } from './ChatInput';
 import { ContextualSuggestions } from './ContextualSuggestions';
 import { ActivityIndicator } from './ActivityIndicator';
+import { ComputerUseDock } from './ComputerUseDock';
 import { AgentTaskPanel } from './AgentTaskPanel';
 import { VerificationGhostOverlay } from './VerificationGhostOverlay';
 import type { AgentStatusEvent } from '@/hooks/useChat';
@@ -38,6 +39,7 @@ import {
 import { getContextUsage } from '@/lib/tokens';
 import type { QueuedMessage } from '@/lib/chat-queue';
 import type { ToolActivityEvent } from './AgentActivity';
+import type { ComputerUseDockState } from '@/lib/computer-use-dock';
 import { useActivityStore } from '@/stores/activity-store';
 import { useSettingsStore } from '@/stores/settings-store';
 import { useChatStore } from '@/stores/chat-store';
@@ -470,12 +472,17 @@ interface ChatAreaProps {
   activeModel: string;
   toolActivityMap?: Record<string, ToolActivityEvent[]>;
   agentStatus?: AgentStatusEvent | null;
+  computerUseDock?: ComputerUseDockState;
+  onComputerUseDockExpand?: () => void;
+  onComputerUseDockCollapse?: () => void;
   conversationAutoApproveEnabled?: boolean;
   setConversationAutoApprove?: (value: boolean) => void;
   /** Buddy/secondary model response for comparison after Hermes completes */
   buddyResponse?: BuddyResponse | null;
   /** Callback when user wants to use the buddy response */
   onUseBuddyResponse?: (content: string) => void;
+  /** Disable @file:/@folder:/@diff/@url: autocomplete (room chat). */
+  contextRefsEnabled?: boolean;
 }
 
 export const ChatArea: React.FC<ChatAreaProps> = ({
@@ -499,10 +506,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   activeModel,
   toolActivityMap,
   agentStatus,
+  computerUseDock,
+  onComputerUseDockExpand,
+  onComputerUseDockCollapse,
   conversationAutoApproveEnabled = false,
   setConversationAutoApprove,
   buddyResponse,
   onUseBuddyResponse,
+  contextRefsEnabled = true,
 }) => {
   const panelId = usePanelId();
   const scopeId = useChatScopeId();
@@ -1068,6 +1079,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           <div className="mx-auto mt-2 w-full max-w-[720px] pb-3">
             {errorBanner}
             <VerificationGhostOverlay />
+            {computerUseDock && onComputerUseDockExpand && onComputerUseDockCollapse ? (
+              <ComputerUseDock
+                state={computerUseDock}
+                isStreaming={isStreaming}
+                onExpand={onComputerUseDockExpand}
+                onCollapse={onComputerUseDockCollapse}
+              />
+            ) : null}
             <ActivityIndicator
               isStreaming={isStreaming}
               messages={messages}
@@ -1096,6 +1115,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               onRemoveQueuedMessage={handleRemoveQueuedMessage}
               onSteerQueuedMessage={handleSteerQueuedMessage}
               onSendContent={handleQuickSend}
+              contextRefsEnabled={contextRefsEnabled}
             />
           </div>
         </div>
@@ -1153,6 +1173,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           }}
         />
         <div className="mx-auto w-full max-w-[720px] px-3 md:px-20">
+          {computerUseDock && onComputerUseDockExpand && onComputerUseDockCollapse ? (
+            <ComputerUseDock
+              state={computerUseDock}
+              isStreaming={isStreaming}
+              onExpand={onComputerUseDockExpand}
+              onCollapse={onComputerUseDockCollapse}
+            />
+          ) : null}
           <AgentTaskPanel events={panelToolActivity} />
         </div>
         <ChatInput
@@ -1174,6 +1202,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           onRemoveQueuedMessage={handleRemoveQueuedMessage}
           onSteerQueuedMessage={handleSteerQueuedMessage}
           onSendContent={handleQuickSend}
+          contextRefsEnabled={contextRefsEnabled}
         />
       </div>
       {modal}

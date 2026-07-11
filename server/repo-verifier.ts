@@ -66,7 +66,8 @@ export type OnVerificationProgress = (event: VerificationProgressEvent) => void;
 export interface VerifyRepoChangesInput {
   owner: string;
   repo: string;
-  pat: string;
+  pat?: string;
+  localRepoPath?: string;
   baseBranch: string;
   files: VerificationFileChange[];
   provider?: string;
@@ -533,28 +534,49 @@ export async function verifyRepoChanges(input: VerifyRepoChangesInput): Promise<
   const dir = await mkdtemp(join(tmpdir(), 'cloudchat-verify-'));
   activeTempDirs.add(dir);
 
-  const cloneUrl = `https://github.com/${input.owner}/${input.repo}.git`;
-  const authHeader = `Authorization: Basic ${Buffer.from(`x-access-token:${input.pat}`).toString('base64')}`;
-  const cloneSpec: ValidationCommandSpec = {
-    name: 'clone',
-    command: 'git',
-    args: ['clone', '--depth', '1', '--branch', input.baseBranch, cloneUrl, '.'],
-    displayCommand: `git clone --depth 1 --branch ${input.baseBranch} https://github.com/${input.owner}/${input.repo}.git .`,
-    redactions: [input.pat, authHeader],
-  };
+  const localRepoPath = input.localRepoPath?.trim() || '';
+  const pat = input.pat?.trim() || '';
 
-  // Pass auth via environment variables to keep the PAT out of process args.
-  const cloneEnv: Record<string, string> = {
-    GIT_CONFIG_COUNT: '1',
-    GIT_CONFIG_KEY_0: 'http.extraHeader',
-    GIT_CONFIG_VALUE_0: authHeader,
-  };
+  let cloneSpec: ValidationCommandSpec;
+  let cloneEnv: Record<string, string> = {};
+  let cloneProgressDetail = 'Pulling the base branch into a clean workspace.';
+
+  if (localRepoPath) {
+    cloneSpec = {
+      name: 'clone',
+      command: 'git',
+      args: ['clone', '--depth', '1', '--branch', input.baseBranch, localRepoPath, '.'],
+      displayCommand: `git clone --depth 1 --branch ${input.baseBranch} ${localRepoPath} .`,
+    };
+    cloneProgressDetail = 'Copying the attached local checkout into a clean workspace.';
+  } else if (pat) {
+    const cloneUrl = `https://github.com/${input.owner}/${input.repo}.git`;
+    const authHeader = `Authorization: Basic ${Buffer.from(`x-access-token:${pat}`).toString('base64')}`;
+    cloneSpec = {
+      name: 'clone',
+      command: 'git',
+      args: ['clone', '--depth', '1', '--branch', input.baseBranch, cloneUrl, '.'],
+      displayCommand: `git clone --depth 1 --branch ${input.baseBranch} https://github.com/${input.owner}/${input.repo}.git .`,
+      redactions: [pat, authHeader],
+    };
+    cloneEnv = {
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'http.extraHeader',
+      GIT_CONFIG_VALUE_0: authHeader,
+    };
+  } else {
+    throw new Error('A GitHub PAT or local repository checkout is required to run verification.');
+  }
 
   const emit = input.onProgress ?? (() => {});
 
   try {
     const commands: VerificationCommandResult[] = [];
-    emit({ step: 'cloning', label: 'Cloning repository snapshot', detail: 'Pulling the base branch into a clean workspace.' });
+    emit({
+      step: 'cloning',
+      label: localRepoPath ? 'Preparing local repository snapshot' : 'Cloning repository snapshot',
+      detail: cloneProgressDetail,
+    });
     const cloneResult = await runCommand(cloneSpec, dir, cloneEnv);
     commands.push(cloneResult);
     if (cloneResult.status === 'failed') {

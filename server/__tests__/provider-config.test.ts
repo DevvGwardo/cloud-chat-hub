@@ -6,6 +6,7 @@ import {
   MODEL_DISCOVERY_URLS,
   VALIDATION_MODELS,
   resolveHermesExecutionMode,
+  resolveHermesUseRuns,
   resolveReviewCapableProvider,
   resolveRuntimeProvider,
   sanitizeCompatibleSseLine,
@@ -78,6 +79,16 @@ describe('provider-config', () => {
       githubPAT: '',
     })).toBe('agent-loop')
     expect(resolveHermesExecutionMode()).toBe('agent-loop')
+  })
+
+  it('resolves Hermes runs flag from env, header, or body (default off)', () => {
+    expect(resolveHermesUseRuns()).toBe(false)
+    expect(resolveHermesUseRuns({ envEnabled: true })).toBe(true)
+    expect(resolveHermesUseRuns({ headerValue: '1' })).toBe(true)
+    expect(resolveHermesUseRuns({ headerValue: ['0', 'yes'] })).toBe(true)
+    expect(resolveHermesUseRuns({ bodyValue: true })).toBe(true)
+    expect(resolveHermesUseRuns({ bodyValue: 'on' })).toBe(true)
+    expect(resolveHermesUseRuns({ bodyValue: false, headerValue: '0' })).toBe(false)
   })
 
   it('normalizes MiniMax SSE chunks that emit an empty assistant role', () => {

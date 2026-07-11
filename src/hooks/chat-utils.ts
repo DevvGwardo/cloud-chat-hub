@@ -215,6 +215,42 @@ export interface AgentStatusEvent {
   source?: string;
 }
 
+export interface FallbackSwitchEvent {
+  provider: string;
+  model: string;
+}
+
+export function parseFallbackSwitchDelta(value: unknown): FallbackSwitchEvent | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const { provider, model } = value as { provider?: unknown; model?: unknown };
+  if (typeof provider !== 'string' || !provider.trim()) {
+    return null;
+  }
+  if (typeof model !== 'string' || !model.trim()) {
+    return null;
+  }
+  return { provider: provider.trim(), model: model.trim() };
+}
+
+export function formatFallbackSwitchToast(event: FallbackSwitchEvent): string {
+  return `Switched to ${event.provider}/${event.model}`;
+}
+
+export function isFallbackSwitchData(
+  value: unknown,
+): value is { type: 'fallback_switch'; provider: string; model: string } {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const parsed = parseFallbackSwitchDelta(value);
+  if (!parsed) {
+    return false;
+  }
+  return (value as { type?: unknown }).type === 'fallback_switch';
+}
+
 export function isAgentStatusData(
   value: unknown,
 ): value is { type: 'agent_status'; status: AgentStatusEvent } {

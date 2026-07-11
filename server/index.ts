@@ -30,6 +30,7 @@ import { workspaceIndex } from './workspace-indexer';
 import { registerHermesStreamResumeRoute } from './lib/hermes';
 import { registerRemoteRevivalRoutes } from './routes/remote-revival';
 import { registerBridgeRoutes } from './routes/bridge';
+import { registerWorkspaceRoutes } from './routes/workspace';
 import { startManagedBridge, stopManagedBridge } from './lib/bridge-manager';
 import { taskOrchestrator } from './task-orchestrator';
 import { getLanIp, generateTerminalQr, generateQrSvgDataUri, formatConnectionInfo } from './lib/qr-display';
@@ -64,6 +65,10 @@ export const HEALTH_ROUTES = [
   '/functions/v1/chat-store/messages',
   '/functions/v1/chat-store/conversations/:id/messages',
   '/functions/v1/chat-store/conversations/:id/files',
+  '/functions/v1/workspace/read',
+  '/functions/v1/workspace/diff',
+  '/functions/v1/workspace/list',
+  '/functions/v1/fetch-url',
   '/functions/v1/github-integration',
   '/functions/v1/github-analyzer',
   '/functions/v1/validate-key',
@@ -176,7 +181,12 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
   // FRONTEND_DIST_DIR lets the Electron app point at its packaged renderer
   // (out/renderer) so remote devices can load the full UI over HTTP. The web
   // `npm run serve` flow leaves it unset and falls back to dist/.
-  const distPath = process.env.FRONTEND_DIST_DIR || join(PROJECT_ROOT, 'dist');
+  const compiledFrontendDir = join(__serverDirname, '..');
+  const distPath =
+    process.env.FRONTEND_DIST_DIR ||
+    (existsSync(join(compiledFrontendDir, 'index.html'))
+      ? compiledFrontendDir
+      : join(PROJECT_ROOT, 'dist'));
   if (opts?.serveFrontend) {
     if (existsSync(distPath)) {
       logger.info(`[server] Serving frontend from ${distPath}`);
@@ -207,6 +217,7 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
   registerRoomRoutes(app);
   registerRemoteRevivalRoutes(app);
   registerBridgeRoutes(app);
+  registerWorkspaceRoutes(app);
 
   // ─── Workspace search ───────────────────────────────────────────────────────
   app.get('/functions/v1/workspace/search', async (req, res) => {

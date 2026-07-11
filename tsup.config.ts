@@ -13,5 +13,20 @@ export default defineConfig({
   external: [
     'electron',
     '@electron/remote',
+    'node:sqlite',
   ],
+  esbuildOptions(options) {
+    options.plugins = [
+      ...(options.plugins ?? []),
+      {
+        name: 'external-node-builtins',
+        setup(build) {
+          build.onResolve({ filter: /^node:/ }, (args) => ({
+            path: args.path,
+            external: true,
+          }));
+        },
+      },
+    ];
+  },
 });

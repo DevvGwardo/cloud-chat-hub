@@ -315,13 +315,37 @@ function ProfileDetailView({
   showEnvKeys: boolean;
   setShowEnvKeys: (v: boolean) => void;
 }) {
+  const { updateProfileConfig } = useProfilesStore();
   const [editOpen, setEditOpen] = useState(false);
   const [editYaml, setEditYaml] = useState(detail.configYaml);
   const [envOpen, setEnvOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const canEditConfig = detail.name !== 'default';
 
   useEffect(() => {
     setEditYaml(detail.configYaml);
   }, [detail.configYaml]);
+
+  const openEdit = () => {
+    setSaveError(null);
+    setEditYaml(detail.configYaml);
+    setEditOpen(true);
+  };
+
+  const handleSaveConfig = async () => {
+    if (!canEditConfig) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await updateProfileConfig(detail.name, editYaml);
+      setEditOpen(false);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : 'Failed to save config');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   if (detailLoading) {
     return (
@@ -438,9 +462,10 @@ function ProfileDetailView({
                 <FileCode className="h-3 w-3" />
               </button>
               <button
-                onClick={() => setEditOpen(true)}
-                className="rounded-md p-1 text-muted-foreground/50 transition-colors hover:text-foreground"
-                title="Edit config"
+                onClick={openEdit}
+                disabled={!canEditConfig}
+                className="rounded-md p-1 text-muted-foreground/50 transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                title={canEditConfig ? 'Edit config' : 'Default profile cannot be edited'}
               >
                 <FileEdit className="h-3 w-3" />
               </button>
@@ -466,19 +491,28 @@ function ProfileDetailView({
               value={editYaml}
               onChange={(e) => setEditYaml(e.target.value)}
               rows={12}
-              className="w-full resize-none rounded-md border border-border/60 bg-background/80 px-3 py-2 text-[11px] font-mono leading-relaxed text-foreground/90 focus:border-primary/60 focus:outline-none"
+              disabled={saving}
+              className="w-full resize-none rounded-md border border-border/60 bg-background/80 px-3 py-2 text-[11px] font-mono leading-relaxed text-foreground/90 focus:border-primary/60 focus:outline-none disabled:opacity-60"
             />
+            {saveError && (
+              <div className="mt-2 rounded-md border border-red-500/20 bg-red-500/10 px-2 py-1.5 text-[10px] text-red-300">
+                {saveError}
+              </div>
+            )}
             <div className="mt-3 flex justify-end gap-2">
               <button
                 onClick={() => setEditOpen(false)}
-                className="rounded-md px-3 py-1.5 text-[11px] text-muted-foreground/70 hover:text-foreground"
+                disabled={saving}
+                className="rounded-md px-3 py-1.5 text-[11px] text-muted-foreground/70 hover:text-foreground disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
-                onClick={() => setEditOpen(false)}
-                className="rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-primary-foreground"
+                onClick={handleSaveConfig}
+                disabled={saving || !canEditConfig}
+                className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-primary-foreground disabled:opacity-50"
               >
+                {saving && <Loader2 className="h-3 w-3 animate-spin" />}
                 Save
               </button>
             </div>

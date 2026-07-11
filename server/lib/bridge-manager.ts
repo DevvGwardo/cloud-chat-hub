@@ -203,9 +203,18 @@ export async function startManagedBridge(): Promise<BridgeStartResult> {
     }
 
     logger.info(`[bridge-manager] starting bridge: ${python} main.py (port ${getBridgePort()})`);
+    if (!process.env.HERMES_BRIDGE_TOKEN) {
+      const { randomBytes } = await import('node:crypto');
+      process.env.HERMES_BRIDGE_TOKEN = randomBytes(32).toString('hex');
+    }
     bridgeProcess = spawn(python, ['main.py'], {
       cwd: source,
-      env: { ...process.env, HERMES_PORT: String(getBridgePort()) },
+      env: {
+        ...process.env,
+        HERMES_PORT: String(getBridgePort()),
+        HERMES_BRIDGE_HOST: process.env.HERMES_BRIDGE_HOST || '127.0.0.1',
+        HERMES_BRIDGE_TOKEN: process.env.HERMES_BRIDGE_TOKEN,
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     bridgeProcess.stdout?.on('data', (c: Buffer) => process.stdout.write('[bridge] ' + c.toString()));

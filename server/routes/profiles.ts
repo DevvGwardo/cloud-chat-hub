@@ -274,6 +274,7 @@ export function registerProfilesRoutes(app: Express) {
 
       const configPath = path.join(profilePath, 'config.yaml');
       fs.writeFileSync(configPath, content, 'utf-8');
+      invalidateProfileListCache();
 
       const parsed = readYamlConfig(configPath);
       sendJson(res, 200, { ok: true, parsed });

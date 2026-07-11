@@ -46,6 +46,7 @@ interface CreatePRModalProps {
   baseRepo?: string;
   baseBranch: string;
   files: FileChange[];
+  localRepoPath?: string | null;
   initialPullRequest?: PullRequestRecord | null;
   onPullRequestCreated?: (pr: PullRequestRecord) => void;
   onSuccess?: () => void;
@@ -231,6 +232,7 @@ export const CreatePRModal: React.FC<CreatePRModalProps> = ({
   baseRepo,
   baseBranch,
   files,
+  localRepoPath = null,
   initialPullRequest = null,
   onPullRequestCreated,
   onSuccess,
@@ -282,7 +284,14 @@ export const CreatePRModal: React.FC<CreatePRModalProps> = ({
   const [completedSteps, setCompletedSteps] = useState<Set<VerificationStep>>(new Set());
 
   const handleRunVerification = useCallback(async () => {
-    if (!githubPAT || files.length === 0) return;
+    if (files.length === 0) return;
+
+    const pat = githubPAT.trim();
+    const resolvedLocalRepoPath = localRepoPath?.trim() || '';
+    if (!pat && !resolvedLocalRepoPath) {
+      setVerificationError('Connect GitHub in Settings or attach a local clone before running checks.');
+      return;
+    }
 
     setVerificationLoading(true);
     setVerificationError(null);
@@ -300,7 +309,8 @@ export const CreatePRModal: React.FC<CreatePRModalProps> = ({
           body: JSON.stringify({
             action: 'verify-changes',
             stream: true,
-            pat: githubPAT,
+            ...(pat ? { pat } : {}),
+            ...(resolvedLocalRepoPath ? { localRepoPath: resolvedLocalRepoPath } : {}),
             owner,
             repo,
             baseBranch,
@@ -373,7 +383,7 @@ export const CreatePRModal: React.FC<CreatePRModalProps> = ({
     } finally {
       setVerificationLoading(false);
     }
-  }, [activeProvider, activeProviderConfig.apiKey, activeProviderConfig.model, allProvidersPayload, baseBranch, files, githubPAT, owner, repo]);
+  }, [activeProvider, activeProviderConfig.apiKey, activeProviderConfig.model, allProvidersPayload, baseBranch, files, githubPAT, localRepoPath, owner, repo]);
 
   const handleGenerateMetadata = useCallback(async () => {
     if (files.length === 0) return;

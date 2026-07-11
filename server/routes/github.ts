@@ -7,10 +7,12 @@ import {
   fetchRecentRepoActivity,
   getUnknownErrorMessage,
   isValidGitHubPAT,
+  resolveAttachedLocalRepoPath,
+  localRepoMatchesGithub,
   toGitHubIssue,
   withLocalClone,
 } from '../lib/github-utils';
-import { ensureRepoClone, forkRepository } from '../repo-clone-manager';
+import { ensureRepoClone, forkRepository, getManagedRepoClone } from '../repo-clone-manager';
 import { verifyRepoChanges, generatePrMetadata, type VerificationFileChange } from '../repo-verifier';
 import { normalizeChatMessages } from '../message-normalization';
 
@@ -459,16 +461,39 @@ Be specific about file names and line numbers when possible. Provide actionable 
 
 export function registerGitHubRoutes(app: Express) {
 
+async function resolveVerificationLocalRepoPath(
+  explicitPath: unknown,
+  owner: string,
+  repo: string,
+): Promise<string | null> {
+  const fromClient = resolveAttachedLocalRepoPath(explicitPath);
+  if (fromClient) {
+    // Client-supplied paths must actually belong to the claimed GitHub repo.
+    if (localRepoMatchesGithub(fromClient, owner, repo)) {
+      return fromClient;
+    }
+    return null;
+  }
+
+  const managed = await getManagedRepoClone(owner, repo);
+  return managed.exists ? managed.path : null;
+}
+
 app.post('/functions/v1/github-integration', async (req, res) => {
   try {
     const { action, pat, ...params } = req.body;
+    const hasValidPat = typeof pat === 'string' && isValidGitHubPAT(pat);
 
-    if (!pat || !isValidGitHubPAT(pat)) {
+    if (action !== 'verify-changes' && !hasValidPat) {
       return sendJson(res, 400, { error: 'A valid GitHub PAT is required' });
     }
 
-    const headers = {
+    const headers: Record<string, string> = hasValidPat ? {
       Authorization: `Bearer ${pat}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'CloudChat-App',
+    } : {
       Accept: 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
       'User-Agent': 'CloudChat-App',
@@ -1100,6 +1125,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
           apiKey,
           allProviders,
           stream: wantsStream,
+          localRepoPath: requestedLocalRepoPath,
         } = params as {
           owner: string;
           repo: string;
@@ -1110,6 +1136,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
           apiKey?: string;
           allProviders?: Record<string, { apiKey: string; model: string }>;
           stream?: boolean;
+          localRepoPath?: string;
         };
 
         if (!owner || !repo || !baseBranch || !Array.isArray(files) || files.length === 0) {
@@ -1117,6 +1144,27 @@ app.post('/functions/v1/github-integration', async (req, res) => {
             error: 'owner, repo, baseBranch, and files are required',
           });
         }
+
+        const localRepoPath = await resolveVerificationLocalRepoPath(requestedLocalRepoPath, owner, repo);
+        if (!hasValidPat && !localRepoPath) {
+          return sendJson(res, 400, {
+            error: 'Connect GitHub in Settings or attach a local clone before running checks.',
+          });
+        }
+
+        const verifyInput = {
+          owner,
+          repo,
+          ...(hasValidPat ? { pat } : {}),
+          ...(localRepoPath ? { localRepoPath } : {}),
+          baseBranch,
+          files,
+          provider,
+          model,
+          apiKey,
+          origin: req.headers.origin as string | undefined,
+          allProviders,
+        };
 
         if (wantsStream) {
           res.writeHead(200, {
@@ -1131,16 +1179,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
 
           try {
             const verification = await verifyRepoChanges({
-              owner,
-              repo,
-              pat,
-              baseBranch,
-              files,
-              provider,
-              model,
-              apiKey,
-              origin: req.headers.origin as string | undefined,
-              allProviders,
+              ...verifyInput,
               onProgress,
             });
 
@@ -1153,18 +1192,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
           return;
         }
 
-        const verification = await verifyRepoChanges({
-          owner,
-          repo,
-          pat,
-          baseBranch,
-          files,
-          provider,
-          model,
-          apiKey,
-          origin: req.headers.origin as string | undefined,
-          allProviders,
-        });
+        const verification = await verifyRepoChanges(verifyInput);
 
         return sendJson(res, 200, verification);
       }

@@ -27,9 +27,21 @@ import {
   isRepoWriteMessage,
 } from '@/lib/repo-intent';
 import type { ToolActivityEvent } from '@/components/chat/AgentActivity';
+import {
+  INITIAL_COMPUTER_USE_DOCK_STATE,
+  isComputerUseFrameData,
+  isComputerUseToolName,
+  parseComputerUseFrame,
+  reduceComputerUseDockState,
+  type ComputerUseDockState,
+} from '@/lib/computer-use-dock';
+import { fetchComputerUseStatus } from '@/lib/hermes-api';
 import { getErrorMessage } from '@/lib/errors';
+import { toast } from '@/lib/toast';
 import { handleServerToolEvent, SERVER_EXECUTED_REPO_TOOLS, type ServerToolEvent } from '@/lib/server-tool-events';
 import { getChatScopeId } from '@/lib/chat-scope';
+import { resolveHermesSessionForResume, hermesSessionTitle, type HermesSessionMessage } from '@/lib/hermes-api';
+import { expandContextRefs, hasContextRefs } from '@/lib/context-refs';
 import { extractPseudoToolInvocations, extractTextFileEdits, getPseudoToolSourceText } from '@/lib/pseudo-tool-calls';
 import { getLocalAbsolutePath, LOCAL_IMAGE_TOKEN_RE } from '@/lib/local-images';
 import {
@@ -50,17 +62,20 @@ import {
   describedEditButDidNotExecute,
   formatMissingRepoFileError,
   formatRepoTreeUnavailableError,
+  formatFallbackSwitchToast,
   getPendingProposalKey,
   getRepoToolExistingPaths,
   getServerToolEventKey,
   hasRecoverablePseudoRepoWrites,
   isAgentStatusData,
+  isFallbackSwitchData,
   isHermesLoopStatusData,
   isHermesToolActivityData,
   isInvalidRepoReadPath,
   isServerExecutedRepoToolName,
   isServerToolEvent,
   normalizeRepoPath,
+  parseFallbackSwitchDelta,
   resolveRepoWriteAction,
   sanitizePartialToolCalls,
   synthesizeToolInvocationsForPersistence,
@@ -73,6 +88,20 @@ import {
   type SendMessageOptions,
 } from './chat-utils';
 export type { AgentStatusEvent } from './chat-utils';
+
+const HERMES_RESUME_CHAT_ROLES = new Set(['user', 'assistant', 'system', 'tool']);
+
+function hermesSessionChatToAIMessages(sessionId: string, chat: HermesSessionMessage[] | undefined): AIMessage[] {
+  if (!chat?.length) return [];
+  return chat
+    .filter((m) => typeof m.content === 'string' && m.content.trim().length > 0)
+    .filter((m) => HERMES_RESUME_CHAT_ROLES.has(m.role))
+    .map((m, index) => ({
+      id: `hermes-resume-${sessionId}-${index}`,
+      role: (m.role === 'tool' ? 'assistant' : m.role) as AIMessage['role'],
+      content: m.role === 'tool' ? `[Tool result]\n${m.content}` : m.content,
+    }));
+}
 
 const TOOL_INVOCATION_STATE_PRIORITY: Record<string, number> = {
   'partial-call': 0,
@@ -441,21 +470,8 @@ export function useChat(
   const clearPanelPrompt = useUIStore((s) => s.clearPanelPrompt);
   const { activeRepo, isRepoMode } = changeset;
   const hermesToolsetConfig = useHermesStore((s) => s.toolsets);
-  const hermesMcpServers = useHermesStore((s) => s.mcpServers);
   const hermesSwarmEnabled = useHermesStore((s) => s.swarm.enabled);
   const hermesLoopEnabled = useHermesStore((s) => s.loops[panelId]?.enabled ?? false);
-  const hermesCustomToolDefs = useMemo(() => {
-    const servers = hermesMcpServers.filter((s) => s.enabled && s.tools.length > 0);
-    return servers.flatMap((server) =>
-      server.tools.map((tool) => ({
-        type: 'function' as const,
-        function: { name: tool.name, description: tool.description, parameters: tool.inputSchema },
-        mcp_server_id: server.id,
-        mcp_server_url: server.url,
-        mcp_server_api_key: server.apiKey,
-      }))
-    );
-  }, [hermesMcpServers]);
   const hermesToolsets = useMemo(
     () =>
       Object.entries(hermesToolsetConfig)
@@ -648,10 +664,14 @@ When the user asks you to make changes:
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const [toolActivityMap, setToolActivityMap] = useState<Record<string, ToolActivityEvent[]>>({});
   const [agentStatus, setAgentStatus] = useState<AgentStatusEvent | null>(null);
+  const [computerUseDock, setComputerUseDock] = useState<ComputerUseDockState>(INITIAL_COMPUTER_USE_DOCK_STATE);
   const [conversationAutoApproveEnabled, setConversationAutoApproveEnabled] = useState(false);
   const requestConversationIdRef = useRef<string | null>(conversationId);
+  /** When set, Hermes chat requests use this id as conversation_id (session attach). */
+  const hermesSessionIdOverrideRef = useRef<string | null>(null);
   const activeRequestBodyRef = useRef<Record<string, unknown> | null>(null);
   const toolActivityRef = useRef<Record<string, ToolActivityEvent[]>>({});
+  const computerUsePermissionsCheckedRef = useRef(false);
   const serverToolEventsRef = useRef<Record<string, ServerToolEvent[]>>({});
   const serverToolEventKeysRef = useRef<Record<string, Set<string>>>({});
   const serverSideToolsDetectedRef = useRef(false);
@@ -905,6 +925,33 @@ When the user asks you to make changes:
 
       toolActivityRef.current = { ...toolActivityRef.current, [msgId]: prev };
       setToolActivityMap({ ...toolActivityRef.current });
+
+      if (isComputerUseToolName(activity.tool)) {
+        setComputerUseDock((current) => reduceComputerUseDockState(current, {
+          toolActivity: {
+            tool: activity.tool,
+            status: activity.status,
+            input: activity.input,
+          },
+        }));
+        if (!computerUsePermissionsCheckedRef.current) {
+          computerUsePermissionsCheckedRef.current = true;
+          void fetchComputerUseStatus()
+            .then((status) => {
+              const raw = (status.raw || '').toLowerCase();
+              let hint: string | null = null;
+              if (raw.includes('not granted') || raw.includes('permission') || raw.includes('not ready')) {
+                hint = 'Grant Accessibility and Screen Recording via hermes computer-use permissions.';
+              } else if (!status.installed || raw.includes('not installed')) {
+                hint = 'Install cua-driver from Hermes Ops before desktop control works.';
+              }
+              if (hint) {
+                setComputerUseDock((current) => reduceComputerUseDockState(current, { permissionsHint: hint }));
+              }
+            })
+            .catch(() => undefined);
+        }
+      }
     };
 
     const updateAgentStatus = (nextStatus: AgentStatusEvent) => {
@@ -919,6 +966,16 @@ When the user asks you to make changes:
         }
         return nextStatus;
       });
+    };
+
+    const seenFallbackSwitches = new Set<string>();
+    const notifyFallbackSwitch = (switchEvent: { provider: string; model: string }) => {
+      const key = `${switchEvent.provider}:${switchEvent.model}`;
+      if (seenFallbackSwitches.has(key)) {
+        return;
+      }
+      seenFallbackSwitches.add(key);
+      toast.warning(formatFallbackSwitchToast(switchEvent), 8000);
     };
 
     // Track cumulative text length so we can stamp each tool activity event
@@ -966,8 +1023,16 @@ When the user asks you to make changes:
               if (delta?.tool_activity) {
                 updateToolActivity({ ...(delta.tool_activity as ToolActivityEvent), textOffset: streamTextOffset });
               }
+              const computerUseFrame = parseComputerUseFrame(delta?.computer_use_frame);
+              if (computerUseFrame) {
+                setComputerUseDock((current) => reduceComputerUseDockState(current, { frame: computerUseFrame }));
+              }
               if (delta?.agent_status && typeof delta.agent_status === 'object') {
                 updateAgentStatus(delta.agent_status as AgentStatusEvent);
+              }
+              const fallbackSwitch = parseFallbackSwitchDelta(delta?.fallback_switch);
+              if (fallbackSwitch) {
+                notifyFallbackSwitch(fallbackSwitch);
               }
               if (delta?.server_tool_event && isServerToolEvent(delta.server_tool_event)) {
                 applyServerToolEvent(delta.server_tool_event as ServerToolEvent);
@@ -1002,8 +1067,16 @@ When the user asks you to make changes:
                   updateToolActivity({ ...item.activity, textOffset: streamTextOffset });
                   continue;
                 }
+                if (isComputerUseFrameData(item)) {
+                  setComputerUseDock((current) => reduceComputerUseDockState(current, { frame: item.frame }));
+                  continue;
+                }
                 if (isAgentStatusData(item)) {
                   updateAgentStatus(item.status);
+                  continue;
+                }
+                if (isFallbackSwitchData(item)) {
+                  notifyFallbackSwitch({ provider: item.provider, model: item.model });
                   continue;
                 }
                 if (isHermesLoopStatusData(item)) {
@@ -1079,7 +1152,9 @@ When the user asks you to make changes:
     const currentGithubPAT = useSettingsStore.getState().githubPAT;
     const currentActiveRepo = currentChangeset.activeRepo;
     const currentIsRepoMode = currentChangeset.isRepoMode && !!currentActiveRepo;
-    const conversationIdForRequest = overrides?.conversationId ?? requestConversationIdRef.current;
+    const conversationIdForRequest = overrides?.conversationId
+      ?? hermesSessionIdOverrideRef.current
+      ?? requestConversationIdRef.current;
     const repoFileTreeForRequest = overrides?.repoFileTree ?? currentChangeset.repoFileTree;
     const repoFileCacheForRequest = overrides?.repoFileCache ?? currentChangeset.repoFileCache;
     const repoEditIntentForRequest = typeof overrides?.repoEditIntent === 'boolean'
@@ -1089,7 +1164,13 @@ When the user asks you to make changes:
 
     // Compute effective hermes toolsets from fresh store state to avoid stale memo values mid-stream
     const currentHermesUsesLocalCloneFallback = currentIsRepoMode && !!currentActiveRepo?.localPath && !currentGithubPAT;
-    const currentEffectiveHermesToolsets = currentIsRepoMode && !currentHermesUsesLocalCloneFallback
+    const currentHermesWorktreeMode = effectiveProvider === 'hermes'
+      && useHermesStore.getState().useWorktree
+      && currentIsRepoMode
+      && !!currentActiveRepo?.localPath;
+    const currentEffectiveHermesToolsets = currentIsRepoMode
+      && !currentHermesUsesLocalCloneFallback
+      && !currentHermesWorktreeMode
       ? hermesToolsets.filter((toolset) => !REPO_MODE_DISABLED_HERMES_TOOLSETS.has(toolset))
       : hermesToolsets;
 
@@ -1137,7 +1218,7 @@ When the user asks you to make changes:
       ...(effectiveProvider === 'hermes' && useHermesStore.getState().underlyingProvider
         ? { hermes_provider: useHermesStore.getState().underlyingProvider }
         : {}),
-      ...(effectiveProvider === 'hermes' && hermesCustomToolDefs.length > 0 ? { custom_tools: hermesCustomToolDefs } : {}),
+      // Hermes MCP comes from config.yaml (bridge loads agent MCP natively) — do not dual-inject Spark zustand tools.
       ...(effectiveProvider !== 'hermes' && effectiveProvider !== 'openclaw' && agentToolsets ? { agent_toolsets: agentToolsets } : {}),
       ...(effectiveProvider === 'hermes' && effectiveModel.startsWith('MiniMax-')
         ? { hermes_minimax_key: useSettingsStore.getState().providers.minimax?.apiKey || useSettingsStore.getState().providers['minimax-payg']?.apiKey || '' }
@@ -1146,6 +1227,13 @@ When the user asks you to make changes:
       ...(currentIsRepoMode && repoFileTreeForRequest.length > 0 ? { repo_file_tree: repoFileTreeForRequest } : {}),
       ...(currentIsRepoMode && Object.keys(repoFileCacheForRequest).length > 0
         ? { repo_file_cache: repoFileCacheForRequest }
+        : {}),
+      ...(effectiveProvider === 'hermes' && useHermesStore.getState().useWorktree
+        && currentIsRepoMode && currentActiveRepo?.localPath
+        ? { hermes_worktree: true }
+        : {}),
+      ...(effectiveProvider === 'hermes' && useHermesStore.getState().useRuns
+        ? { hermes_use_runs: true }
         : {}),
       ...(conversationIdForRequest ? { conversation_id: conversationIdForRequest } : {}),
       ...(continuingApprovedProposal ? { continuing_approved_proposal: true } : {}),
@@ -1159,7 +1247,6 @@ When the user asks you to make changes:
     config.maxTokens,
     config.temperature,
     config.topP,
-    hermesCustomToolDefs,
     hermesSwarmEnabled,
     hermesLoopEnabled,
     hermesToolsets,
@@ -1213,6 +1300,8 @@ When the user asks you to make changes:
       const convId = streamConvIdRef.current ?? convIdRef.current;
       if (!convId) return;
       setAgentStatus(null);
+      setComputerUseDock(INITIAL_COMPUTER_USE_DOCK_STATE);
+      computerUsePermissionsCheckedRef.current = false;
 
       const currentToolActivity = toolActivityRef.current.current || [];
       const currentServerToolEvents = serverToolEventsRef.current.current || [];
@@ -2470,6 +2559,12 @@ When the user asks you to make changes:
 
     prevConversationIdRef.current = conversationId;
 
+    const isDraftPromotion =
+      prevConvId === null && conversationId !== null && skipNextLoadRef.current;
+    if (prevConvId !== conversationId && !isDraftPromotion) {
+      hermesSessionIdOverrideRef.current = null;
+    }
+
     // Transition: null → new conversation (just created).
     // The user may have already set up a repo/changeset on the blank thread.
     // Preserve current state and associate it with the new conversation instead of clearing.
@@ -2548,6 +2643,8 @@ When the user asks you to make changes:
     // Clear hermes tool activity and server-side detection flag on conversation switch
     setToolActivityMap({});
     setAgentStatus(null);
+    setComputerUseDock(INITIAL_COMPUTER_USE_DOCK_STATE);
+    computerUsePermissionsCheckedRef.current = false;
     setConversationAutoApproveEnabled(false);
     toolActivityRef.current = {};
     serverToolEventsRef.current = {};
@@ -2713,6 +2810,25 @@ When the user asks you to make changes:
     }
 
     const repoFileTreeForRequest = await ensureRepoFileTreeLoaded();
+
+    let messageForModel = content;
+    if (hasContextRefs(content)) {
+      const currentChangeset = useChangesetStore.getState().getChangeset(scopeId);
+      const repo = currentChangeset.activeRepo;
+      const expansion = await expandContextRefs(content, {
+        workspaceRoot: repo?.localPath,
+        repoFileTree: repoFileTreeForRequest,
+        repoOwner: repo?.owner,
+        repoName: repo?.name,
+        repoBranch: repo?.defaultBranch,
+        githubPat: useSettingsStore.getState().githubPAT || undefined,
+      });
+      messageForModel = expansion.expanded;
+      if (expansion.warnings.length > 0) {
+        toast.warning(expansion.warnings.join('\n'));
+      }
+    }
+
     delete toolActivityRef.current.current;
     delete serverToolEventsRef.current.current;
     delete serverToolEventKeysRef.current.current;
@@ -2727,7 +2843,7 @@ When the user asks you to make changes:
 
     try {
       await append(
-        { role: 'user', content },
+        { role: 'user', content: messageForModel },
         convId
           ? {
               body: {
@@ -2777,6 +2893,28 @@ When the user asks you to make changes:
     }
     void sendMessage(content);
   }, [effectiveBusy, queueMessage, sendMessage]);
+
+  const clearHermesSessionAttachment = useCallback(() => {
+    hermesSessionIdOverrideRef.current = null;
+  }, []);
+
+  const handleResumeSession = useCallback(async (sessionSpec?: string): Promise<string> => {
+    const detail = await resolveHermesSessionForResume(sessionSpec);
+    const sessionId = detail.id;
+    hermesSessionIdOverrideRef.current = sessionId;
+
+    const hydrated = hermesSessionChatToAIMessages(sessionId, detail.chat);
+    if (hydrated.length > 0) {
+      safeSetMessages(hydrated, true);
+    }
+
+    const title = hermesSessionTitle(detail);
+    const shortId = sessionId.length > 12 ? `${sessionId.slice(0, 12)}…` : sessionId;
+    const loaded = hydrated.length > 0
+      ? `${hydrated.length} message${hydrated.length === 1 ? '' : 's'} loaded. `
+      : '';
+    return `Attached Hermes session "${title}" (${shortId}). ${loaded}Next message continues that session.`;
+  }, [safeSetMessages]);
 
   useEffect(() => {
     if (!pendingPanelPrompt || effectiveBusy) {
@@ -2846,6 +2984,14 @@ When the user asks you to make changes:
     reload();
   }, [activeRepo, buildRequestBody, isRepoMode, reload]);
 
+  const handleComputerUseDockExpand = useCallback(() => {
+    setComputerUseDock((current) => reduceComputerUseDockState(current, { userExpanded: true }));
+  }, []);
+
+  const handleComputerUseDockCollapse = useCallback(() => {
+    setComputerUseDock((current) => reduceComputerUseDockState(current, { userCollapsed: true }));
+  }, []);
+
   // Abort in-flight fetch on unmount
   useEffect(() => {
     return () => {
@@ -2860,6 +3006,8 @@ When the user asks you to make changes:
     setInput: setDraftInput,
     handleSend,
     handleQuickSend,
+    handleResumeSession,
+    clearHermesSessionAttachment,
     queuedMessages,
     handleRemoveQueuedMessage,
     handleSteerQueuedMessage,
@@ -2878,6 +3026,9 @@ When the user asks you to make changes:
     activeModel: effectiveModel,
     toolActivityMap,
     agentStatus,
+    computerUseDock,
+    handleComputerUseDockExpand,
+    handleComputerUseDockCollapse,
     conversationAutoApproveEnabled,
     setConversationAutoApprove: setConversationAutoApproveEnabled,
   };
