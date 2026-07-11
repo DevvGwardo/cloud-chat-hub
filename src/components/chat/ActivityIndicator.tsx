@@ -49,6 +49,10 @@ function deriveActivity(messages: ActivityIndicatorProps['messages'], toolActivi
 
   if (latestToolActivity) {
     const name = latestToolActivity.tool || '';
+    // MoA advisor/aggregator phases — surface as reasoning in the compact strip;
+    // full advisor cards render in AgentActivity.
+    if (name === 'moa.reference' || name === 'moa.aggregating') return 'thinking';
+    if (name === 'computer_use' || name === 'computer') return 'thinking';
     if (name === 'read_repo_file') return 'reading';
     if (name === 'propose_changes') return 'planning';
     if (['edit_repo_file', 'create_repo_file', 'delete_repo_file', 'batch_edit_repo_files'].includes(name)) return 'editing';

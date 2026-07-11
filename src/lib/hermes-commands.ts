@@ -16,11 +16,19 @@ export interface CommandContext {
   approveCommand?: () => void;
   denyCommand?: () => void;
   compressContext?: () => void;
+  resumeSession?: (sessionId?: string) => Promise<string>;
 }
 
 function callbackUnavailable(): string {
   return 'This command is not available in the current context.';
 }
+
+/** Mirrors hermes-bridge/hermes_ops.py build_compress_user_message(). */
+export const COMPRESS_CONTEXT_MESSAGE =
+  'Please run context compression now using your /compress capability ' +
+  '(or equivalent compression tool). Summarize older turns and free context ' +
+  'while preserving task-critical facts, open todos, and recent tool results. ' +
+  'Confirm when compression is complete.';
 
 // 'ui' = handled locally in CloudChat (intercepted, runs a handler).
 // 'skill' = a hermes-agent skill; sent to the agent, which expands & runs it.
@@ -281,9 +289,23 @@ const COMMANDS: HermesCommand[] = [
     name: 'compress',
     description: 'Manually trigger context compression',
     usage: '/compress',
-    handler: async (_args, _context) => {
-      return 'Context compression requested.';
+    handler: async (_args, context) => {
+      if (!context.compressContext) return callbackUnavailable();
+      context.compressContext();
+      return 'Compressing context...';
     },
+  },
+  {
+    name: 'moa',
+    description: 'Run one prompt through the default MoA preset',
+    usage: '/moa <prompt>',
+    kind: 'agent',
+  },
+  {
+    name: 'goal',
+    description: 'Set or manage a standing goal (Ralph loop)',
+    usage: '/goal <objective>',
+    kind: 'agent',
   },
 
   // ── Filesystem ───────────────────────────────────────────────
@@ -291,18 +313,20 @@ const COMMANDS: HermesCommand[] = [
     name: 'rollback',
     description: 'List or restore filesystem checkpoints',
     usage: '/rollback [number]',
-    handler: async (_args, _context) => {
-      return 'Rollback listing not yet available from UI.';
-    },
+    // No local handler → sent through to Hermes (native /rollback).
+    kind: 'agent',
   },
   {
     name: 'resume',
-    description: 'Resume a named session',
-    usage: '/resume <name>',
-    handler: async (args, _context) => {
-      const name = args.trim();
-      if (!name) return 'Usage: /resume <name>';
-      return 'Session resume not yet available from UI.';
+    description: 'Attach a Hermes session so the next message continues it',
+    usage: '/resume [session-id]',
+    handler: async (args, context) => {
+      if (!context.resumeSession) return callbackUnavailable();
+      try {
+        return await context.resumeSession(args.trim() || undefined);
+      } catch (err) {
+        return err instanceof Error ? err.message : 'Failed to resume session.';
+      }
     },
   },
 

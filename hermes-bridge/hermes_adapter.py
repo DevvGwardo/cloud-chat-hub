@@ -12,7 +12,9 @@ ImportError and uses the custom run_agent.py instead.
 
 import json
 import os
+import re
 import sys
+import threading
 import time
 import httpx
 from typing import Optional, Callable
@@ -270,10 +272,19 @@ _TOOLSET_MAP = {
     "files": "file",
     "code_execution": "code_execution",
     "vision": "vision",
+    "computer": "computer_use",
+    "computer_use": "computer_use",
+    "delegation": "delegation",
+    "clarify": "clarify",
+    "context_engine": "context_engine",
+    "video": "video",
+    "video_gen": "video_gen",
 }
 
 # Toolsets that the real agent supports and we always enable
 _BONUS_TOOLSETS = ["skills", "memory", "todo", "session_search"]
+# Optional bonus toolsets enabled when the user toggles them in Spark
+_OPTIONAL_BONUS = {"delegation": "delegation"}
 
 # Repo tool toolset name (registered dynamically per request)
 _REPO_TOOLSET = "cloudchat_repo"
@@ -848,6 +859,44 @@ class RepoToolProvider:
 
 
 # ---------------------------------------------------------------------------
+# Fallback provider switch detection (Hermes status_callback)
+# ---------------------------------------------------------------------------
+
+_FALLBACK_SWITCH_ARROW_RE = re.compile(
+    r"Switched to fallback model:\s*.+?\s+via\s+.+?\s+→\s+(.+?)\s+via\s+(.+?)\s*$"
+)
+_FALLBACK_SWITCH_SHORT_RE = re.compile(
+    r"↻\s*Switched to fallback:\s*(.+?)\s+\((.+?)\)\s*$"
+)
+
+
+def parse_fallback_switch_status(message: str) -> Optional[dict[str, str]]:
+    """Parse a completed Hermes fallback switch from status_callback text.
+
+    Returns {"provider", "model"} for the activated fallback, or None when the
+    message is unrelated or only describes an in-progress switch attempt.
+    """
+    if not message or not isinstance(message, str):
+        return None
+    text = message.strip()
+    lowered = text.lower()
+    if "switched to fallback" not in lowered and "↻" not in text:
+        return None
+    if "switching to fallback" in lowered and "switched to fallback" not in lowered:
+        return None
+
+    match = _FALLBACK_SWITCH_ARROW_RE.search(text)
+    if match:
+        return {"model": match.group(1).strip(), "provider": match.group(2).strip()}
+
+    match = _FALLBACK_SWITCH_SHORT_RE.search(text)
+    if match:
+        return {"model": match.group(1).strip(), "provider": match.group(2).strip()}
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # HermesAgentAdapter — main adapter class
 # ---------------------------------------------------------------------------
 
@@ -866,6 +915,7 @@ class HermesAgentAdapter:
         max_iterations: int = 30,
         enabled_toolsets: Optional[list[str]] = None,
         repo_mode: bool = False,
+        worktree_mode: bool = False,
         repo_edit_intent: bool = False,
         github_pat: Optional[str] = None,
         github_repo_owner: Optional[str] = None,
@@ -874,26 +924,34 @@ class HermesAgentAdapter:
         custom_tools: Optional[list[dict]] = None,
         workspace_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
+        provider_override: Optional[str] = None,
         on_tool_start: Optional[Callable] = None,
         on_tool_end: Optional[Callable] = None,
         on_text: Optional[Callable] = None,
         on_server_tool_event: Optional[Callable] = None,
+        on_fallback_switch: Optional[Callable[[str, str], None]] = None,
+        on_computer_use_frame: Optional[Callable[[dict], None]] = None,
     ):
         self.on_tool_start = on_tool_start
         self.on_tool_end = on_tool_end
         self.on_text = on_text
         self.on_server_tool_event = on_server_tool_event
+        self.on_fallback_switch = on_fallback_switch
+        self.on_computer_use_frame = on_computer_use_frame
         self.on_thinking: Optional[Callable] = None
         self.on_reasoning: Optional[Callable] = None
         self._streamed_text_chunks: list[str] = []
         self._last_status_message: Optional[str] = None
+        self._last_fallback_switch_key: Optional[str] = None
 
         self.repo_mode = repo_mode
+        self.worktree_mode = worktree_mode
         self.repo_edit_intent = repo_edit_intent
 
         # Map CloudChat toolset names to real agent toolset names
         real_toolsets = []
-        for ts in (enabled_toolsets or ["web", "browser", "terminal"]):
+        enabled = list(enabled_toolsets or ["web", "browser", "terminal"])
+        for ts in enabled:
             mapped = _TOOLSET_MAP.get(ts, ts)
             if mapped not in real_toolsets:
                 real_toolsets.append(mapped)
@@ -901,6 +959,11 @@ class HermesAgentAdapter:
         for ts in _BONUS_TOOLSETS:
             if ts not in real_toolsets:
                 real_toolsets.append(ts)
+        # Optional toolsets the UI can toggle (e.g. delegation)
+        for key, mapped in _OPTIONAL_BONUS.items():
+            if key in enabled or mapped in enabled:
+                if mapped not in real_toolsets:
+                    real_toolsets.append(mapped)
 
         # Set up repo tool provider.
         # IMPORTANT: Tools must be registered BEFORE creating the agent because
@@ -908,7 +971,9 @@ class HermesAgentAdapter:
         # checks the registry at that moment. If tools aren't registered yet,
         # validate_toolset() returns False and the toolset is silently skipped.
         self._repo_provider: Optional[RepoToolProvider] = None
-        if repo_mode and github_repo_owner and github_repo_name:
+        # Worktree mode uses local file/terminal tools on the worktree cwd;
+        # GitHub API repo tools would edit the remote, not the isolated clone.
+        if repo_mode and github_repo_owner and github_repo_name and not worktree_mode:
             self._repo_provider = RepoToolProvider(
                 github_pat=github_pat,
                 owner=github_repo_owner,
@@ -931,15 +996,39 @@ class HermesAgentAdapter:
         repo_prompt = (
             self._repo_provider.build_repo_system_prompt() if self._repo_provider else ""
         )
-        self._ephemeral_system_prompt = (
-            f"{date_preamble}\n\n{repo_prompt}".strip() if repo_prompt else date_preamble
-        )
+        worktree_prompt = ""
+        if worktree_mode:
+            worktree_prompt = (
+                "You are running in an isolated local git worktree. "
+                "Use file, terminal, and code_execution tools to read and edit "
+                "the repository on disk. GitHub API repo tools are disabled for "
+                "this session — do not attempt edit_repo_file or similar remote edits."
+            )
+        prompt_parts = [date_preamble]
+        if worktree_prompt:
+            prompt_parts.append(worktree_prompt)
+        if repo_prompt:
+            prompt_parts.append(repo_prompt)
+        self._cu_poller = None
+        self._cu_poller_lock = threading.Lock()
+        if any(ts in real_toolsets for ts in ("computer_use", "computer")):
+            from computer_use_frames import (
+                COMPUTER_USE_CAPTURE_HINT,
+                install_spark_keep_cu_screenshots_patch,
+            )
+
+            os.environ["SPARK_KEEP_CU_SCREENSHOTS"] = "1"
+            install_spark_keep_cu_screenshots_patch()
+            prompt_parts.append(COMPUTER_USE_CAPTURE_HINT)
+        self._ephemeral_system_prompt = "\n\n".join(prompt_parts).strip()
 
         # Determine provider from base_url or hermes config.
         # Maps the base_url host to the corresponding hermes-agent provider ID.
-        provider = None
+        provider = provider_override.strip() if isinstance(provider_override, str) and provider_override.strip() else None
         _bu = (base_url or "").lower()
-        if "openrouter.ai" in _bu:
+        if provider:
+            pass
+        elif "openrouter.ai" in _bu:
             provider = "openrouter"
         elif "minimax" in _bu:
             provider = "minimax"
@@ -1007,28 +1096,33 @@ class HermesAgentAdapter:
                     else {"enabled": True, "effort": reasoning_effort}
                 )
 
-        self._agent = RealAIAgent(
-            base_url=base_url,
-            api_key=api_key,
-            provider=provider,
-            model=model,
-            max_iterations=max_iterations,
-            enabled_toolsets=real_toolsets,
-            reasoning_config=reasoning_config,
-            platform="cloudchat",
-            quiet_mode=True,
+        # For MoA, base_url/api_key are placeholders — MoAClient owns real slots.
+        # Still pass them so non-MoA paths keep working.
+        agent_kwargs = {
+            "base_url": base_url,
+            "api_key": api_key,
+            "provider": provider,
+            "model": model,
+            "max_iterations": max_iterations,
+            "enabled_toolsets": real_toolsets,
+            "reasoning_config": reasoning_config,
+            "platform": "cloudchat",
+            "quiet_mode": True,
             # Callbacks — translated to CloudChat's format
-            stream_delta_callback=self._on_stream_delta,
-            tool_start_callback=self._on_tool_start,
-            tool_complete_callback=self._on_tool_complete,
-            reasoning_callback=self._on_reasoning,
-            step_callback=self._on_step,
-            status_callback=self._on_status,
-        )
+            "stream_delta_callback": self._on_stream_delta,
+            "tool_start_callback": self._on_tool_start,
+            "tool_complete_callback": self._on_tool_complete,
+            "reasoning_callback": self._on_reasoning,
+            "step_callback": self._on_step,
+            "status_callback": self._on_status,
+            # MoA reference/aggregator events arrive via tool_progress_callback
+            "tool_progress_callback": self._on_tool_progress,
+        }
+        self._agent = RealAIAgent(**agent_kwargs)
 
         print(
             f"[hermes-adapter] Real agent created. model={model} "
-            f"toolsets={real_toolsets} repo_mode={repo_mode}",
+            f"toolsets={real_toolsets} repo_mode={repo_mode} worktree_mode={worktree_mode}",
             flush=True,
         )
 
@@ -1042,16 +1136,115 @@ class HermesAgentAdapter:
 
     def _on_tool_start(self, tc_id: str, name: str, args: dict):
         """Map real agent's tool_start_callback to CloudChat's on_tool_start."""
+        self._start_cu_frame_poller(name, args)
+        self._emit_computer_use_frame(name, args, None, status="running")
         if self.on_tool_start:
             self.on_tool_start(name, json.dumps(args) if args else "")
 
+    def _emit_lsp_diagnostic_event(self, path_hint: str, diag_text: str, source_tool: str) -> None:
+        """Surface Hermes post-write LSP diagnostics as structured tool_activity."""
+        meta = {"path": path_hint, "source_tool": source_tool}
+        meta_json = json.dumps(meta, ensure_ascii=False)
+        if self.on_tool_start:
+            self.on_tool_start("lsp.diagnostic", meta_json)
+        if self.on_tool_end:
+            self.on_tool_end("lsp.diagnostic", meta_json, diag_text)
+
+    def _extract_lsp_diagnostics(self, result: str) -> Optional[tuple[str, str]]:
+        """Parse lsp_diagnostics from Hermes file-tool JSON results."""
+        text = (result or "").strip()
+        if not text:
+            return None
+        diag: Optional[str] = None
+        path_hint = ""
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                raw_diag = parsed.get("lsp_diagnostics")
+                if isinstance(raw_diag, str) and raw_diag.strip():
+                    diag = raw_diag.strip()
+                path_hint = str(parsed.get("path") or parsed.get("file") or "").strip()
+        except json.JSONDecodeError:
+            if "lsp_diagnostics" in text or "<diagnostics" in text:
+                diag = text
+        if not diag:
+            return None
+        if not path_hint and "<diagnostics file=" in diag:
+            match = re.search(r'<diagnostics file="([^"]+)"', diag)
+            if match:
+                path_hint = match.group(1)
+        return path_hint, diag[:4000]
+
+    def _start_cu_frame_poller(self, name: str, args: dict) -> None:
+        from computer_use_frames import ComputerUseFramePoller, is_computer_use_tool
+
+        if not is_computer_use_tool(name) or not self.on_computer_use_frame:
+            return
+        with self._cu_poller_lock:
+            self._stop_cu_frame_poller()
+            poller = ComputerUseFramePoller(
+                tool_name=name,
+                args=args,
+                on_frame=self.on_computer_use_frame,
+            )
+            poller.start()
+            self._cu_poller = poller
+
+    def _stop_cu_frame_poller(self) -> None:
+        with self._cu_poller_lock:
+            if self._cu_poller is not None:
+                self._cu_poller.stop()
+                self._cu_poller = None
+
+    def _emit_computer_use_frame(self, name: str, args: Any, result: Any, status: str = "completed") -> None:
+        if not self.on_computer_use_frame:
+            return
+        try:
+            from computer_use_frames import (
+                build_computer_use_frame_payload,
+                is_computer_use_tool,
+                try_supplemental_capture,
+            )
+
+            payload = build_computer_use_frame_payload(
+                tool_name=name,
+                args=args,
+                result=result,
+                status=status,
+            )
+            if payload is None and status == "completed" and is_computer_use_tool(name):
+                supplemental = try_supplemental_capture()
+                if supplemental:
+                    payload = build_computer_use_frame_payload(
+                        tool_name=name,
+                        args=args,
+                        result=result,
+                        status=status,
+                        image=supplemental,
+                    )
+            if payload:
+                self.on_computer_use_frame(payload)
+        except Exception as exc:
+            print(f"[hermes-adapter] computer_use frame error: {exc}", flush=True)
+
     def _on_tool_complete(self, tc_id: str, name: str, args: dict, result: str):
         """Map real agent's tool_complete_callback to CloudChat's on_tool_end."""
+        self._stop_cu_frame_poller()
+        lsp = self._extract_lsp_diagnostics(result or "")
+        if lsp:
+            path_hint, diag_text = lsp
+            self._emit_lsp_diagnostic_event(path_hint, diag_text, name)
+        self._emit_computer_use_frame(name, args, result, status="completed")
         if self.on_tool_end:
             # Composer task panel tools need their JSON output intact (see
             # main.py on_tool_end) — main.py applies the per-tool cap.
-            cap = 4000 if name in ("todo", "delegate_task", "process", "terminal") else 500
-            self.on_tool_end(name, json.dumps(args) if args else "", (result or "")[:cap])
+            from computer_use_frames import computer_use_text_summary, is_computer_use_tool
+
+            if is_computer_use_tool(name):
+                output = computer_use_text_summary(result)
+            else:
+                output = (result or "")[:4000 if name in ("todo", "delegate_task", "process", "terminal") else 500]
+            self.on_tool_end(name, json.dumps(args) if args else "", output)
 
     def _on_reasoning(self, text: str):
         """Forward reasoning deltas."""
@@ -1064,10 +1257,66 @@ class HermesAgentAdapter:
             self.on_thinking(api_call_count)
 
     def _on_status(self, category: str, message: str):
-        """Log status events for debugging."""
+        """Log status events and surface completed fallback provider switches."""
         if message:
             self._last_status_message = message
+            switch = parse_fallback_switch_status(message)
+            if switch and self.on_fallback_switch:
+                switch_key = f"{switch['provider']}:{switch['model']}"
+                if switch_key != self._last_fallback_switch_key:
+                    self._last_fallback_switch_key = switch_key
+                    self.on_fallback_switch(switch["provider"], switch["model"])
         print(f"[hermes-adapter] status/{category}: {message}", flush=True)
+
+    def _on_tool_progress(self, event_type, name=None, preview=None, args=None, **kwargs):
+        """Forward Hermes tool_progress events — especially MoA advisor blocks.
+
+        Hermes MoA emits:
+          - moa.reference  (name=label, preview=text, moa_index, moa_count)
+          - moa.aggregating (name=aggregator, moa_ref_count)
+        These are display-only; they never mutate conversation history.
+        We surface them as tool_activity so Spark's AgentActivity UI can render
+        collapsible advisor cards without a new SSE channel.
+        """
+        try:
+            event = str(event_type or "")
+            if event == "moa.reference":
+                label = str(name or "")
+                text = str(preview or "")
+                meta = {
+                    "label": label,
+                    "index": kwargs.get("moa_index"),
+                    "count": kwargs.get("moa_count"),
+                }
+                meta_json = json.dumps(meta, ensure_ascii=False)
+                if self.on_tool_start:
+                    self.on_tool_start("moa.reference", meta_json)
+                if self.on_tool_end:
+                    # Cap advisor text — full essays blow the activity panel
+                    self.on_tool_end("moa.reference", meta_json, (text or "")[:4000])
+                return
+            if event == "moa.aggregating":
+                aggregator = str(name or "")
+                meta = {
+                    "aggregator": aggregator,
+                    "ref_count": kwargs.get("moa_ref_count"),
+                }
+                meta_json = json.dumps(meta, ensure_ascii=False)
+                if self.on_tool_start:
+                    self.on_tool_start("moa.aggregating", meta_json)
+                if self.on_tool_end:
+                    self.on_tool_end(
+                        "moa.aggregating",
+                        meta_json,
+                        f"Aggregating with {aggregator}" if aggregator else "Aggregating reference models",
+                    )
+                return
+            # tool_progress tool.completed lacks args/result — screenshots are
+            # emitted from tool_complete_callback (_on_tool_complete) only.
+            # Other progress events (tool.started etc.) are covered by
+            # tool_start_callback / tool_complete_callback — ignore to avoid dupes.
+        except Exception as exc:
+            print(f"[hermes-adapter] tool_progress error: {exc}", flush=True)
 
     # --- Main entry point ---
 
@@ -1087,6 +1336,7 @@ class HermesAgentAdapter:
         """
         self._streamed_text_chunks = []
         self._last_status_message = None
+        self._last_fallback_switch_key = None
         try:
             result = self._agent.run_conversation(
                 user_message=user_message,
@@ -1094,6 +1344,13 @@ class HermesAgentAdapter:
                 conversation_history=conversation_history or [],
             )
         finally:
+            self._stop_cu_frame_poller()
+            try:
+                from computer_use_frames import restore_spark_keep_cu_screenshots_patch
+
+                restore_spark_keep_cu_screenshots_patch()
+            except Exception:
+                pass
             # Deregister repo tools after the conversation to clean up the registry
             if self._repo_provider:
                 self._repo_provider._deregister_tools()

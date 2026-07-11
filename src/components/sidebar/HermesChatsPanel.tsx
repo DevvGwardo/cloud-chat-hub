@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Trash2, Zap, AlertCircle, Loader2, ChevronRight, Search } from 'lucide-react';
+import { Trash2, Zap, AlertCircle, Loader2, ChevronRight, Search, GitBranch } from 'lucide-react';
 import { useSessionsStore, type HermesSession } from '@/stores/sessions-store';
 import { useUIStore } from '@/stores/ui-store';
-import { getSession, type HermesSessionDetail, type HermesSessionMessage } from '@/lib/hermes-api';
+import { forkHermesSession, fetchGatewayCapabilities, getSession, type HermesSessionDetail, type HermesSessionMessage } from '@/lib/hermes-api';
 import { deriveTasks } from '@/lib/derive-tasks';
 import { cn } from '@/lib/utils';
 import { relativeTime } from '@/lib/relative-time';
@@ -52,6 +52,9 @@ interface SessionCardProps {
   onDeleteRequest: (id: string) => void;
   onDeleteConfirm: (id: string) => void;
   onDeleteCancel: () => void;
+  forkEnabled: boolean;
+  forkingId: string | null;
+  onFork: (id: string) => void;
   detail: HermesSessionDetail | null;
   detailLoading: boolean;
   detailError: string | null;
@@ -67,6 +70,9 @@ function SessionCard({
   onDeleteRequest,
   onDeleteConfirm,
   onDeleteCancel,
+  forkEnabled,
+  forkingId,
+  onFork,
   detail,
   detailLoading,
   detailError,
@@ -74,6 +80,7 @@ function SessionCard({
   onTabChange,
 }: SessionCardProps) {
   const isConfirming = deleteConfirmId === session.id;
+  const isForking = forkingId === session.id;
   const title = sessionTitle(session);
   const chat = detail?.chat ?? [];
 
@@ -129,7 +136,22 @@ function SessionCard({
             </div>
           )}
         </div>
-        <div className="flex-shrink-0 opacity-0 transition-opacity group-hover:opacity-100">
+        <div className="flex flex-shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+          {forkEnabled && (
+            <button
+              type="button"
+              disabled={isForking}
+              onClick={(e) => { e.stopPropagation(); onFork(session.id); }}
+              className="inline-flex h-6 w-6 items-center justify-center rounded text-muted-foreground/60 hover:bg-primary/10 hover:text-primary disabled:opacity-40"
+              title="Fork session"
+            >
+              {isForking ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <GitBranch className="h-3 w-3" />
+              )}
+            </button>
+          )}
           {isConfirming ? (
             <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
               <span className="mr-0.5 text-[10px] text-muted-foreground">Delete?</span>
@@ -271,6 +293,9 @@ export function HermesChatsPanel() {
   const [query, setQuery] = useState('');
   const [activeDetailsLoading, setActiveDetailsLoading] = useState(false);
   const [activeDetailsError, setActiveDetailsError] = useState<string | null>(null);
+  const [forkEnabled, setForkEnabled] = useState(false);
+  const [forkingId, setForkingId] = useState<string | null>(null);
+  const [forkError, setForkError] = useState<string | null>(null);
   const selectedSessionId = useUIStore((s) => s.selectedSessionId);
   const setSelectedSessionId = useUIStore((s) => s.setSelectedSessionId);
   const viewMode = useUIStore((s) => s.hermesSessionViewMode);
@@ -316,6 +341,23 @@ export function HermesChatsPanel() {
       }
     }
   }, [fetchActiveDetails]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const caps = await fetchGatewayCapabilities();
+        if (!cancelled) {
+          setForkEnabled(!!caps.session_fork);
+        }
+      } catch {
+        if (!cancelled) setForkEnabled(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Load the first page, re-running when the search query changes. Debounced so
   // typing in the filter box doesn't fire a request per keystroke; an empty
@@ -399,6 +441,23 @@ export function HermesChatsPanel() {
       setSelectedSession(null);
       setDetailError(null);
       setDetailLoading(false);
+    }
+  };
+
+  const handleFork = async (id: string) => {
+    setForkError(null);
+    setForkingId(id);
+    try {
+      const result = await forkHermesSession(id);
+      await refreshSessions();
+      const forkId = result.session?.id;
+      if (forkId) {
+        setSelectedSessionId(forkId);
+      }
+    } catch (err) {
+      setForkError(err instanceof Error ? err.message : 'Failed to fork session');
+    } finally {
+      setForkingId(null);
     }
   };
 
@@ -517,10 +576,10 @@ export function HermesChatsPanel() {
       )}
 
       {/* Error */}
-      {error && (
+      {(error || forkError) && (
         <div className="mx-3 mb-2 flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-500/10 p-2">
           <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 text-red-400" />
-          <span className="text-[11px] text-red-400">{error}</span>
+          <span className="text-[11px] text-red-400">{forkError ?? error}</span>
         </div>
       )}
 
@@ -560,6 +619,9 @@ export function HermesChatsPanel() {
                 onDeleteRequest={setDeleteConfirmId}
                 onDeleteConfirm={handleDeleteConfirm}
                 onDeleteCancel={() => setDeleteConfirmId(null)}
+                forkEnabled={forkEnabled}
+                forkingId={forkingId}
+                onFork={handleFork}
                 detail={selectedSessionId === session.id ? selectedSession : null}
                 detailLoading={selectedSessionId === session.id ? detailLoading : false}
                 detailError={selectedSessionId === session.id ? detailError : null}

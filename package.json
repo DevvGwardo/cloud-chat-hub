@@ -12,9 +12,10 @@
   "scripts": {
     "preinstall": "node scripts/preinstall-guard.cjs",
     "dev": "vite",
-    "build": "vite build && tsup server/index.ts --out-dir dist/server --format esm --target node22 --clean --sourcemap",
+    "build": "vite build && tsup && node scripts/write-server-entry-shim.cjs",
     "build:app": "vite build",
-    "build:server": "tsup server/index.ts --out-dir dist/server --format esm --target node22 --clean --sourcemap",
+    "build:server": "tsup && node scripts/write-server-entry-shim.cjs",
+    "start": "SERVE_FRONTEND=true node dist/index.js",
     "analyze": "vite build --mode analyze",
     "build:dev": "vite build --mode development",
     "icons": "bash scripts/generate-spark-assets.sh",

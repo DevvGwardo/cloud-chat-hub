@@ -1,8 +1,8 @@
 /**
  * Shared MCP server connection utilities.
  *
- * Centralises the JSON-RPC `tools/list` discovery flow so both the sidebar
- * panel and the settings modal use the same connection + status-tracking code.
+ * Centralises the JSON-RPC `tools/list` discovery flow for legacy Spark-side
+ * MCP state in the hermes zustand store (not used by Settings or sidebar panels).
  */
 
 import { useHermesStore, type MCPTool } from '@/stores/hermes-store';

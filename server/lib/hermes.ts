@@ -23,11 +23,37 @@ import { randomUUID } from 'crypto';
 // server-side and its final assistant message is persisted to the chat store
 // so it appears when the conversation is reopened. An explicit Stop from the
 // UI calls cancelHermesRun() to actually abort.
-const activeAgentRuns = new Map<string, { controller: AbortController; startedAt: number; text: string }>();
+const activeAgentRuns = new Map<string, {
+  controller: AbortController;
+  startedAt: number;
+  text: string;
+  useRuns?: boolean;
+}>();
+
+const HERMES_BRIDGE_ROOT = (process.env.HERMES_BRIDGE_URL || 'http://localhost:3002').replace(/\/v1\/?$/, '');
+
+async function stopHermesGatewayRun(conversationId: string): Promise<void> {
+  try {
+    await fetch(`${HERMES_BRIDGE_ROOT}/v1/runs/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation_id: conversationId }),
+    });
+  } catch (error) {
+    logger.warn(
+      `[chat] Failed to stop gateway run for conversation=${conversationId}: ${
+        error instanceof Error ? error.message : error
+      }`,
+    );
+  }
+}
 
 export function cancelHermesRun(conversationId: string): boolean {
   const run = activeAgentRuns.get(conversationId);
   if (!run) return false;
+  if (run.useRuns) {
+    void stopHermesGatewayRun(conversationId);
+  }
   run.controller.abort();
   activeAgentRuns.delete(conversationId);
   return true;
@@ -214,6 +240,7 @@ export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProx
     tool_activity?: unknown;
     server_tool_event?: unknown;
     agent_status?: unknown;
+    fallback_switch?: unknown;
     choices?: Array<{
       finish_reason?: unknown;
       delta?: {
@@ -222,6 +249,7 @@ export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProx
         tool_activity?: unknown;
         server_tool_event?: unknown;
         agent_status?: unknown;
+        fallback_switch?: unknown;
       };
       message?: {
         content?: unknown;
@@ -247,6 +275,14 @@ export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProx
   if (choice?.delta?.agent_status && typeof choice.delta.agent_status === 'object') {
     data.push({ type: 'agent_status', status: choice.delta.agent_status as Record<string, unknown> });
   }
+  if (choice?.delta?.fallback_switch && typeof choice.delta.fallback_switch === 'object') {
+    const switchPayload = choice.delta.fallback_switch as Record<string, unknown>;
+    data.push({
+      type: 'fallback_switch',
+      provider: switchPayload.provider,
+      model: switchPayload.model,
+    });
+  }
   if (parsed.tool_activity && typeof parsed.tool_activity === 'object') {
     data.push({ type: 'hermes_tool_activity', activity: parsed.tool_activity as Record<string, unknown> });
   }
@@ -255,6 +291,14 @@ export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProx
   }
   if (parsed.agent_status && typeof parsed.agent_status === 'object') {
     data.push({ type: 'agent_status', status: parsed.agent_status as Record<string, unknown> });
+  }
+  if (parsed.fallback_switch && typeof parsed.fallback_switch === 'object') {
+    const switchPayload = parsed.fallback_switch as Record<string, unknown>;
+    data.push({
+      type: 'fallback_switch',
+      provider: switchPayload.provider,
+      model: switchPayload.model,
+    });
   }
 
   const reasoning = typeof choice?.delta?.reasoning === 'string' ? choice.delta.reasoning : undefined;
@@ -421,6 +465,8 @@ export async function proxyHermesAgentLoopToDataStream(input: {
   conversationId?: string;
   /** Hermes agent reasoning effort ('none'|'minimal'|'low'|'medium'|'high'|'xhigh'). */
   reasoningEffort?: string;
+  /** Phase 7: opt-in gateway /v1/runs transport via bridge translate layer. */
+  hermesUseRuns?: boolean;
 }) {
   const bridgeUrl = `${OPENAI_COMPATIBLE.hermes}/chat/completions`;
   const abortController = new AbortController();
@@ -440,8 +486,19 @@ export async function proxyHermesAgentLoopToDataStream(input: {
   const canRunInBackground = !!input.conversationId;
   if (input.conversationId) {
     // A newer run for the same conversation supersedes the old one.
-    activeAgentRuns.get(input.conversationId)?.controller.abort();
-    activeAgentRuns.set(input.conversationId, { controller: abortController, startedAt: Date.now(), text: '' });
+    const prior = activeAgentRuns.get(input.conversationId);
+    if (prior) {
+      if (prior.useRuns) {
+        void stopHermesGatewayRun(input.conversationId);
+      }
+      prior.controller.abort();
+    }
+    activeAgentRuns.set(input.conversationId, {
+      controller: abortController,
+      startedAt: Date.now(),
+      text: '',
+      useRuns: !!input.hermesUseRuns,
+    });
   }
   const disconnect = bindClientDisconnect(input.req, input.res, () => {
     if (!canRunInBackground) {
@@ -459,7 +516,7 @@ export async function proxyHermesAgentLoopToDataStream(input: {
   let bridgeResponse: Response;
   try {
     logger.info(
-      `[chat] Hermes agent-loop bridge fetch start. model=${input.model} repo=${repoLabel} toolsets=${input.hermesToolsets || '-'} t=${startedAt}`,
+      `[chat] Hermes agent-loop bridge fetch start. model=${input.model} repo=${repoLabel} toolsets=${input.hermesToolsets || '-'} runs=${input.hermesUseRuns ? '1' : '0'} t=${startedAt}`,
     );
     bridgeResponse = await fetchHermesWithReadinessRetry(bridgeUrl, {
       method: 'POST',
@@ -469,6 +526,7 @@ export async function proxyHermesAgentLoopToDataStream(input: {
         ...(input.hermesToolsets ? { 'X-Hermes-Toolsets': input.hermesToolsets } : {}),
         ...(input.hermesProvider && input.hermesProvider !== 'auto' ? { 'X-Hermes-Provider': input.hermesProvider } : {}),
         'X-Hermes-Execution-Mode': 'agent-loop',
+        ...(input.hermesUseRuns ? { 'X-Hermes-Use-Runs': '1' } : {}),
         ...(input.activeProfile ? { 'X-Hermes-Profile': input.activeProfile } : {}),
         ...(input.activeRepo?.owner && input.activeRepo?.name
           ? {
@@ -496,6 +554,7 @@ export async function proxyHermesAgentLoopToDataStream(input: {
           : {}),
         ...(input.conversationId ? { conversation_id: input.conversationId } : {}),
         ...(input.reasoningEffort ? { reasoning_effort: input.reasoningEffort } : {}),
+        ...(input.hermesUseRuns ? { hermes_use_runs: true } : {}),
       }),
       signal: combinedSignal,
     }, combinedSignal);

@@ -11,6 +11,7 @@ export interface CommandCallbacks {
   denyCommand?: () => void;
   resetSession?: () => void;
   compressContext?: () => void;
+  resumeSession?: (sessionId?: string) => Promise<string>;
 }
 
 const CommandCallbacksContext = createContext<CommandCallbacks>({});

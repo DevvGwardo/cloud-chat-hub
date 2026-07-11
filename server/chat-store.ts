@@ -710,11 +710,19 @@ export function registerChatStoreRoutes(app: express.Express) {
   const shutdown = () => {
     if (isShuttingDown) return;
     isShuttingDown = true;
-    // During app quit the pino transport worker may already be torn down, so a
-    // log here can throw "the worker is ending". Never let that abort the DB
-    // close (or surface as an uncaught exception).
-    try { logger.info('[chat-store] Closing database connection'); } catch { /* logger already closed */ }
-    chatStore.close();
+    // Avoid logger here: on Electron quit pino's transport worker may already
+    // be ending, and thread-stream emits an uncaught "the worker is ending".
+    try {
+      // eslint-disable-next-line no-console
+      console.log('[chat-store] Closing database connection');
+    } catch {
+      /* ignore */
+    }
+    try {
+      chatStore.close();
+    } catch {
+      /* already closed */
+    }
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

@@ -97,7 +97,7 @@ export const CreateRoomDialog: React.FC<CreateRoomDialogProps> = ({ open, profil
       <div className="mx-4 w-full max-w-lg rounded-xl border border-[#2F2F2F] bg-[hsl(var(--card))] shadow-xl">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-[#2F2F2F] px-5 py-4">
-          <h2 className="text-[15px] font-semibold text-[hsl(var(--text-primary))]">Create Swarm Room</h2>
+          <h2 className="text-[15px] font-semibold text-[hsl(var(--text-primary))]">Create Agent Room</h2>
           <button
             onClick={handleClose}
             className="rounded-md p-1 text-muted-foreground hover:text-foreground transition-colors"

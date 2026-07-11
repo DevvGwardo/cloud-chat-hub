@@ -15,6 +15,7 @@ import { useRoomStore } from '@/stores/room-store';
 import { cn } from '@/lib/utils';
 import { SlotNumber } from '@/components/ui/SlotNumber';
 import { getChatScopeId } from '@/lib/chat-scope';
+import { COMPRESS_CONTEXT_MESSAGE } from '@/lib/hermes-commands';
 
 interface ChatPanelProps {
   panelId: string;
@@ -56,6 +57,9 @@ function ChatRuntimeArea({
       activeModel={chat.activeModel}
       toolActivityMap={'toolActivityMap' in chat ? chat.toolActivityMap : undefined}
       agentStatus={'agentStatus' in chat ? chat.agentStatus : undefined}
+      computerUseDock={'computerUseDock' in chat ? chat.computerUseDock : undefined}
+      onComputerUseDockExpand={'handleComputerUseDockExpand' in chat ? chat.handleComputerUseDockExpand : undefined}
+      onComputerUseDockCollapse={'handleComputerUseDockCollapse' in chat ? chat.handleComputerUseDockCollapse : undefined}
       conversationAutoApproveEnabled={'conversationAutoApproveEnabled' in chat ? (chat.conversationAutoApproveEnabled as boolean) : false}
       setConversationAutoApprove={'setConversationAutoApprove' in chat ? (chat.setConversationAutoApprove as (value: boolean) => void) : undefined}
     />
@@ -81,8 +85,13 @@ function StandardChatRuntime({
   const commandCallbacks = {
     stopAgent: chat.handleStop,
     retryMessage: chat.handleRegenerate,
+    compressContext: () => chat.handleQuickSend(COMPRESS_CONTEXT_MESSAGE),
+    resumeSession: chat.handleResumeSession,
     newConversation: conversationId
-      ? () => setConversationForPanel(panelId, null)
+      ? () => {
+          chat.clearHermesSessionAttachment();
+          setConversationForPanel(panelId, null);
+        }
       : undefined,
     renameConversation: conversationId
       ? (title: string) => renameConversation(conversationId, title)
@@ -186,6 +195,7 @@ function RoomChatRuntime({ roomId }: { roomId: string }) {
         setApiKeyModalOpen={roomChat.setApiKeyModalOpen}
         activeProvider={roomChat.activeProvider}
         activeModel={roomChat.activeModel}
+        contextRefsEnabled={false}
       />
     </div>
   );

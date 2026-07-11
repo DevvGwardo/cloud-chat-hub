@@ -51,9 +51,17 @@ export function useRoomChat(roomId: string | null) {
     const beforeCursor = value.slice(0, cursorPos);
     const atMatch = beforeCursor.match(/@(\w*)$/);
     if (atMatch) {
-      setShowMentions(true);
-      setMentionQuery(atMatch[1].toLowerCase());
-      setMentionIndex(0);
+      const partial = atMatch[1].toLowerCase();
+      const contextRefPrefix = ['file', 'folder', 'url', 'diff'].some(
+        (p) => partial === p || partial.startsWith(p) || p.startsWith(partial),
+      );
+      if (!contextRefPrefix) {
+        setShowMentions(true);
+        setMentionQuery(partial);
+        setMentionIndex(0);
+      } else {
+        setShowMentions(false);
+      }
     } else {
       setShowMentions(false);
     }

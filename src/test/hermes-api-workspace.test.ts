@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   fetchSkillsHub,
   fetchHermesSkillDetail,
+  fetchHermesMcpServers,
+  fetchHermesMcpCatalog,
   installHubSkill,
   updateHermesWorkspaceFile,
 } from '@/lib/hermes-api';
@@ -85,6 +87,47 @@ describe('hermes workspace api', () => {
     expect(skills).toHaveLength(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]?.[0]).toContain('/api/hermes/workspace/skills/hub');
+  });
+
+  it('loads MCP servers and catalog from workspace endpoints', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(mockJsonResponse({
+        servers: [{
+          name: 'filesystem',
+          transport: 'stdio',
+          command: 'npx',
+          args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
+          url: '',
+          enabled: true,
+          env_keys: [],
+          tool_count: 4,
+          catalog_id: 'filesystem',
+        }],
+      }))
+      .mockResolvedValueOnce(mockJsonResponse({
+        catalog: [{
+          id: 'filesystem',
+          name: 'filesystem',
+          description: 'Local files',
+          transport: 'stdio',
+          runtime: 'node',
+          requires_param: null,
+          docs_url: '',
+        }],
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const [servers, catalog] = await Promise.all([
+      fetchHermesMcpServers(),
+      fetchHermesMcpCatalog(),
+    ]);
+
+    expect(servers).toHaveLength(1);
+    expect(servers[0]?.name).toBe('filesystem');
+    expect(catalog).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0]?.[0]).toContain('/api/hermes/workspace/mcp-servers');
+    expect(fetchMock.mock.calls[1]?.[0]).toContain('/api/hermes/workspace/mcp-catalog');
   });
 
   it('posts a hub install request by skill name', async () => {

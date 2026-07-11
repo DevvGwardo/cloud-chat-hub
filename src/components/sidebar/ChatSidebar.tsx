@@ -1168,7 +1168,7 @@ export const ChatSidebar: React.FC = () => {
               <div className="flex flex-col items-center justify-center py-16 px-4">
                 <Users className="h-8 w-8 text-muted-foreground/30 mb-3" />
                 <p className="text-[13px] font-medium text-muted-foreground/70 mb-1">No rooms yet</p>
-                <p className="text-[11px] text-muted-foreground/50 text-center">Create a swarm room to collaborate with agents</p>
+                <p className="text-[11px] text-muted-foreground/50 text-center">Create a room to collaborate with agents</p>
               </div>
             ) : (
               <div className="space-y-1">

@@ -1,6 +1,11 @@
 import { logger } from './lib/logger';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { analyzeTask, type AgentInfo as FormationAgentInfo } from './team-formation.js';
+import { resolveExecutionBackend } from './team-formation-routing.js';
 import { publishToMesh, registerMeshPeer } from './mesh-bridge.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -43,6 +48,8 @@ export interface Team {
   status: 'forming' | 'active' | 'synthesizing' | 'done' | 'paused';
   sharedContext: Record<string, unknown>;
   createdAt: number;
+  /** Set after process restart — children are gone; resume re-dispatches. */
+  needsRecovery?: boolean;
 }
 
 interface CardLike {
@@ -74,7 +81,7 @@ Output ONLY valid JSON in this format:
   ]
 }`;
 
-// ─── Team Store (in-memory) ────────────────────────────────────────────────
+// ─── Team Store (durable JSON + in-memory) ─────────────────────────────────
 
 const teams = new Map<string, Team>();
 
@@ -89,8 +96,96 @@ const TEAM_TIMEOUT_MS = Number(process.env.TEAM_TIMEOUT_MS) || 1_800_000;
 const teamTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
 // Cap concurrent agent launches per team to avoid LLM rate limits
-const _MAX_CONCURRENT_TEAM_AGENTS = Number(process.env.TEAM_MAX_CONCURRENT_AGENTS) || 2;
+const MAX_CONCURRENT_TEAM_AGENTS = Number(process.env.TEAM_MAX_CONCURRENT_AGENTS) || 2;
 const MIN_AGENTS_FOR_TEAM = 2;
+
+const TEAMS_STORE_PATH = (() => {
+  const dataDir = process.env.CLOUDCHAT_DATA_DIR
+    || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data');
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+  } catch {
+    // best-effort
+  }
+  return path.join(dataDir, 'teams-store.json');
+})();
+
+function persistTeams(): void {
+  try {
+    const payload = {
+      version: 1,
+      teams: Array.from(teams.values()).map((t) => {
+        const wasInFlight =
+          t.status === 'active' || t.status === 'paused' || t.status === 'synthesizing';
+        return {
+          ...t,
+          // Don't persist transient "working" as if processes are still alive after restart
+          agents: t.agents.map((a) => ({
+            ...a,
+            status: a.status === 'working' ? 'idle' as const : a.status,
+            currentSubtask: a.status === 'working' ? null : a.currentSubtask,
+          })),
+          subtasks: t.subtasks.map((s) => ({
+            ...s,
+            status: s.status === 'in_progress' ? 'pending' as const : s.status,
+          })),
+          // Pause in-flight teams instead of silently resetting to forming — avoids
+          // accidental re-dispatch of orphaned work after restart.
+          status: wasInFlight ? 'paused' as const : t.status,
+          needsRecovery: wasInFlight || Boolean(t.needsRecovery),
+        };
+      }),
+    };
+    fs.writeFileSync(TEAMS_STORE_PATH, JSON.stringify(payload, null, 2), 'utf-8');
+  } catch (err) {
+    logger.warn(`[team-coordinator] Failed to persist teams: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function loadTeamsFromDisk(): void {
+  try {
+    if (!fs.existsSync(TEAMS_STORE_PATH)) return;
+    const raw = fs.readFileSync(TEAMS_STORE_PATH, 'utf-8');
+    const data = JSON.parse(raw) as { teams?: Team[]; version?: number };
+    if (!Array.isArray(data.teams)) return;
+    for (const team of data.teams) {
+      if (!team?.id) continue;
+      // Children never survive process restart — flag paused/in-flight recovery.
+      if (team.needsRecovery || team.status === 'paused') {
+        team.needsRecovery = true;
+        if (team.status !== 'done') team.status = 'paused';
+      }
+      teams.set(team.id, team);
+    }
+    logger.info(`[team-coordinator] Restored ${teams.size} team(s) from disk`);
+  } catch (err) {
+    logger.warn(`[team-coordinator] Failed to load teams store: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+loadTeamsFromDisk();
+
+/** Map dependency titles → subtask ids after planning. */
+export function resolveDependencyIds(subtasks: Subtask[]): Subtask[] {
+  const byTitle = new Map(subtasks.map((s) => [s.title.toLowerCase().trim(), s.id]));
+  return subtasks.map((st) => ({
+    ...st,
+    dependencies: (st.dependencies || []).map((dep) => {
+      const key = String(dep).toLowerCase().trim();
+      // Already an id?
+      if (subtasks.some((s) => s.id === dep)) return dep;
+      return byTitle.get(key) || dep;
+    }),
+  }));
+}
+
+export function depsSatisfied(subtask: Subtask, all: Subtask[]): boolean {
+  if (!subtask.dependencies?.length) return true;
+  return subtask.dependencies.every((dep) => {
+    const match = all.find((s) => s.id === dep || s.title === dep || s.title.toLowerCase() === String(dep).toLowerCase());
+    return match?.status === 'done';
+  });
+}
 
 // ─── Hermes Profile Discovery ──────────────────────────────────────────────
 
@@ -265,13 +360,19 @@ export const teamCoordinator = {
       expertise: p.expertise,
     }));
     const formation = analyzeTask(taskText, formationAgents);
+    const route = resolveExecutionBackend(formation, { teamMode: cardOrRequest.teamMode });
 
     // Use formation agentCount to determine how many agents to pick
     const taskKeywords = taskText.toLowerCase().split(/\W+/).filter((w) => w.length > 3);
     const agents = await pickAgents(profiles, cardOrRequest.title, taskKeywords, formation.agentCount);
 
-    // Log the formation decision
-    logger.info(`[team-coordinator] Formation for "${cardOrRequest.title}": ${formation.strategy} (${formation.reason})`);
+    // Log formation + chosen execution backend
+    logger.info(
+      `[team-coordinator] Formation for "${cardOrRequest.title}": ${formation.strategy} (${formation.reason})`,
+    );
+    logger.info(
+      `[team-coordinator] Execution backend for "${cardOrRequest.title}": ${route.backend} — ${route.reason}`,
+    );
 
     // If fewer than 2 agents can be assembled, this task is not suitable for team mode
     if (agents.length < MIN_AGENTS_FOR_TEAM) {
@@ -285,11 +386,17 @@ export const teamCoordinator = {
       subtasks: [],
       delegations: [],
       status: 'forming',
-      sharedContext: { formationStrategy: formation.strategy, formationReason: formation.reason },
+      sharedContext: {
+        formationStrategy: formation.strategy,
+        formationReason: formation.reason,
+        executionBackend: route.backend,
+        executionRouteReason: route.reason,
+      },
       createdAt: Date.now(),
     };
 
     teams.set(id, team);
+    persistTeams();
     logger.info(`[team-coordinator] Created team ${id.slice(0, 12)}... for card "${cardOrRequest.title}" with ${agents.length} agents (${formation.strategy})`);
 
     // Fire-and-forget mesh sync — non-blocking, no crash on failure
@@ -337,15 +444,16 @@ export const teamCoordinator = {
         subtasks?: Array<{ title: string; description: string; dependencies: string[] }>;
       };
 
-      return (parsed.subtasks ?? []).map((s) => ({
+      const mapped = (parsed.subtasks ?? []).map((s) => ({
         id: randomUUID(),
         title: s.title,
         description: s.description,
         assignedTo: null,
-        dependencies: s.dependencies,
+        dependencies: Array.isArray(s.dependencies) ? s.dependencies.map(String) : [],
         status: 'pending' as const,
         result: null,
       }));
+      return resolveDependencyIds(mapped);
     } catch {
       // Parse failed, return fallback
       return [{
@@ -361,7 +469,8 @@ export const teamCoordinator = {
   },
 
   assignSubtasks(subtasks: Subtask[], agents: TeamAgent[]): Subtask[] {
-    const assigned = subtasks.map((st) => {
+    const withIds = resolveDependencyIds(subtasks);
+    const assigned = withIds.map((st) => {
       if (agents.length === 0) return { ...st, assignedTo: null };
 
       // Score agents by matching expertise against subtask title/description
@@ -393,28 +502,53 @@ export const teamCoordinator = {
     dispatchingTeams.add(teamId);
     try {
       const team = teams.get(teamId);
-      if (!team || team.status !== 'forming') return false;
+      const recoverable = team?.status === 'paused' && team.needsRecovery;
+      if (!team || (team.status !== 'forming' && team.status !== 'active' && !recoverable)) {
+        return false;
+      }
 
+      team.needsRecovery = false;
       team.status = 'active';
+      team.subtasks = resolveDependencyIds(team.subtasks);
 
-    // Spawn all agent subprocesses concurrently
-    const spawnTasks: Array<Promise<void>> = [];
-    for (const agent of team.agents) {
-      const subtask = team.subtasks.find(
-        (st) => st.assignedTo === agent.profileName && st.status === 'pending',
+      // Only spawn ready subtasks (deps met), capped by concurrency
+      const inFlight = team.subtasks.filter((s) => s.status === 'in_progress').length;
+      const slots = Math.max(0, MAX_CONCURRENT_TEAM_AGENTS - inFlight);
+      const ready = team.subtasks.filter(
+        (st) => st.status === 'pending' && st.assignedTo && depsSatisfied(st, team.subtasks),
       );
-      if (!subtask) continue;
 
-      agent.currentSubtask = subtask.id;
-      agent.status = 'working';
-      subtask.status = 'in_progress';
+      const spawnTasks: Array<Promise<void>> = [];
+      let launched = 0;
+      for (const subtask of ready) {
+        if (launched >= slots) break;
+        const agent = team.agents.find(
+          (a) => a.profileName === subtask.assignedTo && (a.status === 'idle' || a.status === 'done'),
+        );
+        if (!agent) continue;
 
-      spawnTasks.push(spawnTeamAgent(team.id, subtask.id, agent, subtask, team.taskId));
-    }
+        agent.currentSubtask = subtask.id;
+        agent.status = 'working';
+        subtask.status = 'in_progress';
+        spawnTasks.push(spawnTeamAgent(team.id, subtask.id, agent, subtask, team.taskId));
+        launched += 1;
+      }
 
-    await Promise.all(spawnTasks);
+      // Mark pending subtasks with unmet deps as blocked until parents finish
+      for (const st of team.subtasks) {
+        if (st.status === 'pending' && st.dependencies.length > 0 && !depsSatisfied(st, team.subtasks)) {
+          st.status = 'blocked';
+          st.blockedReason = 'Waiting on dependencies';
+        }
+      }
 
-    logger.info(`[team-coordinator] Dispatched team ${team.id.slice(0, 12)}... with ${team.agents.filter(a => a.status === 'working').length} active agents`);
+      await Promise.all(spawnTasks);
+      persistTeams();
+
+      logger.info(
+        `[team-coordinator] Dispatched team ${team.id.slice(0, 12)}... ` +
+        `launched=${launched} cap=${MAX_CONCURRENT_TEAM_AGENTS} ready=${ready.length}`,
+      );
       return true;
     } finally {
       dispatchingTeams.delete(teamId);
@@ -434,28 +568,37 @@ export const teamCoordinator = {
     // Update agent status
     const agent = team.agents.find((a) => a.currentSubtask === subtaskId);
     if (agent) {
-      agent.status = 'done';
+      agent.status = 'idle';
       agent.currentSubtask = null;
     }
 
-    // Check if any blocked subtasks now have satisfied dependencies
+    // Unblock dependents whose deps are now met, then fill concurrency slots
     for (const blocked of team.subtasks) {
-      if (blocked.status !== 'blocked') continue;
-      const depsMet = blocked.dependencies.every((depTitle) => {
-        const dep = team.subtasks.find((st) => st.title === depTitle);
-        return dep?.status === 'done';
-      });
-      if (depsMet) {
+      if (blocked.status !== 'blocked' && blocked.status !== 'pending') continue;
+      if (!depsSatisfied(blocked, team.subtasks)) continue;
+      if (blocked.status === 'blocked') {
         blocked.status = 'pending';
-        const assignedAgent = team.agents.find((a) => a.profileName === blocked.assignedTo);
-        if (assignedAgent) {
-          assignedAgent.currentSubtask = blocked.id;
-          assignedAgent.status = 'working';
-          blocked.status = 'in_progress';
-          await spawnTeamAgent(team.id, blocked.id, assignedAgent, blocked, team.taskId);
-        }
+        blocked.blockedReason = undefined;
       }
     }
+
+    const inFlight = team.subtasks.filter((s) => s.status === 'in_progress').length;
+    let slots = Math.max(0, MAX_CONCURRENT_TEAM_AGENTS - inFlight);
+    for (const next of team.subtasks) {
+      if (slots <= 0) break;
+      if (next.status !== 'pending' || !depsSatisfied(next, team.subtasks)) continue;
+      const assignedAgent = team.agents.find(
+        (a) => a.profileName === next.assignedTo && (a.status === 'idle' || a.status === 'done'),
+      );
+      if (!assignedAgent) continue;
+      assignedAgent.currentSubtask = next.id;
+      assignedAgent.status = 'working';
+      next.status = 'in_progress';
+      await spawnTeamAgent(team.id, next.id, assignedAgent, next, team.taskId);
+      slots -= 1;
+    }
+
+    persistTeams();
 
     // Fire-and-forget mesh sync for subtask completion
     publishToMesh(teamId, {
@@ -502,6 +645,7 @@ Provide a concise summary of what was accomplished.`;
 
     team.sharedContext['synthesis'] = result || 'Team task completed.';
     team.status = 'done';
+    persistTeams();
 
     // Mark the original card as done if this is a kanban task
     try {
@@ -543,10 +687,16 @@ Provide a concise summary of what was accomplished.`;
 
     const sanitizedReason = String(reason).replace(/[^\x20-\x7E\s]/g, '').replace(/\n/g, ' ').slice(0, 200);
     logger.info(`[team-coordinator] Subtask ${subtaskId.slice(0, 12)}... blocked: ${sanitizedReason}`);
+    persistTeams();
   },
 
   getTeam(teamId: string): Team | undefined {
     return teams.get(teamId);
+  },
+
+  /** Persist current team map (call after mutating team fields externally). */
+  save(): void {
+    persistTeams();
   },
 
   getActiveTeams(): Team[] {
@@ -564,7 +714,9 @@ Provide a concise summary of what was accomplished.`;
 
   /** Remove a team from the store (cleanup). */
   removeTeam(teamId: string): boolean {
-    return teams.delete(teamId);
+    const ok = teams.delete(teamId);
+    if (ok) persistTeams();
+    return ok;
   },
 
   /** Pause a team by sending SIGSTOP to all child processes. */
@@ -590,6 +742,7 @@ Provide a concise summary of what was accomplished.`;
       for (const agent of team.agents) {
         if (agent.status === 'working') agent.status = 'idle';
       }
+      persistTeams();
       logger.info(`[team-coordinator] Paused team ${teamId.slice(0, 12)}...`);
     }
     return paused;
@@ -599,6 +752,16 @@ Provide a concise summary of what was accomplished.`;
   resumeTeam(teamId: string): boolean {
     const team = teams.get(teamId);
     if (!team || team.status !== 'paused') return false;
+
+    // After restart, child processes are gone — re-dispatch pending work explicitly.
+    if (team.needsRecovery) {
+      team.needsRecovery = false;
+      team.status = 'forming';
+      persistTeams();
+      void teamCoordinator.dispatchTeam(teamId);
+      logger.info(`[team-coordinator] Recovering team ${teamId.slice(0, 12)}... via re-dispatch`);
+      return true;
+    }
 
     let resumed = false;
     for (const subtask of team.subtasks) {
@@ -615,6 +778,7 @@ Provide a concise summary of what was accomplished.`;
 
     if (resumed) {
       team.status = 'active';
+      persistTeams();
       // Restore agent status for in-progress subtasks
       for (const agent of team.agents) {
         if (agent.currentSubtask) {
@@ -631,11 +795,6 @@ Provide a concise summary of what was accomplished.`;
 };
 
 // ─── Background Team Agent Spawner ─────────────────────────────────────────
-
-import { spawn } from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 const SCRIPTS_DIR = (() => {
   const sourceDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'scripts');
@@ -681,6 +840,7 @@ async function spawnTeamAgent(
       TEAM_AGENT_PROFILE: agent.profileName,
       TEAM_SUBTASK_TITLE: subtask.title,
       TEAM_SUBTASK_DESC: subtask.description,
+      ...(process.env.HERMES_WORKTREE === '1' ? { HERMES_WORKTREE: '1' } : {}),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,

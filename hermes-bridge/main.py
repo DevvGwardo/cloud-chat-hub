@@ -7,6 +7,7 @@ import subprocess
 import uuid
 import sys
 import hashlib
+import hmac
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1472,6 +1473,8 @@ try:
                         "x-hermes-repo-name": "GitHub repo name (for repo mode)",
                         "x-hermes-github-pat": "GitHub PAT for repo operations",
                         "x-hermes-repo-edit-intent": "1 to enable edit-mode tools",
+                        "x-hermes-worktree": "1 to run in an isolated git worktree",
+                        "x-hermes-repo-root": "Local git repo root for worktree creation",
                     },
                 },
             })
@@ -1783,11 +1786,40 @@ except ImportError:
         pass
 
 HERMES_PORT = int(os.environ.get("HERMES_PORT", "3002"))
+# Default to loopback so LAN clients cannot reach mutating ops. Override with
+# HERMES_BRIDGE_HOST=0.0.0.0 only when intentionally exposing the bridge.
+HERMES_BRIDGE_HOST = os.environ.get("HERMES_BRIDGE_HOST", "127.0.0.1").strip() or "127.0.0.1"
 OPENROUTER_KEY = os.environ.get("HERMES_OPENROUTER_KEY", "")
 MINIMAX_KEY = os.environ.get("HERMES_MINIMAX_KEY", "")
 HERMES_BRIDGE_TOKEN = os.environ.get("HERMES_BRIDGE_TOKEN", "")
 HERMES_BRIDGE_VERSION = os.environ.get("HERMES_BRIDGE_VERSION", "dev")
 DEFAULT_TOOLSETS = os.environ.get("HERMES_TOOLSETS", "web,browser,terminal")
+_BRIDGE_AUTH_EXEMPT_PATHS = frozenset({"/health", "/diag"})
+
+
+def _is_loopback_host(host: Optional[str]) -> bool:
+    if not host:
+        return False
+    h = host.split("%", 1)[0].strip().lower()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    return h in ("127.0.0.1", "::1", "localhost")
+
+
+def _bridge_token_matches(provided: str) -> bool:
+    if not provided or not HERMES_BRIDGE_TOKEN:
+        return False
+    try:
+        return hmac.compare_digest(provided.encode("utf-8"), HERMES_BRIDGE_TOKEN.encode("utf-8"))
+    except (TypeError, ValueError):
+        return False
+
+
+def _extract_bridge_token(request: Request) -> str:
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return (request.headers.get("x-hermes-bridge-token") or "").strip()
 
 def _load_cli_model_config(hermes_home: Optional[Path] = None) -> dict:
     """Read the `model:` block from <hermes_home>/config.yaml (Hermes CLI config).
@@ -1841,6 +1873,285 @@ def _load_cli_default_model() -> str | None:
 _cli_model_config = _load_cli_model_config()
 _cli_default_model = _cli_model_config.get("default")
 DEFAULT_MODEL = os.environ.get("HERMES_DEFAULT_MODEL", _cli_default_model or "meta-llama/llama-4-maverick")
+MOA_PROVIDER_ID = "moa"
+MOA_PROVIDER_NAME = "Mixture of Agents"
+MOA_NATIVE_REQUIRED_CODE = "MOA_NATIVE_REQUIRED"
+MOA_NATIVE_REQUIRED_MESSAGE = (
+    "MoA presets require the native Hermes agent adapter (HermesAgentAdapter). "
+    "The bridge fell back to legacy run_agent, which cannot run MoA. "
+    "Install or update Hermes Agent and restart the bridge."
+)
+
+
+def _resolve_chat_agent_class():
+    """Return (agent_class, using_real_adapter). Falls back to run_agent on import failure."""
+    try:
+        from hermes_adapter import HermesAgentAdapter as AIAgent
+        return AIAgent, True
+    except Exception as adapter_err:
+        print(f"[hermes-bridge] Adapter import failed: {adapter_err}", flush=True)
+        from run_agent import AIAgent
+        return AIAgent, False
+
+
+def _moa_native_adapter_required_error(
+    *,
+    model: str,
+    finalize_session,
+) -> JSONResponse:
+    """Refuse MoA when only the legacy run_agent fallback is available."""
+    _mark_request_finished(
+        model=model,
+        success=False,
+        summary=f"model={model} mode=agent-loop error=moa-native-required",
+    )
+    finalize_session(False, MOA_NATIVE_REQUIRED_MESSAGE)
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": {
+                "message": MOA_NATIVE_REQUIRED_MESSAGE,
+                "code": MOA_NATIVE_REQUIRED_CODE,
+            }
+        },
+    )
+
+
+def _read_config_yaml(hermes_home: Optional[Path] = None) -> dict:
+    """Best-effort YAML config reader used for rich config sections."""
+    config_path = (hermes_home or Path.home() / ".hermes") / "config.yaml"
+    if not config_path.is_file():
+        return {}
+    try:
+        import yaml
+        with open(config_path) as f:
+            data = yaml.safe_load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _coerce_moa_model_ref(raw) -> Optional[dict]:
+    if isinstance(raw, str) and raw.strip():
+        return {"provider": "", "model": raw.strip()}
+    if not isinstance(raw, dict):
+        return None
+    model = raw.get("model")
+    if not isinstance(model, str) or not model.strip():
+        return None
+    provider = raw.get("provider")
+    return {
+        "provider": provider.strip() if isinstance(provider, str) else "",
+        "model": model.strip(),
+    }
+
+
+def _coerce_optional_float(raw):
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _coerce_optional_int(raw):
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _coerce_moa_fanout(raw) -> str:
+    mode = str(raw or "").strip().lower()
+    return mode if mode in {"per_iteration", "user_turn"} else "per_iteration"
+
+
+def _normalize_moa_preset(name: str, raw) -> Optional[dict]:
+    if not isinstance(raw, dict):
+        return None
+
+    aggregator = _coerce_moa_model_ref(raw.get("aggregator"))
+    references_raw = raw.get("reference_models") or raw.get("references") or []
+    references = []
+    if isinstance(references_raw, list):
+        for item in references_raw:
+            ref = _coerce_moa_model_ref(item)
+            if ref:
+                references.append(ref)
+
+    if not aggregator or not references:
+        return None
+
+    # Block recursive MoA slots (aggregator/reference must not be provider=moa)
+    if str(aggregator.get("provider") or "").strip().lower() == MOA_PROVIDER_ID:
+        return None
+    references = [
+        ref for ref in references
+        if str(ref.get("provider") or "").strip().lower() != MOA_PROVIDER_ID
+    ]
+    if not references:
+        return None
+
+    return {
+        "name": name,
+        "enabled": raw.get("enabled") is not False,
+        "reference_models": references,
+        "aggregator": aggregator,
+        "reference_temperature": _coerce_optional_float(raw.get("reference_temperature")),
+        "aggregator_temperature": _coerce_optional_float(raw.get("aggregator_temperature")),
+        "max_tokens": _coerce_optional_int(raw.get("max_tokens")),
+        "reference_max_tokens": _coerce_optional_int(raw.get("reference_max_tokens")),
+        "fanout": _coerce_moa_fanout(raw.get("fanout")),
+    }
+
+
+def _normalize_moa_config(raw) -> dict:
+    """Normalize Hermes `moa:` config into the shape CloudChat needs."""
+    result = {"default_preset": "default", "presets": {}}
+    if not isinstance(raw, dict):
+        return result
+
+    moa_cfg = raw.get("moa") if "moa" in raw else raw
+    if not isinstance(moa_cfg, dict):
+        return result
+
+    default_preset = moa_cfg.get("default_preset")
+    if isinstance(default_preset, str) and default_preset.strip():
+        result["default_preset"] = default_preset.strip()
+
+    raw_presets = moa_cfg.get("presets")
+    if not isinstance(raw_presets, dict):
+        return result
+
+    presets = {}
+    for raw_name, raw_preset in raw_presets.items():
+        name = str(raw_name).strip()
+        if not name:
+            continue
+        preset = _normalize_moa_preset(name, raw_preset)
+        if preset:
+            presets[name] = preset
+
+    result["presets"] = presets
+    if result["default_preset"] not in presets and presets:
+        result["default_preset"] = next(iter(presets.keys()))
+    return result
+
+
+def _load_moa_config(hermes_home: Optional[Path] = None) -> dict:
+    return _normalize_moa_config(_read_config_yaml(hermes_home))
+
+
+def _enabled_moa_preset_names(moa_config: dict) -> list[str]:
+    presets = moa_config.get("presets")
+    if not isinstance(presets, dict):
+        return []
+    return [
+        name for name, preset in presets.items()
+        if isinstance(preset, dict) and preset.get("enabled") is not False
+    ]
+
+
+def _preset_to_yaml(preset: dict) -> dict:
+    """Serialize a normalized preset into the Hermes config.yaml shape."""
+    out: dict = {
+        "enabled": preset.get("enabled") is not False,
+        "reference_models": [
+            {"provider": r.get("provider") or "", "model": r.get("model") or ""}
+            for r in (preset.get("reference_models") or [])
+            if isinstance(r, dict) and r.get("model")
+        ],
+        "aggregator": {
+            "provider": (preset.get("aggregator") or {}).get("provider") or "",
+            "model": (preset.get("aggregator") or {}).get("model") or "",
+        },
+        "fanout": _coerce_moa_fanout(preset.get("fanout")),
+    }
+    for key in ("reference_temperature", "aggregator_temperature", "max_tokens", "reference_max_tokens"):
+        value = preset.get(key)
+        if value is not None:
+            out[key] = value
+    return out
+
+
+def _save_moa_config(body: dict, hermes_home: Optional[Path] = None) -> dict:
+    """Merge a MoA config payload into config.yaml and return the normalized result.
+
+    Accepts either a full `{ default_preset, presets }` object or a single
+    `{ preset: {name, ...} }` upsert. Never writes recursive moa slots.
+    """
+    home = hermes_home or (Path.home() / ".hermes")
+    dump, data = _load_hermes_config_editable(Path(home))
+    if not isinstance(data, dict):
+        data = {}
+
+    current = _normalize_moa_config({"moa": data.get("moa")} if isinstance(data.get("moa"), dict) else data.get("moa") or {})
+    presets = dict(current.get("presets") or {})
+    default_preset = current.get("default_preset") or "default"
+
+    if isinstance(body.get("presets"), dict):
+        # Full replace of named presets (only valid ones kept)
+        incoming = body["presets"]
+        rebuilt = {}
+        for raw_name, raw_preset in incoming.items():
+            name = str(raw_name).strip()
+            if not name or not isinstance(raw_preset, dict):
+                continue
+            # Accept both normalized and raw hermes shapes
+            candidate = dict(raw_preset)
+            if "name" not in candidate:
+                candidate["name"] = name
+            normalized = _normalize_moa_preset(name, candidate)
+            if normalized:
+                rebuilt[name] = normalized
+        if not rebuilt:
+            raise ValueError("At least one valid MoA preset with reference_models and aggregator is required")
+        presets = rebuilt
+    elif isinstance(body.get("preset"), dict):
+        raw_preset = body["preset"]
+        name = str(raw_preset.get("name") or body.get("name") or "").strip()
+        if not name:
+            raise ValueError("preset.name is required")
+        if body.get("delete") is True or raw_preset.get("delete") is True:
+            presets.pop(name, None)
+            if not presets:
+                raise ValueError("Cannot delete the last MoA preset")
+        else:
+            normalized = _normalize_moa_preset(name, raw_preset)
+            if not normalized:
+                raise ValueError(
+                    f"Invalid preset '{name}': needs at least one non-moa reference model and a non-moa aggregator"
+                )
+            presets[name] = normalized
+
+    if isinstance(body.get("default_preset"), str) and body["default_preset"].strip():
+        default_preset = body["default_preset"].strip()
+    if default_preset not in presets and presets:
+        default_preset = next(iter(presets.keys()))
+
+    yaml_presets = {name: _preset_to_yaml(p) for name, p in presets.items()}
+    active = presets.get(default_preset) or next(iter(presets.values()))
+    data["moa"] = {
+        "default_preset": default_preset,
+        "active_preset": "",
+        "presets": yaml_presets,
+        # Flattened compat view for older Hermes readers / dashboard
+        "reference_models": list(active.get("reference_models") or []),
+        "aggregator": dict(active.get("aggregator") or {}),
+        "reference_temperature": active.get("reference_temperature"),
+        "aggregator_temperature": active.get("aggregator_temperature"),
+        "max_tokens": active.get("max_tokens") or 4096,
+        "reference_max_tokens": active.get("reference_max_tokens"),
+        "fanout": active.get("fanout") or "per_iteration",
+        "enabled": active.get("enabled") is not False,
+    }
+    dump()
+    return _normalize_moa_config({"moa": data["moa"]})
 
 # ------------------------------------------------------------------
 # Circuit breaker for upstream API calls
@@ -2629,14 +2940,40 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def bridge_token_guard(request: Request, call_next):
+    """When HERMES_BRIDGE_TOKEN is set, require it for non-loopback clients.
+
+    Loopback (Electron, local Express proxy) stays open so chat can keep using
+    Authorization for provider API keys. /health and /diag stay exempt so
+    ownership probes and health polls work before auth is wired.
+    """
+    if not HERMES_BRIDGE_TOKEN:
+        return await call_next(request)
+    if request.url.path in _BRIDGE_AUTH_EXEMPT_PATHS:
+        return await call_next(request)
+    client_host = request.client.host if request.client else None
+    if _is_loopback_host(client_host):
+        return await call_next(request)
+    if not _bridge_token_matches(_extract_bridge_token(request)):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    return await call_next(request)
+
+
 @app.get("/diag")
-async def diag():
-    return {
-        "token": HERMES_BRIDGE_TOKEN,
+async def diag(request: Request):
+    # Only expose the launch token to loopback callers (Electron ownership check).
+    # Non-loopback clients get a boolean presence flag only.
+    payload = {
         "pid": os.getpid(),
         "home": os.path.expanduser("~"),
         "bridge_version": HERMES_BRIDGE_VERSION,
+        "launch_token_present": bool(HERMES_BRIDGE_TOKEN),
     }
+    client_host = request.client.host if request.client else None
+    if _is_loopback_host(client_host):
+        payload["token"] = HERMES_BRIDGE_TOKEN
+    return payload
 
 
 def _provider_has_credentials(pid: str) -> bool:
@@ -2731,9 +3068,26 @@ async def list_providers(request: Request):
     profile_cfg = _load_cli_model_config(profile_home)
     global_cfg = _load_cli_model_config()
     cfg_provider = (profile_cfg.get("provider") or global_cfg.get("provider") or "").strip().lower()
-    default_provider = cfg_provider if (cfg_provider and cfg_provider in _PROVIDER_CONFIG) else "openrouter"
+    default_provider = cfg_provider if (
+        cfg_provider and (cfg_provider in _PROVIDER_CONFIG or cfg_provider == MOA_PROVIDER_ID)
+    ) else "openrouter"
+    profile_moa_config = _load_moa_config(profile_home)
+    global_moa_config = _load_moa_config()
+    moa_config = profile_moa_config if _enabled_moa_preset_names(profile_moa_config) else global_moa_config
+    moa_models = _enabled_moa_preset_names(moa_config)
 
     data = []
+    if moa_models:
+        data.append({
+            "id": MOA_PROVIDER_ID,
+            "name": MOA_PROVIDER_NAME,
+            "base_url": "virtual://moa",
+            "is_aggregator": True,
+            "credentialed": True,
+            "models": moa_models,
+            "default_model": moa_config.get("default_preset") or moa_models[0],
+        })
+
     for pid, cfg in _PROVIDER_CONFIG.items():
         try:
             models = _models_for_provider(pid)
@@ -2751,7 +3105,15 @@ async def list_providers(request: Request):
     # The agent's CLI-configured default model (config.yaml `model.default`),
     # read fresh so a model change in the terminal is reflected by clients that
     # follow the agent default. Profile config wins over the global one.
-    default_model = profile_cfg.get("default") or global_cfg.get("default") or DEFAULT_MODEL
+    if default_provider == MOA_PROVIDER_ID:
+        default_model = (
+            profile_cfg.get("default")
+            or global_cfg.get("default")
+            or moa_config.get("default_preset")
+            or (moa_models[0] if moa_models else "default")
+        )
+    else:
+        default_model = profile_cfg.get("default") or global_cfg.get("default") or DEFAULT_MODEL
 
     return {
         "object": "list",
@@ -2759,6 +3121,667 @@ async def list_providers(request: Request):
         "default_model": default_model,
         "data": data,
     }
+
+
+@app.get("/moa")
+async def get_moa_config(request: Request):
+    """Return normalized Mixture-of-Agents presets for the active profile."""
+    profile_home = _resolve_hermes_home(_resolve_profile_name(request))
+    profile_cfg = _load_moa_config(profile_home)
+    # Fall back to global home when the profile has no presets yet
+    if not _enabled_moa_preset_names(profile_cfg):
+        profile_cfg = _load_moa_config()
+    return {
+        "object": "moa.config",
+        "default_preset": profile_cfg.get("default_preset") or "default",
+        "presets": profile_cfg.get("presets") or {},
+        "preset_names": _enabled_moa_preset_names(profile_cfg),
+    }
+
+
+@app.put("/moa")
+async def put_moa_config(request: Request):
+    """Create/update MoA presets in the active profile's config.yaml."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "Body must be a JSON object"})
+
+    profile_home = _resolve_hermes_home(_resolve_profile_name(request))
+    try:
+        saved = _save_moa_config(body, hermes_home=profile_home)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    except Exception as exc:
+        print(f"[hermes-bridge] Failed to save MoA config: {exc}", flush=True)
+        return JSONResponse(status_code=500, content={"error": f"Failed to save MoA config: {exc}"})
+
+    return {
+        "object": "moa.config",
+        "default_preset": saved.get("default_preset") or "default",
+        "presets": saved.get("presets") or {},
+        "preset_names": _enabled_moa_preset_names(saved),
+    }
+
+
+# ─── Hermes ops (fallback, checkpoints, memory, curator, …) ─────────────────
+
+def _ops_home(request: Request) -> Path:
+    return Path(_resolve_hermes_home(_resolve_profile_name(request)))
+
+
+@app.get("/fallback")
+async def get_fallback(request: Request):
+    import hermes_ops
+    home = _ops_home(request)
+    cfg = _read_hermes_config(home)
+    return {
+        "object": "fallback.chain",
+        "providers": hermes_ops.get_fallback_providers(cfg),
+    }
+
+
+@app.put("/fallback")
+async def put_fallback(request: Request):
+    import hermes_ops
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+    chain = body.get("providers") if isinstance(body, dict) else None
+    if not isinstance(chain, list):
+        return JSONResponse(status_code=400, content={"error": "providers must be a list"})
+    home = _ops_home(request)
+    dump, data = _load_hermes_config_editable(home)
+    try:
+        saved = hermes_ops.set_fallback_providers(data, chain)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    dump()
+    return {"object": "fallback.chain", "providers": saved}
+
+
+@app.get("/checkpoints")
+async def get_checkpoints(request: Request):
+    import hermes_ops
+    workdir = request.query_params.get("workdir")
+    return hermes_ops.get_checkpoints_status(_ops_home(request), workdir=workdir)
+
+
+@app.post("/checkpoints/prune")
+async def post_checkpoints_prune(request: Request):
+    import hermes_ops
+    return hermes_ops.prune_checkpoints(_ops_home(request))
+
+
+@app.post("/checkpoints/restore")
+async def post_checkpoints_restore(request: Request):
+    import hermes_ops
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "body must be an object"})
+    index = body.get("index")
+    if index is None:
+        return JSONResponse(status_code=400, content={"error": "index is required"})
+    workdir = body.get("workdir")
+    try:
+        result = hermes_ops.restore_checkpoint(
+            index,
+            workdir=str(workdir).strip() if workdir else None,
+            hermes_home=_ops_home(request),
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    status = 200 if result.get("ok") else 400
+    return JSONResponse(status_code=status, content=result)
+
+
+@app.get("/memory/status")
+async def get_memory_status(request: Request):
+    import hermes_ops
+    return hermes_ops.get_memory_status(_ops_home(request))
+
+
+@app.get("/curator/status")
+async def get_curator_status(request: Request):
+    import hermes_ops
+    return hermes_ops.get_curator_status(_ops_home(request))
+
+
+@app.post("/curator/run")
+async def post_curator_run(request: Request):
+    import hermes_ops
+    return hermes_ops.run_curator(_ops_home(request))
+
+
+@app.get("/computer-use/status")
+async def get_computer_use_status(request: Request):
+    import hermes_ops
+    return hermes_ops.get_computer_use_status(_ops_home(request))
+
+
+@app.get("/bundles")
+async def get_bundles(request: Request):
+    import hermes_ops
+    return hermes_ops.list_skill_bundles(_ops_home(request))
+
+
+@app.get("/bundles/{name}")
+async def get_bundle_detail(request: Request, name: str):
+    import hermes_ops
+    try:
+        result = hermes_ops.show_skill_bundle(name, hermes_home=_ops_home(request))
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    if not result.get("ok"):
+        return JSONResponse(status_code=404, content=result)
+    return result
+
+
+@app.post("/bundles/create")
+async def post_bundles_create(request: Request):
+    import hermes_ops
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "Body must be a JSON object"})
+    name = str(body.get("name") or "").strip()
+    skills_raw = body.get("skills") or body.get("skill_ids") or []
+    skills = skills_raw if isinstance(skills_raw, list) else [skills_raw]
+    try:
+        return hermes_ops.create_skill_bundle(
+            name,
+            [str(s) for s in skills],
+            description=body.get("description"),
+            instruction=body.get("instruction"),
+            force=bool(body.get("force")),
+            hermes_home=_ops_home(request),
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.post("/bundles/delete")
+async def post_bundles_delete(request: Request):
+    import hermes_ops
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    name = str((body or {}).get("name") or "").strip()
+    try:
+        return hermes_ops.delete_skill_bundle(name, hermes_home=_ops_home(request))
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.post("/bundles/reload")
+async def post_bundles_reload(request: Request):
+    import hermes_ops
+    return hermes_ops.reload_skill_bundles(_ops_home(request))
+
+
+@app.get("/dashboard/url")
+async def get_dashboard_url():
+    import hermes_ops
+    return hermes_ops.get_dashboard_url()
+
+
+@app.get("/goals")
+async def get_goals(request: Request):
+    import hermes_ops
+    home = _ops_home(request)
+    cfg = _read_hermes_config(home)
+    return {"object": "goals.config", **hermes_ops.get_goals_config(cfg)}
+
+
+@app.put("/goals")
+async def put_goals(request: Request):
+    import hermes_ops
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "Body must be a JSON object"})
+    home = _ops_home(request)
+    dump, data = _load_hermes_config_editable(home)
+    try:
+        saved = hermes_ops.set_goals_config(data, body)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    dump()
+    return {"object": "goals.config", **saved}
+
+
+@app.get("/tool-search")
+async def get_tool_search(request: Request):
+    import hermes_ops
+    home = _ops_home(request)
+    cfg = _read_hermes_config(home)
+    return {"object": "tool_search.config", **hermes_ops.get_tool_search_config(cfg)}
+
+
+@app.put("/tool-search")
+async def put_tool_search(request: Request):
+    import hermes_ops
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "Body must be a JSON object"})
+    home = _ops_home(request)
+    dump, data = _load_hermes_config_editable(home)
+    try:
+        saved = hermes_ops.set_tool_search_config(data, body)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    dump()
+    return {"object": "tool_search.config", **saved}
+
+
+@app.get("/insights")
+async def get_insights(request: Request):
+    import hermes_ops
+    days_raw = request.query_params.get("days", "7")
+    try:
+        days = int(days_raw)
+    except (TypeError, ValueError):
+        days = 7
+    return hermes_ops.get_insights(days=days, hermes_home=_ops_home(request))
+
+
+@app.get("/journey")
+async def get_journey(request: Request):
+    import hermes_ops
+    return hermes_ops.get_journey_graph(_ops_home(request))
+
+
+@app.post("/computer-use/install")
+async def post_computer_use_install(request: Request):
+    import hermes_ops
+    return hermes_ops.install_computer_use(_ops_home(request))
+
+
+@app.get("/computer-use/doctor")
+async def get_computer_use_doctor(request: Request):
+    import hermes_ops
+    return hermes_ops.doctor_computer_use(_ops_home(request))
+
+
+@app.get("/pets")
+async def get_pets(request: Request):
+    import hermes_ops
+    return hermes_ops.get_pets_status(_ops_home(request))
+
+
+@app.get("/pets/gallery")
+async def get_pets_gallery(request: Request):
+    import hermes_ops
+    limit_raw = request.query_params.get("limit", "40")
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        limit = 40
+    return hermes_ops.list_pets_gallery(limit=limit, hermes_home=_ops_home(request))
+
+
+@app.post("/pets/select")
+async def post_pets_select(request: Request):
+    import hermes_ops
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    pet_id = (body or {}).get("pet_id") or (body or {}).get("id") or ""
+    try:
+        return hermes_ops.select_pet(str(pet_id), hermes_home=_ops_home(request))
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.post("/claw/migrate")
+async def post_claw_migrate(request: Request):
+    import hermes_ops
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    dry_run = True if not isinstance(body, dict) else body.get("dry_run", True) is not False
+    migrate_secrets = bool(body.get("migrate_secrets")) if isinstance(body, dict) else False
+    yes = bool(body.get("yes")) if isinstance(body, dict) else False
+    # Force dry_run unless explicitly applying with yes=true
+    if not dry_run and not yes:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Applying migration requires dry_run=false and yes=true"},
+        )
+    return hermes_ops.claw_migrate(
+        dry_run=dry_run,
+        migrate_secrets=migrate_secrets,
+        yes=yes,
+        hermes_home=_ops_home(request),
+    )
+
+
+@app.get("/auth/pool")
+async def get_auth_pool(request: Request):
+    import hermes_ops
+    return hermes_ops.list_auth_pool(_ops_home(request))
+
+
+@app.get("/auth/pool/{provider}/status")
+async def get_auth_pool_provider_status(request: Request, provider: str):
+    import hermes_ops
+    try:
+        return hermes_ops.get_auth_provider_status(provider, hermes_home=_ops_home(request))
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.post("/auth/pool/reset")
+async def post_auth_pool_reset(request: Request):
+    import hermes_ops
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+    if not isinstance(body, dict) or not body.get("provider"):
+        return JSONResponse(status_code=400, content={"error": "provider is required"})
+    try:
+        return hermes_ops.reset_auth_pool_provider(
+            str(body["provider"]),
+            hermes_home=_ops_home(request),
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.post("/auth/pool/remove")
+async def post_auth_pool_remove(request: Request):
+    import hermes_ops
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "body must be an object"})
+    provider = body.get("provider")
+    target = body.get("target") or body.get("index") or body.get("id")
+    if not provider or target is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "provider and target (index, id, or label) are required"},
+        )
+    try:
+        result = hermes_ops.remove_auth_pool_credential(
+            str(provider),
+            str(target),
+            hermes_home=_ops_home(request),
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    status = 200 if result.get("ok") else 400
+    return JSONResponse(status_code=status, content=result)
+
+
+@app.post("/auth/pool/add")
+async def post_auth_pool_add(request: Request):
+    import hermes_ops
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "body must be an object"})
+    provider = body.get("provider")
+    api_key = body.get("api_key")
+    if not provider or not api_key:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "provider and api_key are required"},
+        )
+    try:
+        result = hermes_ops.add_auth_api_key(
+            str(provider),
+            str(api_key),
+            label=body.get("label"),
+            hermes_home=_ops_home(request),
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    status = 200 if result.get("ok") else 400
+    return JSONResponse(status_code=status, content=result)
+
+
+@app.get("/portal/info")
+async def get_portal_info_route(request: Request):
+    import hermes_ops
+    return hermes_ops.get_portal_info(_ops_home(request))
+
+
+@app.get("/portal/status")
+async def get_portal_status_route(request: Request):
+    import hermes_ops
+    return hermes_ops.get_portal_status(_ops_home(request))
+
+
+@app.get("/portal/tools")
+async def get_portal_tools_route(request: Request):
+    import hermes_ops
+    return hermes_ops.list_portal_tools(_ops_home(request))
+
+
+@app.get("/portal/open-url")
+async def get_portal_open_url_route(request: Request):
+    import hermes_ops
+    return hermes_ops.get_portal_open_url(_ops_home(request))
+
+
+@app.get("/portal/open")
+async def get_portal_open_route(request: Request):
+    """Non-interactive browser launch via `hermes portal open` (subscription page)."""
+    import hermes_ops
+    return hermes_ops.open_portal_subscription(_ops_home(request))
+
+
+@app.post("/portal/oauth/start")
+async def portal_oauth_start_route(request: Request):
+    """Start Nous Portal device-code OAuth (returns user_code + verification URL only)."""
+    import hermes_ops
+    result = hermes_ops.portal_oauth_start(_ops_home(request))
+    status = 200 if result.get("ok") else 503
+    return JSONResponse(status_code=status, content=result)
+
+
+@app.get("/portal/oauth/poll/{session_id}")
+async def portal_oauth_poll_route(session_id: str, request: Request):
+    """Poll Nous Portal device-code OAuth session (masked status only)."""
+    import hermes_ops
+    try:
+        result = hermes_ops.portal_oauth_poll(session_id, _ops_home(request))
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    if result.get("status") == "not_found":
+        return JSONResponse(status_code=404, content=result)
+    return result
+
+
+@app.get("/gateway/capabilities")
+async def get_gateway_capabilities(request: Request):
+    import hermes_ops
+    base = (
+        request.query_params.get("base_url")
+        or os.environ.get("HERMES_API_BASE")
+        or "http://127.0.0.1:8642"
+    )
+    try:
+        hermes_ops.assert_safe_gateway_base_url(base)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    return hermes_ops.probe_gateway_capabilities(base_url=base)
+
+
+@app.post("/v1/runs/cancel")
+async def cancel_gateway_run(request: Request):
+    """Stop the active gateway /v1/runs job for a conversation (Spark Stop button)."""
+    import hermes_runs as _hermes_runs
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "Body must be a JSON object"})
+    conversation_id = str(body.get("conversation_id") or "").strip()
+    if not conversation_id:
+        return JSONResponse(status_code=400, content={"error": "conversation_id is required"})
+    cancelled = _hermes_runs.cancel_active_run(conversation_id)
+    return JSONResponse(status_code=200, content={"cancelled": cancelled})
+
+
+@app.post("/v1/runs/approve")
+async def approve_gateway_run(request: Request):
+    """Resolve a pending gateway run approval (/approve command on runs path)."""
+    import hermes_runs as _hermes_runs
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "Body must be a JSON object"})
+    conversation_id = str(body.get("conversation_id") or "").strip()
+    if not conversation_id:
+        return JSONResponse(status_code=400, content={"error": "conversation_id is required"})
+    choice = str(body.get("choice") or "approve").strip().lower() or "approve"
+    resolve_all = bool(body.get("all") or body.get("resolve_all"))
+    approved, status_code = _hermes_runs.approve_active_run(
+        conversation_id,
+        choice=choice,
+        resolve_all=resolve_all,
+    )
+    if not approved:
+        return JSONResponse(status_code=404, content={"approved": False, "error": "No active gateway run"})
+    return JSONResponse(status_code=200, content={"approved": True, "status": status_code})
+
+
+@app.post("/kanban/swarm")
+async def post_kanban_swarm(request: Request):
+    import hermes_ops
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "Body must be a JSON object"})
+    goal = str(body.get("goal") or "").strip()
+    workers = body.get("workers")
+    if workers is not None and not isinstance(workers, list):
+        workers = None
+    try:
+        return hermes_ops.kanban_swarm_create(
+            goal,
+            workers=workers,
+            verifier=str(body.get("verifier") or "reviewer"),
+            synthesizer=str(body.get("synthesizer") or "writer"),
+            hermes_home=_ops_home(request),
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.get("/projects")
+async def get_projects(request: Request):
+    import hermes_ops
+    include_archived = request.query_params.get("all", "").lower() in ("1", "true", "yes")
+    return hermes_ops.list_projects(
+        hermes_home=_ops_home(request),
+        include_archived=include_archived,
+    )
+
+
+@app.post("/projects")
+async def post_projects_create(request: Request):
+    import hermes_ops
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "Body must be a JSON object"})
+    name = str(body.get("name") or "").strip()
+    primary = body.get("primary_folder") or body.get("primary") or body.get("path")
+    use = body.get("use", True) is not False
+    try:
+        return hermes_ops.create_project(
+            name,
+            primary_folder=str(primary).strip() if primary else None,
+            use=use,
+            hermes_home=_ops_home(request),
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.post("/projects/use")
+async def post_projects_use(request: Request):
+    import hermes_ops
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    project = None
+    if isinstance(body, dict):
+        raw = body.get("project") or body.get("slug") or body.get("id")
+        if raw is not None and str(raw).strip():
+            project = str(raw).strip()
+    try:
+        return hermes_ops.use_project(project, hermes_home=_ops_home(request))
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.post("/projects/bind-board")
+async def post_projects_bind_board(request: Request):
+    import hermes_ops
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "Body must be a JSON object"})
+    project = str(body.get("project") or body.get("slug") or "").strip()
+    board = body.get("board") or body.get("board_slug")
+    try:
+        return hermes_ops.bind_board(
+            project,
+            str(board).strip() if board is not None else None,
+            hermes_home=_ops_home(request),
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.get("/security/audit")
+async def get_security_audit(request: Request):
+    import hermes_ops
+    skip_venv = request.query_params.get("skip_venv", "").lower() in ("1", "true", "yes")
+    return hermes_ops.run_security_audit(_ops_home(request), skip_venv=skip_venv)
+
+
+@app.get("/secrets/status")
+async def get_secrets_status(request: Request):
+    import hermes_ops
+    return hermes_ops.get_secrets_status(_ops_home(request))
 
 
 class ChatMessage(BaseModel):
@@ -2781,6 +3804,37 @@ def sse_chunk(data: dict) -> str:
     return f"data: {json.dumps(data)}\n\n"
 
 
+def _find_moa_shortcut(messages: list[dict]) -> Optional[tuple[int, str]]:
+    for idx in range(len(messages) - 1, -1, -1):
+        message = messages[idx]
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        stripped = content.strip()
+        if stripped == "/moa":
+            return idx, ""
+        if stripped.startswith("/moa "):
+            return idx, stripped[5:].strip()
+        # Keep scanning older user messages — a later non-/moa turn must not
+        # cancel an earlier /moa shortcut in the same request payload.
+        continue
+    return None
+
+
+def _single_message_sse(model: str, text: str) -> StreamingResponse:
+    chunk_id = f"chatcmpl-hermes-{os.urandom(8).hex()}"
+
+    async def stream():
+        yield sse_chunk(make_delta_chunk(chunk_id, model, {"role": "assistant"}))
+        yield sse_chunk(make_delta_chunk(chunk_id, model, {"content": text}))
+        yield sse_chunk(make_delta_chunk(chunk_id, model, {}, finish_reason="stop"))
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
 # Friendly display names for tool activity in the chat stream
 _TOOL_DISPLAY_NAMES: dict[str, str] = {
     "web_search": "Searching the web",
@@ -2795,6 +3849,8 @@ _TOOL_DISPLAY_NAMES: dict[str, str] = {
     "create_repo_file": "Creating file",
     "delete_repo_file": "Deleting file",
     "batch_edit_repo_files": "Editing files",
+    "computer_use": "Computer use",
+    "computer": "Computer use",
 }
 
 # Tools that modify repository state — brain_claim protection applied in on_tool_start/end
@@ -2821,6 +3877,31 @@ def _format_tool_start_text(tool_name: str, tool_input: str) -> str:
     Instead of dumping raw JSON args (which can contain entire file contents),
     extract only the meaningful summary — e.g. the file path or search query.
     """
+    # MoA events already stream full advisor text via tool_activity; keep chat
+    # chrome to a single dense line so the transcript stays readable.
+    if tool_name == "moa.reference":
+        try:
+            args = json.loads(tool_input) if tool_input else {}
+        except (json.JSONDecodeError, TypeError):
+            args = {}
+        label = str(args.get("label") or "advisor")
+        idx = args.get("index")
+        count = args.get("count")
+        progress = ""
+        if idx is not None and count is not None:
+            try:
+                progress = f" ({int(idx) + 1}/{int(count)})"
+            except (TypeError, ValueError):
+                progress = ""
+        return f"\n\n> **MoA advisor** — `{label}`{progress}\n\n"
+    if tool_name == "moa.aggregating":
+        try:
+            args = json.loads(tool_input) if tool_input else {}
+        except (json.JSONDecodeError, TypeError):
+            args = {}
+        aggregator = str(args.get("aggregator") or "aggregator")
+        return f"\n\n> **MoA aggregating** — `{aggregator}`\n\n"
+
     display = _TOOL_DISPLAY_NAMES.get(tool_name, tool_name)
     summary = ""
     try:
@@ -2857,6 +3938,17 @@ def _format_tool_start_text(tool_name: str, tool_input: str) -> str:
         first_line = code.split("\n")[0][:60] if code else ""
         if first_line:
             summary = f"`{first_line}{'…' if len(code) > 60 else ''}`"
+    elif tool_name in ("computer_use", "computer"):
+        try:
+            from computer_use_frames import format_computer_use_action_label
+
+            label = format_computer_use_action_label(args)
+            if label:
+                summary = label
+        except Exception:
+            action = args.get("action", "")
+            if action:
+                summary = str(action)
 
     if summary:
         return f"\n\n> **{display}** — {summary}\n\n"
@@ -2868,6 +3960,12 @@ def _format_tool_end_text(tool_name: str, tool_output: str) -> str:
 
     Only shows a short, meaningful summary — never raw file contents.
     """
+    # Full advisor text lives in tool_activity — don't reprint it in the chat.
+    if tool_name == "moa.reference":
+        return "> *Advisor ready*\n\n"
+    if tool_name == "moa.aggregating":
+        return "> *Aggregating…*\n\n"
+
     display = _TOOL_DISPLAY_NAMES.get(tool_name, tool_name)
     normalized_output = (tool_output or "").strip()
 
@@ -3107,6 +4205,24 @@ def _resolve_workspace_id(request: Request, body) -> str:
     return text or f"sess-{uuid.uuid4().hex[:12]}"
 
 
+def _finalize_tracked_session(
+    session_id: str,
+    *,
+    success: bool,
+    error_message: Optional[str] = None,
+) -> None:
+    """Mark a chat session completed/error without requiring the nested finalize closure."""
+    with _sessions_lock:
+        session = _sessions.get(session_id)
+        if not session:
+            return
+        session["status"] = "completed" if success else "error"
+        session["messages"] = len(session.get("chat", []))
+        session["updated_at"] = _now_iso()
+        session["error"] = error_message if error_message else None
+        _save_session_to_db(session)
+
+
 async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
     toolsets_header = request.headers.get("x-hermes-toolsets", DEFAULT_TOOLSETS)
     enabled_toolsets = [t.strip() for t in toolsets_header.split(",") if t.strip()]
@@ -3116,6 +4232,15 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
     repo_name = request.headers.get("x-hermes-repo-name", "")
     github_pat = request.headers.get("x-hermes-github-pat", "")
     repo_edit_intent = request.headers.get("x-hermes-repo-edit-intent", "") == "1"
+    repo_root_header = request.headers.get("x-hermes-repo-root", "").strip()
+    from worktree_support import (
+        worktree_requested,
+        maybe_setup_worktree,
+        adjust_toolsets_for_worktree,
+        cleanup_worktree,
+    )
+
+    use_worktree = worktree_requested(request.headers.get("x-hermes-worktree"))
     request_messages = _normalize_chat_messages(body.messages, model=body.model, strip_images=True)
 
     # Resolve workspace_id from conversation_id (header or body) for per-conversation isolation
@@ -3161,17 +4286,19 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
     # actually runs the skill. The session record above keeps the original
     # slash command for display.
     _maybe_expand_skill_command(request_messages)
+    moa_shortcut = _find_moa_shortcut(request_messages)
+    if moa_shortcut:
+        shortcut_index, shortcut_prompt = moa_shortcut
+        if not shortcut_prompt:
+            _finalize_tracked_session(session_id, success=True)
+            return _single_message_sse(
+                body.model,
+                "Usage: /moa <prompt>\n\nRun one prompt through the default Mixture of Agents preset.",
+            )
+        request_messages[shortcut_index]["content"] = shortcut_prompt
 
     def _finalize_session(success: bool, error_message: Optional[str] = None):
-        with _sessions_lock:
-            session = _sessions.get(session_id)
-            if not session:
-                return
-            session["status"] = "completed" if success else "error"
-            session["messages"] = len(session.get("chat", []))
-            session["updated_at"] = _now_iso()
-            session["error"] = error_message if error_message else None
-            _save_session_to_db(session)
+        _finalize_tracked_session(session_id, success=success, error_message=error_message)
 
     # Detect repo mode from either the request body tools OR the repo headers.
     # In agent-loop mode the server sends repo info via headers (not body tools),
@@ -3217,8 +4344,15 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
     explicit_provider = (request.headers.get("x-hermes-provider", "") or "").strip().lower()
     if explicit_provider in ("", "auto", "default"):
         explicit_provider = ""
+    moa_config = _load_moa_config(_resolve_hermes_home(request_profile))
+    if moa_shortcut:
+        explicit_provider = MOA_PROVIDER_ID
+        body.model = str(moa_config.get("default_preset") or "default")
+    elif isinstance(body.model, str) and body.model.lower().startswith("moa:"):
+        explicit_provider = MOA_PROVIDER_ID
+        body.model = body.model.split(":", 1)[1].strip() or str(moa_config.get("default_preset") or "default")
 
-    cli_cfg = _load_cli_model_config()
+    cli_cfg = _load_cli_model_config(_resolve_hermes_home(request_profile))
     cli_base_url = (cli_cfg.get("base_url") or "").strip()
     cli_provider = (cli_cfg.get("provider") or "").strip().lower()
     cli_api_key = (cli_cfg.get("api_key") or "").strip()
@@ -3247,7 +4381,10 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
 
     #   0. Explicit provider header (strongest — caller named the provider)
     model_prefix_provider = _resolve_provider_from_model(body.model)
-    if explicit_provider and explicit_provider in _PROVIDER_CONFIG:
+    if explicit_provider == MOA_PROVIDER_ID:
+        resolved_provider = MOA_PROVIDER_ID
+        route_source = "explicit-header"
+    elif explicit_provider and explicit_provider in _PROVIDER_CONFIG:
         resolved_provider = explicit_provider
         route_source = "explicit-header"
     #   1. Model prefix match (strongest signal — the model identifier names the provider)
@@ -3255,6 +4392,9 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
         resolved_provider = model_prefix_provider
         route_source = "model-prefix"
     #   2. CLI config.yaml provider
+    elif cli_provider == MOA_PROVIDER_ID:
+        resolved_provider = MOA_PROVIDER_ID
+        route_source = "config.yaml"
     elif cli_provider and cli_provider in _PROVIDER_CONFIG:
         resolved_provider = cli_provider
         route_source = "config.yaml"
@@ -3294,6 +4434,7 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
         not pool_custom_route
         and route_source != "explicit-header"
         and not cli_is_custom
+        and resolved_provider != MOA_PROVIDER_ID
         and (
             resolved_provider not in _PROVIDER_CONFIG
             or not _provider_has_credentials(resolved_provider)
@@ -3323,7 +4464,37 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
     # Custom non-hardcoded base_url overrides the resolved provider — UNLESS the
     # caller explicitly named a provider (UI picker), which always wins so the
     # selection isn't silently hijacked by a custom base_url in config.yaml.
-    if cli_is_custom and cli_provider not in _PROVIDER_CONFIG and route_source != "explicit-header":
+    if resolved_provider == MOA_PROVIDER_ID:
+        preset_name = (body.model or "").strip() or str(moa_config.get("default_preset") or "default")
+        presets = moa_config.get("presets") if isinstance(moa_config.get("presets"), dict) else {}
+        preset = presets.get(preset_name) if isinstance(presets, dict) else None
+        if not preset or preset.get("enabled") is False:
+            available = ", ".join(_enabled_moa_preset_names(moa_config)) or "none"
+            _finalize_tracked_session(
+                session_id,
+                success=False,
+                error_message=f"MoA preset '{preset_name}' is not configured or is disabled",
+            )
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "message": (
+                            f"MoA preset '{preset_name}' is not configured or is disabled. "
+                            f"Available presets: {available}. Configure `moa.presets` in ~/.hermes/config.yaml."
+                        ),
+                        "code": "MOA_PRESET_NOT_FOUND",
+                    }
+                },
+            )
+        body.model = preset_name
+        agent_base_url = "virtual://moa"
+        agent_api_key = api_key or "moa"
+        print(
+            f"[hermes-bridge] Routing via native Hermes MoA preset. preset={preset_name}",
+            flush=True,
+        )
+    elif cli_is_custom and cli_provider not in _PROVIDER_CONFIG and route_source != "explicit-header":
         # Credential priority for a custom base_url: the api_key configured
         # alongside the model in ~/.hermes/config.yaml wins (the user set it
         # there explicitly), then the auth.json credential pool, then a key
@@ -3410,6 +4581,17 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
     )
 
     if execution_mode == "swarm":
+        if resolved_provider == MOA_PROVIDER_ID:
+            _mark_request_finished(
+                model=body.model,
+                success=False,
+                summary=f"model={body.model} mode=swarm error=moa-not-supported",
+            )
+            _finalize_session(False, "MoA is not supported in swarm mode yet.")
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"message": "MoA presets currently run through the normal Hermes agent loop, not swarm mode."}},
+            )
         # Redirect to the dedicated swarm endpoint handler
         print(f"[hermes-bridge] Swarm mode. model={body.model} msgs={len(request_messages)}", flush=True)
         swarm_body = SwarmRequest(
@@ -3421,6 +4603,17 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
         return await swarm_endpoint(request, swarm_body)
 
     if execution_mode == "passthrough":
+        if resolved_provider == MOA_PROVIDER_ID:
+            _mark_request_finished(
+                model=body.model,
+                success=False,
+                summary=f"model={body.model} mode=passthrough error=moa-not-supported",
+            )
+            _finalize_session(False, "MoA is not supported in passthrough mode.")
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"message": "MoA presets require the Hermes agent loop so the aggregator can use tools."}},
+            )
         print(
             f"[hermes-bridge] Passthrough mode. model={body.model} msgs={len(request_messages)} extra_keys={list((body.model_extra or {}).keys())}",
             flush=True,
@@ -3439,13 +4632,67 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             ),
         )
 
-    try:
-        from hermes_adapter import HermesAgentAdapter as AIAgent
-        _using_real_agent = True
-    except Exception as _adapter_err:
-        print(f"[hermes-bridge] Adapter import failed: {_adapter_err}", flush=True)
-        from run_agent import AIAgent
-        _using_real_agent = False
+    AIAgent, _using_real_agent = _resolve_chat_agent_class()
+    if resolved_provider == MOA_PROVIDER_ID and not _using_real_agent:
+        return _moa_native_adapter_required_error(
+            model=body.model,
+            finalize_session=_finalize_session,
+        )
+
+    import hermes_runs as _hermes_runs
+
+    _use_runs_flag = _hermes_runs.parse_use_runs_flag(
+        env_value=os.environ.get("HERMES_USE_RUNS"),
+        header_value=request.headers.get("x-hermes-use-runs"),
+        body_value=(body.model_extra or {}).get("hermes_use_runs"),
+    )
+    _gateway_base = _hermes_runs.resolve_gateway_base_url()
+    _gateway_key = (
+        api_key
+        or os.environ.get("HERMES_API_KEY", "").strip()
+        or os.environ.get("API_SERVER_KEY", "").strip()
+        or (_get_local_gateway_key() or "")
+    )
+    _runs_parity = _hermes_runs.runs_parity_available(
+        base_url=_gateway_base,
+        api_key=_gateway_key or None,
+    )
+    _route_via_runs = _hermes_runs.should_route_via_runs(
+        flag_enabled=_use_runs_flag,
+        provider=resolved_provider,
+        moa_provider_id=MOA_PROVIDER_ID,
+        base_url=_gateway_base,
+        api_key=_gateway_key or None,
+        runs_moa_flag=_hermes_runs.parse_runs_moa_flag(),
+        enabled_toolsets=enabled_toolsets,
+    )
+    if (
+        _use_runs_flag
+        and not _route_via_runs
+        and _hermes_runs.enabled_toolsets_need_agent_loop_parity(enabled_toolsets)
+    ):
+        print(
+            "[hermes-bridge] HERMES_USE_RUNS set; computer_use uses agent-loop "
+            "(gateway runs tool.completed has no screenshot result)",
+            flush=True,
+        )
+    elif _use_runs_flag and resolved_provider == MOA_PROVIDER_ID and not _route_via_runs:
+        print(
+            "[hermes-bridge] HERMES_USE_RUNS set; MoA using agent-loop "
+            "(set HERMES_RUNS_MOA=1 or wait for gateway moa_runs capability)",
+            flush=True,
+        )
+    elif _route_via_runs and resolved_provider == MOA_PROVIDER_ID:
+        print(
+            f"[hermes-bridge] Routing MoA via gateway /v1/runs. model={body.model} session={workspace_id}",
+            flush=True,
+        )
+    elif _route_via_runs:
+        print(
+            f"[hermes-bridge] Routing via gateway /v1/runs. model={body.model} session={workspace_id}",
+            flush=True,
+        )
+    _transport_label = "Starting Hermes gateway run..." if _route_via_runs else "Starting Hermes agent loop..."
 
     chunk_id = f"chatcmpl-hermes-{os.urandom(8).hex()}"
     # Brain MCP: register per-request session so overseer can address it directly
@@ -3555,8 +4802,29 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
     def on_server_tool_event(event: dict):
         _qput(("server_tool_event", event))
 
+    def on_fallback_switch(provider: str, model: str):
+        _qput(("fallback_switch", {"provider": provider, "model": model}))
+
+    def on_computer_use_frame(frame: dict):
+        _qput(("computer_use_frame", frame))
+
     def _run_agent_sync():
+        wt_info = None
+        worktree_active = False
         try:
+            if use_worktree:
+                wt_info = maybe_setup_worktree(repo_root_header or None)
+                worktree_active = bool(wt_info)
+                if wt_info:
+                    print(
+                        f"[hermes-bridge] Worktree session active: {wt_info.get('path')}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "[hermes-bridge] Worktree requested but setup failed — continuing in original cwd",
+                        flush=True,
+                    )
             print(f"[hermes-bridge] Using {'real' if _using_real_agent else 'custom'} Hermes agent", flush=True)
             # Log message roles for debugging system prompt delivery
             msg_roles = [m["role"] for m in request_messages]
@@ -3592,28 +4860,6 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             )
             if reasoning_effort:
                 print(f"[hermes-bridge] Reasoning effort: {reasoning_effort}", flush=True)
-            agent = AIAgent(
-                base_url=agent_base_url,
-                api_key=agent_api_key,
-                model=body.model,
-                max_iterations=MAX_AGENT_ITERATIONS,
-                enabled_toolsets=enabled_toolsets,
-                repo_mode=has_repo_tools,
-                repo_edit_intent=repo_edit_intent,
-                github_pat=github_pat if github_pat else None,
-                github_repo_owner=repo_owner if repo_owner else None,
-                github_repo_name=repo_name if repo_name else None,
-                repo_file_tree=repo_file_tree,
-                custom_tools=custom_tools,
-                workspace_id=workspace_id,
-                reasoning_effort=reasoning_effort,
-                on_tool_start=on_tool_start,
-                on_tool_end=on_tool_end,
-                on_text=on_text,
-                on_server_tool_event=on_server_tool_event,
-            )
-            agent.on_thinking = on_thinking
-            agent.on_reasoning = on_reasoning
 
             conversation_history = [dict(m) for m in request_messages]
 
@@ -3655,6 +4901,171 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                 user_message = ""
                 history = list(conversation_history)
 
+            agent_toolsets = (
+                adjust_toolsets_for_worktree(enabled_toolsets)
+                if worktree_active
+                else enabled_toolsets
+            )
+            agent_repo_mode = has_repo_tools and not worktree_active
+            if worktree_active and has_repo_tools:
+                print(
+                    "[hermes-bridge] Worktree active — local file tools enabled, "
+                    "GitHub API repo tools disabled for this run",
+                    flush=True,
+                )
+
+            route_runs = _route_via_runs
+            if route_runs:
+                moa_runs_allowed = (
+                    resolved_provider == MOA_PROVIDER_ID and _route_via_runs
+                )
+                needs_loop, parity_reason = _hermes_runs.needs_agent_loop_parity(
+                    runs_parity_available=_runs_parity,
+                    worktree_active=worktree_active,
+                    explicit_provider=explicit_provider or None,
+                    moa_provider_id=MOA_PROVIDER_ID,
+                    moa_runs_allowed=moa_runs_allowed,
+                    enabled_toolsets=agent_toolsets,
+                    toolsets_overridden=request.headers.get("x-hermes-toolsets") is not None,
+                    default_toolsets=[t.strip() for t in DEFAULT_TOOLSETS.split(",") if t.strip()],
+                    repo_mode=agent_repo_mode,
+                    github_pat=github_pat if github_pat else None,
+                    custom_tools=custom_tools or None,
+                    reasoning_effort=reasoning_effort,
+                )
+                if needs_loop:
+                    print(
+                        f"[hermes-bridge] Gateway /v1/runs cannot honor request — "
+                        f"{parity_reason}; using agent-loop",
+                        flush=True,
+                    )
+                    route_runs = False
+
+            if route_runs:
+                print(
+                    f"[hermes-bridge] User message (runs): {user_message[:100]}... history_msgs={len(history)}",
+                    flush=True,
+                )
+                system_msgs = [m["content"] for m in history if m.get("role") == "system"]
+                non_system_history = [
+                    {"role": m["role"], "content": m["content"]}
+                    for m in history
+                    if m.get("role") in {"user", "assistant"} and (m.get("content") or "").strip()
+                ]
+                instructions = "\n\n".join(system_msgs) if system_msgs else None
+                run_provider = (explicit_provider or resolved_provider or "").strip().lower()
+                if run_provider in {"", "auto", "default"}:
+                    run_provider = None
+                worktree_cwd = None
+                if worktree_active and wt_info and _runs_parity:
+                    worktree_cwd = str(wt_info.get("path") or "").strip() or None
+                status_code, run_payload = _hermes_runs.submit_run(
+                    base_url=_gateway_base,
+                    api_key=_gateway_key or None,
+                    input_text=user_message,
+                    session_id=workspace_id,
+                    conversation_history=non_system_history,
+                    instructions=instructions,
+                    model=body.model,
+                    session_key=request.headers.get("x-hermes-session-key"),
+                    cwd=worktree_cwd,
+                    enabled_toolsets=agent_toolsets if _runs_parity else None,
+                    provider=run_provider,
+                    reasoning_effort=reasoning_effort,
+                    include_parity_fields=_runs_parity,
+                )
+                if status_code != 202:
+                    if (
+                        resolved_provider == MOA_PROVIDER_ID
+                        and _hermes_runs.is_moa_runs_rejection(status_code, run_payload)
+                    ):
+                        err = _hermes_runs.extract_gateway_error_text(run_payload)
+                        print(
+                            "[hermes-bridge] Gateway /v1/runs rejected provider=moa "
+                            f"({status_code}: {err}) — falling back to agent-loop",
+                            flush=True,
+                        )
+                        route_runs = False
+                    else:
+                        err = run_payload.get("error")
+                        if isinstance(err, dict):
+                            err = err.get("message") or json.dumps(err)
+                        raise RuntimeError(f"Gateway /v1/runs failed ({status_code}): {err}")
+
+            if route_runs:
+                run_id = str(run_payload.get("run_id") or "").strip()
+                if not run_id:
+                    raise RuntimeError("Gateway /v1/runs returned no run_id")
+
+                _hermes_runs.register_active_run(
+                    workspace_id,
+                    run_id=run_id,
+                    base_url=_gateway_base,
+                    api_key=_gateway_key or None,
+                )
+                _qput((
+                    "server_tool_event",
+                    {
+                        "type": "hermes_run",
+                        "run_id": run_id,
+                        "conversation_id": workspace_id,
+                    },
+                ))
+
+                def _emit_run_event(*args):
+                    _qput(args)
+
+                try:
+                    _hermes_runs.pump_run_events(
+                        base_url=_gateway_base,
+                        api_key=_gateway_key or None,
+                        run_id=run_id,
+                        emit=_emit_run_event,
+                        should_stop=lambda: _hermes_runs.is_run_cancelled(workspace_id),
+                    )
+                finally:
+                    _hermes_runs.unregister_active_run(workspace_id)
+                print(f"[hermes-bridge] Gateway run completed. run_id={run_id}", flush=True)
+                _brain_pulse("working", "completed")
+                _update_bridge_metrics(success=True, decrement_active=True)
+                _finalize_session(True)
+                _mark_request_finished(
+                    model=body.model,
+                    success=True,
+                    summary=f"model={body.model} mode=runs run_id={run_id}",
+                )
+                return
+
+            agent_kwargs: dict = {
+                "base_url": agent_base_url,
+                "api_key": agent_api_key,
+                "model": body.model,
+                "max_iterations": MAX_AGENT_ITERATIONS,
+                "enabled_toolsets": agent_toolsets,
+                "repo_mode": agent_repo_mode,
+                "worktree_mode": worktree_active,
+                "repo_edit_intent": repo_edit_intent,
+                "github_pat": github_pat if github_pat else None,
+                "github_repo_owner": repo_owner if repo_owner else None,
+                "github_repo_name": repo_name if repo_name else None,
+                "repo_file_tree": repo_file_tree,
+                "custom_tools": custom_tools,
+                "workspace_id": workspace_id,
+                "reasoning_effort": reasoning_effort,
+                "on_tool_start": on_tool_start,
+                "on_tool_end": on_tool_end,
+                "on_text": on_text,
+                "on_server_tool_event": on_server_tool_event,
+            }
+            if _using_real_agent:
+                agent_kwargs["on_fallback_switch"] = on_fallback_switch
+                agent_kwargs["on_computer_use_frame"] = on_computer_use_frame
+            if resolved_provider == MOA_PROVIDER_ID:
+                agent_kwargs["provider_override"] = MOA_PROVIDER_ID
+            agent = AIAgent(**agent_kwargs)
+            agent.on_thinking = on_thinking
+            agent.on_reasoning = on_reasoning
+
             print(f"[hermes-bridge] User message: {user_message[:100]}... history_msgs={len(history)} has_system={any(m.get('role') == 'system' for m in history)}", flush=True)
             agent.run_conversation(
                 user_message=user_message,
@@ -3676,6 +5087,11 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             _update_bridge_metrics(success=False, decrement_active=True)
             _finalize_session(False, error_message=error_message)
         finally:
+            if worktree_active and wt_info:
+                try:
+                    cleanup_worktree(wt_info)
+                except Exception as wt_cleanup_err:
+                    print(f"[hermes-bridge] Worktree cleanup error: {wt_cleanup_err}", flush=True)
             # Brain MCP: clean up per-request state to prevent zombies
             try:
                 # Delete the active request key for this chunk
@@ -3703,7 +5119,7 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
         yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
             "agent_status": _build_agent_status(
                 phase="starting",
-                label="Starting Hermes agent loop...",
+                label=_transport_label,
                 started_at=stream_started_at,
             ),
         }))
@@ -3773,6 +5189,16 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                     event_data = event[1]
                     yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
                         "server_tool_event": event_data
+                    }))
+                elif event[0] == "fallback_switch":
+                    switch = event[1]
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
+                        "fallback_switch": switch
+                    }))
+                elif event[0] == "computer_use_frame":
+                    frame = event[1]
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
+                        "computer_use_frame": frame
                     }))
 
             if not done_event.is_set():
@@ -4449,6 +5875,39 @@ async def delete_session(session_id: str, request: Request):
     return JSONResponse(content={"ok": True})
 
 
+@app.post("/sessions/{session_id}/fork")
+async def fork_session(session_id: str, request: Request):
+    """Proxy native Hermes gateway session fork (POST /api/sessions/{id}/fork)."""
+    import hermes_ops
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    title = body.get("title")
+    if title is not None:
+        title = str(title).strip() or None
+    base = os.environ.get("HERMES_API_BASE") or "http://127.0.0.1:8642"
+    api_key = (
+        os.environ.get("HERMES_API_KEY")
+        or os.environ.get("API_SERVER_KEY")
+        or _get_local_gateway_key()
+        or None
+    )
+    try:
+        status, payload = hermes_ops.fork_gateway_session(
+            session_id,
+            base_url=base,
+            api_key=api_key,
+            title=title,
+        )
+        return JSONResponse(content=payload, status_code=status)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
 # ------------------------------------------------------------------
 # Workspace endpoints for Hermes overview/files/skills/usage
 # ------------------------------------------------------------------
@@ -4944,6 +6403,45 @@ def _reload_agent_mcp() -> bool:
         return False
 
 
+def _build_mcp_tool_index(hermes_home: Path) -> list[dict]:
+    """Flatten registered MCP tools for the Spark searchable tool index."""
+    servers_cfg = _read_hermes_config(hermes_home).get("mcp_servers")
+    if not isinstance(servers_cfg, dict):
+        servers_cfg = {}
+
+    server_enabled = {
+        name: (cfg.get("enabled", True) is not False if isinstance(cfg, dict) else True)
+        for name, cfg in servers_cfg.items()
+    }
+
+    try:
+        from tools.mcp_tool import discover_mcp_tools, _mcp_tool_server_names, _lock as _agent_lock
+        from tools.registry import registry
+
+        discover_mcp_tools()
+        with _agent_lock:
+            pairs = list(_mcp_tool_server_names.items())
+    except Exception:
+        pairs = []
+        registry = None  # type: ignore[assignment]
+
+    out: list[dict] = []
+    for tool_name, server in pairs:
+        if not server_enabled.get(server, True):
+            continue
+        description = ""
+        if registry is not None:
+            schema = registry.get_schema(tool_name) or {}
+            description = str(schema.get("description") or "")
+        out.append({
+            "server": server,
+            "name": tool_name,
+            "description": description,
+        })
+    out.sort(key=lambda e: (e["server"].lower(), e["name"].lower()))
+    return out
+
+
 class McpInstallRequest(BaseModel):
     id: str
     param: Optional[str] = None
@@ -5017,6 +6515,18 @@ async def workspace_mcp_telemetry(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"telemetry unavailable: {e}"})
     return JSONResponse(content=snap)
+
+
+@app.get("/workspace/mcp-tool-index")
+async def workspace_mcp_tool_index(request: Request):
+    """Searchable MCP tool index: flattened tool names + descriptions from the
+    in-process agent registry (enabled servers only)."""
+    hermes_home = _resolve_hermes_home(_resolve_profile_name(request))
+    try:
+        tools = _build_mcp_tool_index(hermes_home)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"tool index unavailable: {e}"})
+    return JSONResponse(content={"tools": tools, "total": len(tools)})
 
 
 @app.get("/workspace/mcp-servers/{name}/logs")
@@ -5428,6 +6938,11 @@ async def _start_cron_scheduler():
 if __name__ == "__main__":
     import uvicorn
     try:
-        uvicorn.run(app, host="0.0.0.0", port=HERMES_PORT)
+        print(
+            f"[bridge] listening on {HERMES_BRIDGE_HOST}:{HERMES_PORT} "
+            f"(token={'set' if HERMES_BRIDGE_TOKEN else 'unset'})",
+            flush=True,
+        )
+        uvicorn.run(app, host=HERMES_BRIDGE_HOST, port=HERMES_PORT)
     except KeyboardInterrupt:
         pass

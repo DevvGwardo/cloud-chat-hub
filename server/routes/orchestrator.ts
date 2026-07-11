@@ -102,7 +102,9 @@ export function registerOrchestratorRoutes(app: Express) {
       if (!cardId) {
         return sendJson(res, 400, { error: 'cardId is required' });
       }
-      const result = await taskOrchestrator.dispatchCard(cardId);
+      const result = await taskOrchestrator.dispatchCard(cardId, {
+        useWorktree: req.body?.useWorktree === true,
+      });
       if (!result.ok) {
         return sendJson(res, 409, { error: result.error || 'Failed to dispatch card' });
       }

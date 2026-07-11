@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Loader2, RefreshCw, Server, Cpu, HardDrive, Activity, CircleDot } from 'lucide-react';
 import { fetchHermesSystem, type HermesSystemStats } from '@/lib/hermes-api';
 import { cn } from '@/lib/utils';
+import { HermesOpsExtras } from './HermesOpsExtras';
 
 function formatBytes(bytes: number | null): string {
   if (bytes == null) return '—';
@@ -173,6 +174,8 @@ export function HermesSystemPanel() {
               </div>
             </div>
           )}
+
+          <HermesOpsExtras />
         </div>
       )}
     </div>

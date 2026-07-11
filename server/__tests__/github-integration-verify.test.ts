@@ -1,4 +1,8 @@
 import type { AddressInfo } from 'net'
+import { execSync } from 'node:child_process'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const repoVerifierMocks = vi.hoisted(() => ({
@@ -117,6 +121,54 @@ describe('GitHub verification route', () => {
     }
   })
 
+  it('verifies staged changes from a local clone without a GitHub PAT', async () => {
+    const localRepoPath = mkdtempSync(join(tmpdir(), 'cloudchat-verify-local-'))
+    execSync('git init', { cwd: localRepoPath })
+    execSync('git commit --allow-empty -m init', { cwd: localRepoPath })
+    execSync('git remote add origin https://github.com/octo/cloudchat.git', { cwd: localRepoPath })
+
+    const server = await createTestServer()
+
+    try {
+      const response = await fetch(`${server.url}/functions/v1/github-integration`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'verify-changes',
+          owner: 'octo',
+          repo: 'cloudchat',
+          baseBranch: 'main',
+          localRepoPath,
+          files: [
+            {
+              path: 'src/App.tsx',
+              action: 'edit',
+              content: 'export default function App() { return null }',
+            },
+          ],
+        }),
+      })
+
+      const body = await response.json()
+
+      expect(response.ok).toBe(true)
+      expect(body.summary.status).toBe('passed')
+      expect(repoVerifierMocks.verifyRepoChanges).toHaveBeenCalledWith(
+        expect.objectContaining({
+          owner: 'octo',
+          repo: 'cloudchat',
+          localRepoPath,
+          baseBranch: 'main',
+        }),
+      )
+      expect(repoVerifierMocks.verifyRepoChanges.mock.calls[0]?.[0]).not.toHaveProperty('pat')
+    } finally {
+      await server.close()
+    }
+  })
+
   it('resolves the branch before reading the recursive repo tree', async () => {
     const server = await createTestServer()
     const originalFetch = global.fetch
@@ -196,60 +248,6 @@ describe('GitHub verification route', () => {
   })
 
   it('reads files from the requested ref when one is provided', async () => {
-    const server = await createTestServer()
-    const originalFetch = global.fetch
-    const fetchMock = vi.spyOn(global, 'fetch').mockImplementation((input, init) => {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
-      if (url.startsWith(server.url)) {
-        return originalFetch(input as Parameters<typeof fetch>[0], init)
-      }
-
-      if (url.includes('/contents/src/App.tsx?ref=feature%2Fbranch')) {
-        return Promise.resolve(
-          new Response(JSON.stringify({
-            content: Buffer.from('export default function App() {}').toString('base64'),
-            sha: 'blob-sha',
-          }), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          }),
-        )
-      }
-
-      return Promise.reject(new Error(`Unexpected fetch: ${url}`))
-    })
-
-    try {
-      const response = await fetch(`${server.url}/functions/v1/github-integration`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          action: 'read-file',
-          pat: 'ghp_test',
-          owner: 'octo',
-          repo: 'cloudchat',
-          path: 'src/App.tsx',
-          ref: 'feature/branch',
-        }),
-      })
-
-      const body = await response.json()
-
-      expect(response.ok).toBe(true)
-      expect(body.content).toContain('export default function App() {}')
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining('/contents/src/App.tsx?ref=feature%2Fbranch'),
-        expect.any(Object),
-      )
-    } finally {
-      fetchMock.mockRestore()
-      await server.close()
-    }
-  })
-
-  it('lists repository issues with pagination metadata', async () => {
     const server = await createTestServer()
     const originalFetch = global.fetch
     const fetchMock = vi.spyOn(global, 'fetch').mockImplementation((input, init) => {

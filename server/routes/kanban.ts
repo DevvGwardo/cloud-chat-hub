@@ -43,6 +43,9 @@ interface KanbanCard {
   status: KanbanLane;
   missionId: string | null;
   reportPath: string | null;
+  externalRef: string | null;
+  source: string | null;
+  sourceUrl: string | null;
   createdBy: string;
   createdAt: number;
   updatedAt: number;
@@ -62,6 +65,9 @@ interface CreateKanbanCardInput {
   status?: string | null;
   createdBy?: string | null;
   reportPath?: string | null;
+  externalRef?: string | null;
+  source?: string | null;
+  sourceUrl?: string | null;
 }
 
 type UpdateKanbanCardInput = Partial<Omit<CreateKanbanCardInput, 'createdBy'>>;
@@ -109,6 +115,9 @@ function encodeBody(
   acceptanceCriteria: string[] | undefined,
   reviewer: string | null | undefined,
   missionId: string | null | undefined,
+  externalRef?: string | null,
+  source?: string | null,
+  sourceUrl?: string | null,
 ): string {
   const parts: string[] = [];
   if (spec?.trim()) {
@@ -126,6 +135,17 @@ function encodeBody(
   if (missionId?.trim()) {
     parts.push(`**Mission:** ${missionId.trim()}`);
   }
+  // GitHub-bridge correlation metadata — packed into body like reviewer/mission
+  // so we never have to alter the Hermes-owned `tasks` schema.
+  if (externalRef?.trim()) {
+    parts.push(`**External-Ref:** ${externalRef.trim()}`);
+  }
+  if (source?.trim()) {
+    parts.push(`**Source:** ${source.trim()}`);
+  }
+  if (sourceUrl?.trim()) {
+    parts.push(`**Source-URL:** ${sourceUrl.trim()}`);
+  }
   return parts.join('\n\n');
 }
 
@@ -134,19 +154,32 @@ function decodeBody(body: string | null): {
   acceptanceCriteria: string[];
   reviewer: string | null;
   missionId: string | null;
+  externalRef: string | null;
+  source: string | null;
+  sourceUrl: string | null;
 } {
   const spec = '';
   const acceptanceCriteria: string[] = [];
   let reviewer: string | null = null;
   let missionId: string | null = null;
+  let externalRef: string | null = null;
+  let source: string | null = null;
+  let sourceUrl: string | null = null;
 
-  if (!body) return { spec, acceptanceCriteria, reviewer, missionId };
+  if (!body) return { spec, acceptanceCriteria, reviewer, missionId, externalRef, source, sourceUrl };
 
   // Parse reviewer/mission metadata from body
   const reviewerMatch = body.match(/\*\*Reviewer:\*\*\s*@?(\S+)/);
   if (reviewerMatch) reviewer = reviewerMatch[1];
   const missionMatch = body.match(/\*\*Mission:\*\*\s*(\S+)/);
   if (missionMatch) missionId = missionMatch[1];
+  // GitHub-bridge correlation metadata
+  const externalRefMatch = body.match(/\*\*External-Ref:\*\*\s*(\S+)/);
+  if (externalRefMatch) externalRef = externalRefMatch[1];
+  const sourceMatch = body.match(/\*\*Source:\*\*\s*(\S+)/);
+  if (sourceMatch) source = sourceMatch[1];
+  const sourceUrlMatch = body.match(/\*\*Source-URL:\*\*\s*(\S+)/);
+  if (sourceUrlMatch) sourceUrl = sourceUrlMatch[1];
 
   // Parse ## Spec section
   const specMatch = body.match(/## Spec\n([\s\S]*?)(?=\n## |\*\*|$)/);
@@ -167,14 +200,19 @@ function decodeBody(body: string | null): {
     acceptanceCriteria: parsedCriteria,
     reviewer,
     missionId,
+    externalRef,
+    source,
+    sourceUrl,
   };
 }
 
 // ─── Status normalization ───────────────────────────────────────────────────
 
 function normalizeStatus(value: unknown): KanbanLane {
-  if (value === 'todo') return 'ready';
+  // Hermes native statuses → Spark lanes
+  if (value === 'todo' || value === 'triage' || value === 'scheduled') return 'ready';
   if (value === 'in_progress' || value === 'doing') return 'running';
+  if (value === 'archived') return 'done';
   return KANBAN_LANES.includes(value as KanbanLane)
     ? (value as KanbanLane)
     : 'backlog';
@@ -210,6 +248,9 @@ function rowToCard(row: Record<string, unknown>): KanbanCard {
     status: normalizeStatus(row.status),
     missionId: bodyFields.missionId,
     reportPath: (row.result as string) || null,
+    externalRef: bodyFields.externalRef,
+    source: bodyFields.source,
+    sourceUrl: bodyFields.sourceUrl,
     createdBy: String(row.created_by || 'kanban'),
     createdAt: Number(row.created_at ?? Date.now()),
     updatedAt: Number(row.updated_at ?? row.created_at ?? Date.now()),
@@ -243,7 +284,15 @@ function createKanbanCard(input: CreateKanbanCardInput): KanbanCard {
   const now = Date.now();
   const id = randomUUID();
   const status = normalizeStatus(input.status ?? 'backlog');
-  const body = encodeBody(input.spec, input.acceptanceCriteria, input.reviewer, null);
+  const body = encodeBody(
+    input.spec,
+    input.acceptanceCriteria,
+    input.reviewer,
+    null,
+    input.externalRef,
+    input.source,
+    input.sourceUrl,
+  );
 
   db.prepare(
     `INSERT INTO tasks (id, title, body, assignee, status, created_by, created_at, updated_at)
@@ -316,6 +365,9 @@ function updateKanbanCard(
       updates.acceptanceCriteria ?? decoded.acceptanceCriteria,
       updates.reviewer ?? decoded.reviewer,
       decoded.missionId,
+      updates.externalRef ?? decoded.externalRef,
+      updates.source ?? decoded.source,
+      updates.sourceUrl ?? decoded.sourceUrl,
     );
     setClauses.push('body = ?');
     setParams.push(newBody);
@@ -339,6 +391,20 @@ function deleteKanbanCard(cardId: string): boolean {
   return result.changes > 0;
 }
 
+function findCardByExternalRef(ref: string): KanbanCard | null {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT * FROM tasks WHERE body LIKE ? ORDER BY COALESCE(updated_at, created_at) DESC`,
+    )
+    .all(`%**External-Ref:** ${ref}%`) as Record<string, unknown>[];
+  for (const row of rows) {
+    const card = rowToCard(row);
+    if (card.externalRef === ref) return card;
+  }
+  return null;
+}
+
 // ─── Route registration ─────────────────────────────────────────────────────
 
 export function registerKanbanRoutes(app: Express) {
@@ -360,6 +426,29 @@ export function registerKanbanRoutes(app: Express) {
   });
 
   /**
+   * GET /api/hermes/kanban/by-ref/:ref — find a card by its external reference
+   * (e.g. "owner/repo#123", "sha:<sha>", "branch:<name>"). Used by the GitHub
+   * kanban-bridge to correlate issue/PR/CI events back to the card it created.
+   */
+  app.get('/api/hermes/kanban/by-ref/:ref', (req: Request, res: Response) => {
+    try {
+      const ref = decodeURIComponent(req.params.ref || '');
+      if (!ref) {
+        return sendJson(res, 400, { error: 'ref is required' });
+      }
+      const card = findCardByExternalRef(ref);
+      if (!card) {
+        return sendJson(res, 404, { error: 'No card found for ref' });
+      }
+      sendJson(res, 200, { card });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to look up card by ref';
+      sendJson(res, 500, { error: message });
+    }
+  });
+
+  /**
    * POST /api/hermes/kanban — create a card
    * Body: { title, spec?, acceptanceCriteria?, assignedWorker?, reviewer?, status?, createdBy? }
    */
@@ -373,6 +462,9 @@ export function registerKanbanRoutes(app: Express) {
         reviewer,
         status,
         createdBy,
+        externalRef,
+        source,
+        sourceUrl,
       } = req.body;
 
       if (!title || typeof title !== 'string' || !title.trim()) {
@@ -397,6 +489,9 @@ export function registerKanbanRoutes(app: Express) {
         reviewer: typeof reviewer === 'string' ? reviewer : null,
         status: typeof status === 'string' ? status : null,
         createdBy: typeof createdBy === 'string' ? createdBy : null,
+        externalRef: typeof externalRef === 'string' ? externalRef : null,
+        source: typeof source === 'string' ? source : null,
+        sourceUrl: typeof sourceUrl === 'string' ? sourceUrl : null,
       });
 
       sendJson(res, 201, { card });

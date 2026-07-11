@@ -52,6 +52,11 @@ if "fastapi" not in sys.modules:
         def add_middleware(self, *args, **kwargs):
             return None
 
+        def middleware(self, *args, **kwargs):
+            def decorator(fn):
+                return fn
+            return decorator
+
         def get(self, *args, **kwargs):
             def decorator(fn):
                 return fn
@@ -625,6 +630,281 @@ class EdgeCaseTests(unittest.TestCase):
             self.assertEqual(response.status_code, 503)
         finally:
             main.httpx.AsyncClient = original_client
+
+
+# ---------------------------------------------------------------------------
+# Mixture of Agents Tests
+# ---------------------------------------------------------------------------
+
+class MixtureOfAgentsTests(unittest.TestCase):
+    def _moa_config(self):
+        return {
+            "default_preset": "review",
+            "presets": {
+                "review": {
+                    "name": "review",
+                    "enabled": True,
+                    "reference_models": [
+                        {"provider": "openai", "model": "gpt-5.5"},
+                        {"provider": "deepseek", "model": "deepseek-v4-pro"},
+                    ],
+                    "aggregator": {"provider": "anthropic", "model": "claude-opus-4.8"},
+                    "reference_temperature": 0.2,
+                    "aggregator_temperature": 0.1,
+                    "max_tokens": 4096,
+                }
+            },
+        }
+
+    def test_normalizes_moa_config_from_hermes_shape(self):
+        normalized = main._normalize_moa_config({
+            "moa": {
+                "default_preset": "review",
+                "presets": {
+                    "review": {
+                        "reference_models": [
+                            {"provider": "openai", "model": "gpt-5.5"},
+                            "deepseek/deepseek-v4-pro",
+                        ],
+                        "aggregator": {"provider": "anthropic", "model": "claude-opus-4.8"},
+                        "reference_temperature": "0.4",
+                        "aggregator_temperature": 0.1,
+                        "max_tokens": "8192",
+                    },
+                    "broken": {"aggregator": {"model": "claude"}},
+                },
+            },
+        })
+
+        self.assertEqual(normalized["default_preset"], "review")
+        self.assertEqual(list(normalized["presets"].keys()), ["review"])
+        preset = normalized["presets"]["review"]
+        self.assertEqual(preset["reference_models"][1]["model"], "deepseek/deepseek-v4-pro")
+        self.assertEqual(preset["aggregator"]["provider"], "anthropic")
+        self.assertEqual(preset["reference_temperature"], 0.4)
+        self.assertEqual(preset["max_tokens"], 8192)
+
+    def test_list_providers_exposes_moa_virtual_provider(self):
+        with patch.object(main, "_load_moa_config", return_value=self._moa_config()), \
+             patch.object(main, "_load_cli_model_config", return_value={
+                 "default": "review", "provider": "moa", "base_url": None, "api_key": None,
+             }):
+            response = asyncio.run(main.list_providers(_FakeRequest({})))
+
+        moa_provider = response["data"][0]
+        self.assertEqual(response["default_provider"], "moa")
+        self.assertEqual(response["default_model"], "review")
+        self.assertEqual(moa_provider["id"], "moa")
+        self.assertEqual(moa_provider["name"], "Mixture of Agents")
+        self.assertEqual(moa_provider["models"], ["review"])
+
+    def test_moa_rejects_passthrough_mode(self):
+        body = main.ChatCompletionRequest.model_validate({
+            "model": "review",
+            "messages": [{"role": "user", "content": "review this design"}],
+            "stream": True,
+        })
+        request = _FakeRequest({
+            "authorization": "Bearer test-key",
+            "x-hermes-provider": "moa",
+            "x-hermes-execution-mode": "passthrough",
+        })
+
+        with patch.object(main, "_load_moa_config", return_value=self._moa_config()), \
+             patch.object(main, "_load_cli_model_config", return_value={
+                 "default": None, "provider": None, "base_url": None, "api_key": None,
+             }), \
+             patch.object(main, "_get_active_provider", return_value=None):
+            response = asyncio.run(main.chat_completions(request, body))
+
+        self.assertEqual(response.status_code, 400)
+        payload = getattr(response, "content", None)
+        if payload is None:
+            payload = json.loads(response.body.decode("utf-8"))
+        self.assertIn("agent loop", payload["error"]["message"])
+
+    @staticmethod
+    def _broken_adapter_module():
+        """hermes_adapter import fails → main falls back to run_agent."""
+        return types.ModuleType("hermes_adapter")
+
+    @staticmethod
+    def _fake_run_agent_class():
+        class _FakeRunAgent:
+            last_init = None
+
+            def __init__(self, **kwargs):
+                _FakeRunAgent.last_init = kwargs
+                self.on_thinking = None
+                self.on_reasoning = None
+
+            def run_conversation(self, user_message, conversation_history):
+                return None
+
+        return _FakeRunAgent
+
+    def _assert_moa_native_required(self, response):
+        self.assertEqual(response.status_code, 400)
+        payload = getattr(response, "content", None)
+        if payload is None:
+            payload = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(payload["error"]["code"], main.MOA_NATIVE_REQUIRED_CODE)
+        self.assertIn("HermesAgentAdapter", payload["error"]["message"])
+        self.assertIn("run_agent", payload["error"]["message"])
+
+    def test_moa_rejects_run_agent_fallback_with_explicit_provider(self):
+        """MoA must not silently run on legacy run_agent when adapter import fails."""
+        body = main.ChatCompletionRequest.model_validate({
+            "model": "review",
+            "messages": [{"role": "user", "content": "review this design"}],
+            "stream": True,
+        })
+        request = _FakeRequest({
+            "authorization": "Bearer test-key",
+            "x-hermes-provider": "moa",
+            "x-hermes-execution-mode": "agent-loop",
+        })
+        fake_run_agent = self._fake_run_agent_class()
+        fake_run_agent_module = types.SimpleNamespace(AIAgent=fake_run_agent)
+
+        with patch.dict(sys.modules, {
+                 "hermes_adapter": self._broken_adapter_module(),
+                 "run_agent": fake_run_agent_module,
+             }), \
+             patch.object(main, "_load_moa_config", return_value=self._moa_config()), \
+             patch.object(main, "_load_cli_model_config", return_value={
+                 "default": None, "provider": None, "base_url": None, "api_key": None,
+             }), \
+             patch.object(main, "_get_active_provider", return_value=None):
+            response = asyncio.run(main.chat_completions(request, body))
+
+        self._assert_moa_native_required(response)
+        self.assertIsNone(fake_run_agent.last_init)
+
+    def test_moa_rejects_run_agent_fallback_via_moa_shortcut(self):
+        body = main.ChatCompletionRequest.model_validate({
+            "model": "meta-llama/llama-4-maverick",
+            "messages": [{"role": "user", "content": "/moa review auth flow"}],
+            "stream": True,
+        })
+        request = _FakeRequest({
+            "authorization": "Bearer test-key",
+            "x-hermes-execution-mode": "agent-loop",
+        })
+        fake_run_agent = self._fake_run_agent_class()
+        fake_run_agent_module = types.SimpleNamespace(AIAgent=fake_run_agent)
+
+        with patch.dict(sys.modules, {
+                 "hermes_adapter": self._broken_adapter_module(),
+                 "run_agent": fake_run_agent_module,
+             }), \
+             patch.object(main, "_load_moa_config", return_value=self._moa_config()), \
+             patch.object(main, "_load_cli_model_config", return_value={
+                 "default": None, "provider": None, "base_url": None, "api_key": None,
+             }), \
+             patch.object(main, "_get_active_provider", return_value=None):
+            response = asyncio.run(main.chat_completions(request, body))
+
+        self._assert_moa_native_required(response)
+        self.assertIsNone(fake_run_agent.last_init)
+
+    def test_moa_rejects_run_agent_fallback_via_cli_provider(self):
+        body = main.ChatCompletionRequest.model_validate({
+            "model": "review",
+            "messages": [{"role": "user", "content": "review this design"}],
+            "stream": True,
+        })
+        request = _FakeRequest({
+            "authorization": "Bearer test-key",
+            "x-hermes-execution-mode": "agent-loop",
+        })
+        fake_run_agent = self._fake_run_agent_class()
+        fake_run_agent_module = types.SimpleNamespace(AIAgent=fake_run_agent)
+
+        with patch.dict(sys.modules, {
+                 "hermes_adapter": self._broken_adapter_module(),
+                 "run_agent": fake_run_agent_module,
+             }), \
+             patch.object(main, "_load_moa_config", return_value=self._moa_config()), \
+             patch.object(main, "_load_cli_model_config", return_value={
+                 "default": "review",
+                 "provider": "moa",
+                 "base_url": "virtual://moa",
+             }), \
+             patch.object(main, "_get_active_provider", return_value=None):
+            response = asyncio.run(main.chat_completions(request, body))
+
+        self._assert_moa_native_required(response)
+        self.assertIsNone(fake_run_agent.last_init)
+
+    def test_normalize_moa_preset_rejects_recursive_moa_slots(self):
+        normalized = main._normalize_moa_config({
+            "moa": {
+                "presets": {
+                    "bad": {
+                        "reference_models": [
+                            {"provider": "moa", "model": "default"},
+                            {"provider": "openai", "model": "gpt-5.5"},
+                        ],
+                        "aggregator": {"provider": "moa", "model": "default"},
+                    },
+                    "ok": {
+                        "reference_models": [{"provider": "openai", "model": "gpt-5.5"}],
+                        "aggregator": {"provider": "anthropic", "model": "claude-opus-4.8"},
+                        "fanout": "user_turn",
+                        "reference_max_tokens": 600,
+                    },
+                },
+            },
+        })
+        self.assertEqual(list(normalized["presets"].keys()), ["ok"])
+        self.assertEqual(normalized["presets"]["ok"]["fanout"], "user_turn")
+        self.assertEqual(normalized["presets"]["ok"]["reference_max_tokens"], 600)
+
+    def test_format_moa_tool_text_is_compact(self):
+        start = main._format_tool_start_text(
+            "moa.reference",
+            json.dumps({"label": "openai:gpt-5.5", "index": 0, "count": 2}),
+        )
+        self.assertIn("MoA advisor", start)
+        self.assertIn("openai:gpt-5.5", start)
+        end = main._format_tool_end_text("moa.reference", "long advisor essay" * 20)
+        self.assertIn("Advisor ready", end)
+        self.assertNotIn("long advisor essay", end)
+
+    def test_find_moa_shortcut_scans_past_later_user_messages(self):
+        found = main._find_moa_shortcut([
+            {"role": "user", "content": "/moa review auth"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "also check tests"},
+        ])
+        self.assertEqual(found, (0, "review auth"))
+
+        bare = main._find_moa_shortcut([
+            {"role": "user", "content": "/moa"},
+        ])
+        self.assertEqual(bare, (0, ""))
+
+        missing = main._find_moa_shortcut([
+            {"role": "user", "content": "hello"},
+        ])
+        self.assertIsNone(missing)
+
+    def test_loopback_host_detection(self):
+        self.assertTrue(main._is_loopback_host("127.0.0.1"))
+        self.assertTrue(main._is_loopback_host("::1"))
+        self.assertFalse(main._is_loopback_host("192.168.1.10"))
+
+    def test_get_moa_endpoint_returns_presets(self):
+        with patch.object(main, "_load_moa_config", return_value=self._moa_config()), \
+             patch.object(main, "_resolve_hermes_home", return_value=main.Path("/tmp")), \
+             patch.object(main, "_resolve_profile_name", return_value=""):
+            response = asyncio.run(main.get_moa_config(_FakeRequest({})))
+
+        self.assertEqual(response["object"], "moa.config")
+        self.assertEqual(response["default_preset"], "review")
+        self.assertIn("review", response["presets"])
+        self.assertEqual(response["preset_names"], ["review"])
 
 
 # ---------------------------------------------------------------------------

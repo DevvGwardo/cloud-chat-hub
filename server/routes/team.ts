@@ -87,6 +87,7 @@ export function registerTeamRoutes(app: Express) {
       const assigned = teamCoordinator.assignSubtasks(subtasks, team.agents);
 
       team.subtasks = assigned;
+      teamCoordinator.save();
 
       sendJson(res, 201, {
         team: {

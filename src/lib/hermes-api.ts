@@ -245,8 +245,671 @@ export async function fetchHermesProviders(): Promise<HermesProvidersResponse> {
   };
 }
 
+// ─── Mixture of Agents ────────────────────────────────────────────────────
+
+export interface MoaModelRef {
+  provider: string;
+  model: string;
+}
+
+export interface MoaPreset {
+  name: string;
+  enabled: boolean;
+  reference_models: MoaModelRef[];
+  aggregator: MoaModelRef;
+  reference_temperature?: number | null;
+  aggregator_temperature?: number | null;
+  max_tokens?: number | null;
+  reference_max_tokens?: number | null;
+  fanout?: 'per_iteration' | 'user_turn';
+}
+
+export interface MoaConfig {
+  default_preset: string;
+  presets: Record<string, MoaPreset>;
+  preset_names: string[];
+}
+
+export async function fetchMoaConfig(): Promise<MoaConfig> {
+  const data = await hermesFetch<{
+    default_preset?: string;
+    presets?: Record<string, MoaPreset>;
+    preset_names?: string[];
+  }>('/moa');
+  return {
+    default_preset: data.default_preset || 'default',
+    presets: data.presets && typeof data.presets === 'object' ? data.presets : {},
+    preset_names: Array.isArray(data.preset_names) ? data.preset_names : [],
+  };
+}
+
+export async function updateMoaConfig(body: {
+  default_preset?: string;
+  presets?: Record<string, MoaPreset | Record<string, unknown>>;
+  preset?: MoaPreset & { delete?: boolean };
+}): Promise<MoaConfig> {
+  const data = await hermesFetch<{
+    default_preset?: string;
+    presets?: Record<string, MoaPreset>;
+    preset_names?: string[];
+  }>('/moa', {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+  return {
+    default_preset: data.default_preset || 'default',
+    presets: data.presets && typeof data.presets === 'object' ? data.presets : {},
+    preset_names: Array.isArray(data.preset_names) ? data.preset_names : [],
+  };
+}
+
 export async function fetchCursorComposerBridge(): Promise<CursorComposerBridgeStatus> {
   return hermesFetch<CursorComposerBridgeStatus>('/bridges/cursor-composer');
+}
+
+// ─── Ops: fallback, checkpoints, memory, curator, goals, insights ─────────
+
+export interface FallbackProvider {
+  provider: string;
+  model: string;
+  base_url?: string;
+}
+
+export async function fetchFallbackProviders(): Promise<FallbackProvider[]> {
+  const data = await hermesFetch<{ providers?: FallbackProvider[] }>('/fallback');
+  return Array.isArray(data.providers) ? data.providers : [];
+}
+
+export async function updateFallbackProviders(providers: FallbackProvider[]): Promise<FallbackProvider[]> {
+  const data = await hermesFetch<{ providers?: FallbackProvider[] }>('/fallback', {
+    method: 'PUT',
+    body: JSON.stringify({ providers }),
+  });
+  return Array.isArray(data.providers) ? data.providers : [];
+}
+
+export interface CheckpointProject {
+  workdir: string;
+  commits: number;
+  last_touch: string;
+  state: string;
+}
+
+export interface CheckpointEntry {
+  index: number;
+  path: string;
+  label: string;
+  mtime?: string | null;
+  short_hash?: string | null;
+  files_changed?: number;
+}
+
+export interface CheckpointsStatus {
+  available: boolean;
+  base_path: string;
+  exists: boolean;
+  total_size: string | null;
+  store_size: string | null;
+  projects: CheckpointProject[];
+  cli_ok: boolean;
+  error?: string | null;
+  raw_summary?: string | null;
+  entries?: CheckpointEntry[];
+  workdir?: string | null;
+  entries_error?: string | null;
+}
+
+export async function fetchCheckpoints(workdir?: string): Promise<CheckpointsStatus> {
+  const suffix = workdir ? `?workdir=${encodeURIComponent(workdir)}` : '';
+  return hermesFetch<CheckpointsStatus>(`/checkpoints${suffix}`);
+}
+
+export async function pruneCheckpoints(): Promise<{ ok: boolean; output: string }> {
+  return hermesFetch('/checkpoints/prune', { method: 'POST', body: '{}' });
+}
+
+export interface CheckpointRestoreResult {
+  ok: boolean;
+  index?: number;
+  workdir?: string;
+  restored_to?: string;
+  reason?: string;
+  hash?: string;
+  error?: string;
+}
+
+export async function restoreCheckpoint(
+  index: number,
+  workdir?: string,
+): Promise<CheckpointRestoreResult> {
+  return hermesFetch<CheckpointRestoreResult>('/checkpoints/restore', {
+    method: 'POST',
+    body: JSON.stringify({
+      index,
+      ...(workdir ? { workdir } : {}),
+    }),
+  });
+}
+
+export interface MemoryStatus {
+  ok: boolean;
+  provider: string | null;
+  plugin_available: boolean | null;
+  builtin: boolean;
+  raw: string;
+}
+
+export async function fetchMemoryStatus(): Promise<MemoryStatus> {
+  return hermesFetch<MemoryStatus>('/memory/status');
+}
+
+export interface CuratorStatus {
+  ok: boolean;
+  enabled: boolean | null;
+  last_run: string | null;
+  runs: number | null;
+  raw: string;
+}
+
+export async function fetchCuratorStatus(): Promise<CuratorStatus> {
+  return hermesFetch<CuratorStatus>('/curator/status');
+}
+
+export async function runCurator(): Promise<{ ok: boolean; output: string }> {
+  return hermesFetch('/curator/run', { method: 'POST', body: '{}' });
+}
+
+export interface ComputerUseStatus {
+  ok: boolean;
+  installed: boolean;
+  raw: string;
+}
+
+export async function fetchComputerUseStatus(): Promise<ComputerUseStatus> {
+  return hermesFetch<ComputerUseStatus>('/computer-use/status');
+}
+
+export interface SkillBundle {
+  name: string;
+  slug?: string;
+  path: string;
+  skills: string[];
+  description?: string | null;
+  instruction?: string | null;
+}
+
+export async function fetchSkillBundles(): Promise<{ bundles: SkillBundle[]; directory: string }> {
+  const data = await hermesFetch<{ bundles?: SkillBundle[]; directory?: string }>('/bundles');
+  return {
+    bundles: Array.isArray(data.bundles) ? data.bundles : [],
+    directory: data.directory || '',
+  };
+}
+
+export async function fetchSkillBundle(name: string): Promise<{
+  ok: boolean;
+  bundle: SkillBundle | null;
+  error?: string;
+}> {
+  return hermesFetch(`/bundles/${encodeURIComponent(name)}`);
+}
+
+export async function createSkillBundle(body: {
+  name: string;
+  skills: string[];
+  description?: string;
+  instruction?: string;
+  force?: boolean;
+}): Promise<{
+  ok: boolean;
+  name: string;
+  skills: string[];
+  bundles: SkillBundle[];
+  bundle: SkillBundle | null;
+  output?: string;
+  error?: string;
+}> {
+  return hermesFetch('/bundles/create', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteSkillBundle(name: string): Promise<{
+  ok: boolean;
+  name: string;
+  bundles: SkillBundle[];
+  output?: string;
+  error?: string;
+}> {
+  return hermesFetch('/bundles/delete', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function reloadSkillBundles(): Promise<{
+  ok: boolean;
+  bundles: SkillBundle[];
+  directory?: string;
+  output?: string;
+  error?: string;
+}> {
+  return hermesFetch('/bundles/reload', { method: 'POST', body: '{}' });
+}
+
+export async function fetchHermesDashboardUrl(): Promise<{ ok: boolean; url: string | null; error?: string }> {
+  return hermesFetch('/dashboard/url');
+}
+
+export interface GoalsConfig {
+  max_turns: number;
+  enabled: boolean;
+}
+
+export async function fetchGoalsConfig(): Promise<GoalsConfig> {
+  const data = await hermesFetch<Partial<GoalsConfig>>('/goals');
+  return {
+    max_turns: typeof data.max_turns === 'number' ? data.max_turns : 20,
+    enabled: data.enabled !== false,
+  };
+}
+
+export async function updateGoalsConfig(body: Partial<GoalsConfig>): Promise<GoalsConfig> {
+  const data = await hermesFetch<Partial<GoalsConfig>>('/goals', {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+  return {
+    max_turns: typeof data.max_turns === 'number' ? data.max_turns : 20,
+    enabled: data.enabled !== false,
+  };
+}
+
+export async function fetchInsights(days = 7): Promise<{ ok: boolean; days: number; report: string }> {
+  return hermesFetch(`/insights?days=${days}`);
+}
+
+// ─── Journey / learning graph ─────────────────────────────────────────────
+
+export interface JourneyNode {
+  id: string;
+  label?: string;
+  kind?: string;
+  timestamp?: number;
+  category?: string;
+  useCount?: number;
+  state?: string;
+  createdBy?: string | null;
+  pinned?: boolean;
+}
+
+export interface JourneyGraph {
+  ok: boolean;
+  node_count: number;
+  edge_count: number;
+  nodes: JourneyNode[];
+  edges: Array<Record<string, unknown>>;
+  error?: string | null;
+}
+
+export async function fetchJourneyGraph(): Promise<JourneyGraph> {
+  return hermesFetch<JourneyGraph>('/journey');
+}
+
+// ─── Computer use install / doctor ────────────────────────────────────────
+
+export async function installComputerUse(): Promise<{
+  ok: boolean;
+  output: string;
+  status: ComputerUseStatus;
+}> {
+  return hermesFetch('/computer-use/install', { method: 'POST', body: '{}' });
+}
+
+export async function doctorComputerUse(): Promise<{
+  ok: boolean;
+  report: string;
+  status: ComputerUseStatus;
+}> {
+  return hermesFetch('/computer-use/doctor');
+}
+
+// ─── Plugins / hooks / LSP ────────────────────────────────────────────────
+
+export interface HermesPlugin {
+  name: string;
+  status: string;
+  enabled: boolean;
+  version: string | null;
+  description: string | null;
+  source: string | null;
+}
+
+export interface PluginsStatus {
+  ok: boolean;
+  cli_ok?: boolean;
+  total: number;
+  enabled_count: number;
+  plugins: HermesPlugin[];
+  error?: string | null;
+}
+
+export async function fetchPluginsStatus(limit = 120): Promise<PluginsStatus> {
+  const data = await hermesFetch<PluginsStatus>(`/plugins?limit=${limit}`);
+  return {
+    ...data,
+    plugins: Array.isArray(data.plugins) ? data.plugins : [],
+    total: data.total ?? 0,
+    enabled_count: data.enabled_count ?? 0,
+  };
+}
+
+export async function enablePlugin(
+  name: string,
+  options?: { allowToolOverride?: boolean },
+): Promise<PluginsStatus & { output?: string }> {
+  return hermesFetch('/plugins/enable', {
+    method: 'POST',
+    body: JSON.stringify({
+      name,
+      allow_tool_override: options?.allowToolOverride === true,
+    }),
+  });
+}
+
+export async function disablePlugin(name: string): Promise<PluginsStatus & { output?: string }> {
+  return hermesFetch('/plugins/disable', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  });
+}
+
+export interface HermesHook {
+  event: string;
+  command: string;
+  timeout_s: number;
+  allowed: boolean;
+  status_hint?: string | null;
+  approved_at?: string | null;
+  warning?: string | null;
+}
+
+export interface HooksStatus {
+  ok: boolean;
+  total: number;
+  issue_hints: number;
+  hooks: HermesHook[];
+  error?: string | null;
+}
+
+export async function fetchHooksStatus(): Promise<HooksStatus> {
+  const data = await hermesFetch<HooksStatus>('/hooks');
+  return {
+    ...data,
+    hooks: Array.isArray(data.hooks) ? data.hooks : [],
+    total: data.total ?? 0,
+    issue_hints: data.issue_hints ?? 0,
+  };
+}
+
+export interface HooksDoctorReport {
+  ok: boolean;
+  issue_count: number;
+  entries: Array<{
+    event: string;
+    command: string;
+    checks: string[];
+    warning?: string;
+  }>;
+  hooks: HermesHook[];
+  report: string;
+  error?: string | null;
+}
+
+export async function doctorHooks(): Promise<HooksDoctorReport> {
+  return hermesFetch<HooksDoctorReport>('/hooks/doctor');
+}
+
+export interface LspRegistryEntry {
+  server_id: string;
+  binary_status: string;
+  description: string;
+  extensions: string[];
+}
+
+export interface LspStatus {
+  ok: boolean;
+  enabled: boolean | null;
+  wait_mode?: string | null;
+  wait_timeout?: number | null;
+  active_clients: number;
+  installed_count: number;
+  missing_count: number;
+  registry: LspRegistryEntry[];
+  raw?: string | null;
+  error?: string | null;
+}
+
+export async function fetchLspStatus(): Promise<LspStatus> {
+  const data = await hermesFetch<LspStatus>('/lsp/status');
+  return {
+    ...data,
+    registry: Array.isArray(data.registry) ? data.registry : [],
+    active_clients: data.active_clients ?? 0,
+    installed_count: data.installed_count ?? 0,
+    missing_count: data.missing_count ?? 0,
+  };
+}
+
+// ─── Pets ─────────────────────────────────────────────────────────────────
+
+export interface PetsStatus {
+  ok: boolean;
+  configured: boolean;
+  config: { name: string | null; scale?: number; enabled: boolean };
+  show: string | null;
+  raw: string;
+  gallery_hint: string;
+}
+
+export interface PetGalleryEntry {
+  id: string;
+  label: string;
+  kind: string;
+}
+
+export async function fetchPetsStatus(): Promise<PetsStatus> {
+  return hermesFetch<PetsStatus>('/pets');
+}
+
+export async function fetchPetsGallery(limit = 40): Promise<PetGalleryEntry[]> {
+  const data = await hermesFetch<{ pets?: PetGalleryEntry[] }>(`/pets/gallery?limit=${limit}`);
+  return Array.isArray(data.pets) ? data.pets : [];
+}
+
+export async function selectPet(petId: string): Promise<{ ok: boolean; status: PetsStatus }> {
+  return hermesFetch('/pets/select', {
+    method: 'POST',
+    body: JSON.stringify({ pet_id: petId }),
+  });
+}
+
+// ─── Hermes projects (multi-folder workspaces) ────────────────────────────
+
+export interface HermesProjectFolder {
+  path: string;
+  label?: string | null;
+  is_primary: boolean;
+  added_at?: number;
+}
+
+export interface HermesProject {
+  id: string | null;
+  slug: string;
+  name: string;
+  description?: string | null;
+  board_slug?: string | null;
+  primary_path?: string | null;
+  archived?: boolean;
+  active?: boolean;
+  folder_count?: number;
+  folders: HermesProjectFolder[];
+}
+
+export interface HermesProjectsList {
+  ok: boolean;
+  projects: HermesProject[];
+  active_id?: string | null;
+  active_slug?: string | null;
+  source?: string;
+  error?: string | null;
+}
+
+export async function fetchHermesProjects(includeArchived = false): Promise<HermesProjectsList> {
+  const suffix = includeArchived ? '?all=1' : '';
+  return hermesFetch<HermesProjectsList>(`/projects${suffix}`);
+}
+
+export async function useHermesProject(project: string): Promise<HermesProjectsList & { output?: string }> {
+  return hermesFetch('/projects/use', {
+    method: 'POST',
+    body: JSON.stringify({ project }),
+  });
+}
+
+export async function createHermesProject(body: {
+  name: string;
+  primary_folder?: string;
+  use?: boolean;
+}): Promise<HermesProjectsList & { created_slug?: string | null; output?: string }> {
+  return hermesFetch('/projects', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function bindHermesProjectBoard(body: {
+  project: string;
+  board?: string;
+}): Promise<HermesProjectsList & { board_slug?: string | null; output?: string }> {
+  return hermesFetch('/projects/bind-board', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+// ─── Security audit / secrets managers ────────────────────────────────────
+
+export interface SecurityAuditFinding {
+  package: string;
+  version: string;
+  ecosystem: string;
+  source: string;
+  vuln_id: string;
+  severity: string;
+  summary: string;
+  fixed_versions: string[];
+}
+
+export interface SecurityAuditReport {
+  ok: boolean;
+  exit_code?: number;
+  total_components_scanned: number;
+  finding_count: number;
+  severity_counts: Record<string, number>;
+  findings: SecurityAuditFinding[];
+  summary?: string;
+  error?: string | null;
+}
+
+export async function fetchSecurityAudit(options?: { skipVenv?: boolean }): Promise<SecurityAuditReport> {
+  const params = options?.skipVenv ? '?skip_venv=1' : '';
+  const data = await hermesFetch<SecurityAuditReport>(`/security/audit${params}`);
+  return {
+    ...data,
+    findings: Array.isArray(data.findings) ? data.findings : [],
+    severity_counts: data.severity_counts ?? {},
+    total_components_scanned: data.total_components_scanned ?? 0,
+    finding_count: data.finding_count ?? 0,
+  };
+}
+
+export interface SecretsProviderStatus {
+  id: string;
+  label: string;
+  cli_ok: boolean;
+  enabled: boolean;
+  configured: boolean;
+  token_in_env: boolean;
+  binary: string;
+  reference_count?: number | null;
+  project_configured?: boolean | null;
+}
+
+export interface SecretsStatus {
+  ok: boolean;
+  any_enabled: boolean;
+  any_configured: boolean;
+  providers: SecretsProviderStatus[];
+}
+
+export async function fetchSecretsStatus(): Promise<SecretsStatus> {
+  const data = await hermesFetch<SecretsStatus>('/secrets/status');
+  return {
+    ...data,
+    providers: Array.isArray(data.providers) ? data.providers : [],
+    any_enabled: !!data.any_enabled,
+    any_configured: !!data.any_configured,
+  };
+}
+
+// ─── OpenClaw migration ───────────────────────────────────────────────────
+
+export async function clawMigrate(options: {
+  dry_run?: boolean;
+  migrate_secrets?: boolean;
+  yes?: boolean;
+}): Promise<{ ok: boolean; dry_run: boolean; report: string }> {
+  return hermesFetch('/claw/migrate', {
+    method: 'POST',
+    body: JSON.stringify({
+      dry_run: options.dry_run !== false,
+      migrate_secrets: !!options.migrate_secrets,
+      yes: !!options.yes,
+    }),
+  });
+}
+
+// ─── Gateway capabilities (/v1/runs foundation) ───────────────────────────
+
+export interface GatewayCapabilities {
+  reachable: boolean;
+  base_url: string;
+  features: Record<string, unknown>;
+  run_submission?: boolean;
+  session_fork?: boolean;
+  skills_api?: boolean;
+  recommended_transport: 'runs' | 'bridge' | string;
+  error?: string;
+}
+
+export async function fetchGatewayCapabilities(): Promise<GatewayCapabilities> {
+  return hermesFetch<GatewayCapabilities>('/gateway/capabilities');
+}
+
+// ─── Kanban swarm ─────────────────────────────────────────────────────────
+
+export async function createKanbanSwarm(input: {
+  goal: string;
+  workers?: string[];
+  verifier?: string;
+  synthesizer?: string;
+}): Promise<{ ok: boolean; output?: string; error?: string; result?: unknown }> {
+  return hermesFetch('/kanban/swarm', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
 }
 
 // ─── Cron Jobs ──────────────────────────────────────────────────────────────
@@ -413,6 +1076,62 @@ export async function deleteSession(sessionId: string): Promise<void> {
   await hermesFetch(`/sessions/${encodeURIComponent(sessionId)}`, {
     method: 'DELETE',
   });
+}
+
+/** Resolve a Hermes session for `/resume` — exact id, prefix match, or most recent. */
+export async function resolveHermesSessionForResume(spec?: string): Promise<HermesSessionDetail> {
+  const trimmed = spec?.trim() ?? '';
+  if (trimmed) {
+    try {
+      return await getSession(trimmed);
+    } catch {
+      const { sessions } = await fetchSessions({ limit: 50, q: trimmed });
+      const match =
+        sessions.find((s) => s.id === trimmed) ??
+        sessions.find((s) => s.id.startsWith(trimmed));
+      if (!match) {
+        throw new Error(`No Hermes session found matching "${trimmed}"`);
+      }
+      return getSession(match.id);
+    }
+  }
+
+  const { sessions } = await fetchSessions({ limit: 1 });
+  const recent = sessions[0];
+  if (!recent) {
+    throw new Error('No Hermes sessions available to resume.');
+  }
+  return getSession(recent.id);
+}
+
+export function hermesSessionTitle(session: Pick<HermesSession, 'id' | 'firstUserMessage'>): string {
+  return session.firstUserMessage?.trim().length
+    ? session.firstUserMessage.trim()
+    : `Session ${session.id.slice(0, 8)}`;
+}
+
+export interface ForkHermesSessionResult {
+  object: string;
+  session: HermesSession & {
+    parent_session_id?: string;
+    title?: string;
+  };
+}
+
+export async function forkHermesSession(
+  sessionId: string,
+  options?: { title?: string },
+): Promise<ForkHermesSessionResult> {
+  const body: Record<string, string> = {};
+  const title = options?.title?.trim();
+  if (title) body.title = title;
+  return hermesFetch<ForkHermesSessionResult>(
+    `/sessions/${encodeURIComponent(sessionId)}/fork`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  );
 }
 
 // ─── Workspace ─────────────────────────────────────────────────────────────
@@ -632,6 +1351,184 @@ export async function fetchHermesSavedProviders(): Promise<HermesSavedProvider[]
   return data.providers ?? [];
 }
 
+// ─── Auth credential pool (hermes auth) ───────────────────────────────────
+
+export interface AuthPoolCredential {
+  index: number;
+  id: string | null;
+  label: string;
+  auth_type: string;
+  source: string;
+  masked_key: string;
+  exhausted: boolean;
+  active: boolean;
+  priority: number;
+  request_count: number;
+  last_status: string | null;
+  last_error_code: number | null;
+  last_error_message: string | null;
+  status_hint?: string | null;
+}
+
+export interface AuthPoolProvider {
+  provider: string;
+  credential_count: number;
+  active_provider: boolean;
+  logged_in: boolean | null;
+  status_error: string | null;
+  credentials: AuthPoolCredential[];
+}
+
+export interface AuthPoolStatus {
+  ok: boolean;
+  cli_ok: boolean;
+  active_provider: string | null;
+  providers: AuthPoolProvider[];
+  error?: string | null;
+}
+
+export async function fetchAuthPool(): Promise<AuthPoolStatus> {
+  return hermesFetch<AuthPoolStatus>('/auth/pool');
+}
+
+export async function fetchAuthProviderStatus(provider: string): Promise<{
+  ok: boolean;
+  provider: string;
+  logged_in: boolean;
+  logged_out: boolean;
+  error: string | null;
+}> {
+  return hermesFetch(`/auth/pool/${encodeURIComponent(provider)}/status`);
+}
+
+export async function resetAuthPoolProvider(provider: string): Promise<{ ok: boolean; output: string }> {
+  return hermesFetch('/auth/pool/reset', {
+    method: 'POST',
+    body: JSON.stringify({ provider }),
+  });
+}
+
+export async function removeAuthPoolCredential(
+  provider: string,
+  target: string | number,
+): Promise<{ ok: boolean; output: string }> {
+  return hermesFetch('/auth/pool/remove', {
+    method: 'POST',
+    body: JSON.stringify({ provider, target: String(target) }),
+  });
+}
+
+export async function addAuthPoolApiKey(
+  provider: string,
+  apiKey: string,
+  label?: string,
+): Promise<{ ok: boolean; output: string }> {
+  return hermesFetch('/auth/pool/add', {
+    method: 'POST',
+    body: JSON.stringify({ provider, api_key: apiKey, ...(label ? { label } : {}) }),
+  });
+}
+
+// ─── Nous Portal (hermes portal) ────────────────────────────────────────────
+
+export interface PortalToolGatewayRow {
+  label: string;
+  status_text: string;
+  via_nous: boolean;
+  active: boolean;
+  configured: boolean;
+  provider: string | null;
+  partner?: string;
+}
+
+export interface PortalInfo {
+  ok: boolean;
+  cli_ok?: boolean;
+  logged_in: boolean;
+  logged_out: boolean;
+  portal_url: string | null;
+  inference_base_url: string | null;
+  signup_url: string | null;
+  model_hint: string | null;
+  using_nous_provider: boolean;
+  tool_gateway: PortalToolGatewayRow[];
+  docs_url: string | null;
+  error?: string | null;
+}
+
+export interface PortalToolsCatalog {
+  ok: boolean;
+  cli_ok?: boolean;
+  tools: PortalToolGatewayRow[];
+  nous_auth_present: boolean;
+  subscription_url: string;
+  docs_url: string;
+  error?: string | null;
+}
+
+export interface PortalOpenUrls {
+  ok: boolean;
+  portal_url: string;
+  subscription_url: string;
+  login_url: string;
+  docs_url: string;
+  logged_in: boolean;
+  login_hint: string;
+}
+
+export interface PortalOAuthStart {
+  ok: boolean;
+  session_id?: string;
+  user_code?: string;
+  verification_url?: string;
+  expires_in?: number;
+  poll_interval?: number;
+  already_logged_in?: boolean;
+  logged_in?: boolean;
+  imported_shared_state?: boolean;
+  error?: string;
+}
+
+export interface PortalOAuthPoll {
+  ok: boolean;
+  session_id: string;
+  status: 'pending' | 'complete' | 'error' | 'expired' | 'not_found';
+  poll_interval?: number;
+  logged_in?: boolean;
+  error?: string;
+}
+
+export async function fetchPortalInfo(): Promise<PortalInfo> {
+  return hermesFetch<PortalInfo>('/portal/info');
+}
+
+export async function fetchPortalStatus(): Promise<PortalInfo> {
+  return hermesFetch<PortalInfo>('/portal/status');
+}
+
+export async function fetchPortalTools(): Promise<PortalToolsCatalog> {
+  return hermesFetch<PortalToolsCatalog>('/portal/tools');
+}
+
+export async function fetchPortalOpenUrls(): Promise<PortalOpenUrls> {
+  return hermesFetch<PortalOpenUrls>('/portal/open-url');
+}
+
+/** Host-side `hermes portal open` (subscription page). Prefer fetchPortalOpenUrls + openExternal in UI. */
+export async function triggerPortalOpen(): Promise<{ ok: boolean; url?: string; output?: string }> {
+  return hermesFetch('/portal/open');
+}
+
+export async function startPortalOAuth(): Promise<PortalOAuthStart> {
+  return hermesFetch<PortalOAuthStart>('/portal/oauth/start', { method: 'POST' });
+}
+
+export async function pollPortalOAuth(sessionId: string): Promise<PortalOAuthPoll> {
+  return hermesFetch<PortalOAuthPoll>(
+    `/portal/oauth/poll/${encodeURIComponent(sessionId)}`,
+  );
+}
+
 export async function fetchHermesSkillDetail(skillId: string): Promise<HermesSkillDetail> {
   const params = new URLSearchParams({ id: skillId });
   const data = await hermesFetch<{ skill: HermesSkillDetail }>(`/workspace/skills/content?${params.toString()}`);
@@ -694,6 +1591,66 @@ export async function uninstallHermesMcpServer(
   name: string,
 ): Promise<{ ok: boolean; removed: string; reloaded: boolean }> {
   return hermesFetch(`/workspace/mcp-servers/${encodeURIComponent(name)}`, { method: 'DELETE' });
+}
+
+/** One entry in the searchable MCP tool index (from the agent registry). */
+export interface HermesMcpToolIndexEntry {
+  server: string;
+  name: string;
+  description: string;
+}
+
+/** Context threshold above which we warn that MCP tools may bloat agent context. */
+export const MCP_TOOL_CONTEXT_THRESHOLD = 40;
+
+/** Fetch flattened MCP tools (name + description) for the searchable index. */
+export async function fetchHermesMcpToolIndex(): Promise<{
+  tools: HermesMcpToolIndexEntry[];
+  total: number;
+}> {
+  const data = await hermesFetch<{ tools?: HermesMcpToolIndexEntry[]; total?: number }>(
+    '/workspace/mcp-tool-index',
+  );
+  const tools = data.tools ?? [];
+  return { tools, total: data.total ?? tools.length };
+}
+
+/** Hermes progressive tool disclosure config (`tools.tool_search` in config.yaml). */
+export interface ToolSearchConfig {
+  /** `auto` defers when over threshold; `on` always defers; `off` disables. */
+  enabled: 'auto' | 'on' | 'off';
+  /** Convenience mirror of enabled !== 'off'. */
+  defer: boolean;
+  threshold_pct: number;
+  search_default_limit: number;
+  max_search_limit: number;
+}
+
+export async function fetchToolSearchConfig(): Promise<ToolSearchConfig> {
+  const data = await hermesFetch<Partial<ToolSearchConfig>>('/tool-search');
+  return {
+    enabled: (data.enabled as ToolSearchConfig['enabled']) ?? 'auto',
+    defer: data.defer ?? data.enabled !== 'off',
+    threshold_pct: data.threshold_pct ?? 10,
+    search_default_limit: data.search_default_limit ?? 5,
+    max_search_limit: data.max_search_limit ?? 20,
+  };
+}
+
+export async function updateToolSearchConfig(
+  body: Partial<Pick<ToolSearchConfig, 'defer' | 'enabled' | 'threshold_pct'>>,
+): Promise<ToolSearchConfig> {
+  const data = await hermesFetch<Partial<ToolSearchConfig>>('/tool-search', {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+  return {
+    enabled: (data.enabled as ToolSearchConfig['enabled']) ?? 'auto',
+    defer: data.defer ?? data.enabled !== 'off',
+    threshold_pct: data.threshold_pct ?? 10,
+    search_default_limit: data.search_default_limit ?? 5,
+    max_search_limit: data.max_search_limit ?? 20,
+  };
 }
 
 // ─── MCP live telemetry (dashboard) ─────────────────────────────────────────

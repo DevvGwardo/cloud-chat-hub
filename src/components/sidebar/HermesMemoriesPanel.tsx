@@ -4,6 +4,7 @@ import {
   HermesApiError,
   fetchHermesWorkspaceFile,
   fetchHermesWorkspaceFiles,
+  fetchMemoryStatus,
   updateHermesWorkspaceFile,
   type HermesWorkspaceFile,
   type HermesWorkspaceFileSummary,
@@ -12,10 +13,14 @@ import { relativeTime } from '@/lib/relative-time';
 import { formatBytes, memoriesToMarkdown } from '@/components/sidebar/hermesSidebarUtils';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
+import { JourneyPanel } from './JourneyPanel';
 
 const DEFAULT_KEYS = ['soul', 'user', 'memory'] as const;
 
+type MemoryTab = 'files' | 'journey';
+
 export function HermesMemoriesPanel() {
+  const [tab, setTab] = useState<MemoryTab>('files');
   const [files, setFiles] = useState<HermesWorkspaceFileSummary[]>([]);
   const [details, setDetails] = useState<Record<string, HermesWorkspaceFile>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -25,6 +30,7 @@ export function HermesMemoriesPanel() {
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [providerLine, setProviderLine] = useState<string | null>(null);
 
   const loadList = useCallback(async () => {
     setLoading(true);
@@ -63,6 +69,15 @@ export function HermesMemoriesPanel() {
 
   useEffect(() => {
     void loadList();
+    void fetchMemoryStatus()
+      .then((s) => {
+        setProviderLine(
+          s.provider
+            ? `External provider: ${s.provider}${s.plugin_available === false ? ' (unavailable)' : ''}`
+            : 'Built-in MEMORY.md / USER.md',
+        );
+      })
+      .catch(() => setProviderLine(null));
   }, [loadList]);
 
   useEffect(() => {
@@ -146,13 +161,55 @@ export function HermesMemoriesPanel() {
     }
   };
 
+  if (tab === 'journey') {
+    return (
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="flex items-center gap-1 border-b border-border/30 px-3 py-1.5">
+          {(['files', 'journey'] as const).map((key) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setTab(key)}
+              className={cn(
+                'rounded-md px-2 py-1 text-[11px] font-medium transition-colors',
+                tab === key
+                  ? 'bg-[hsl(var(--sidebar-active))] text-foreground'
+                  : 'text-muted-foreground/60 hover:text-foreground',
+              )}
+            >
+              {key === 'files' ? 'Files' : 'Journey'}
+            </button>
+          ))}
+        </div>
+        <JourneyPanel />
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
+      <div className="flex items-center gap-1 border-b border-border/30 px-3 py-1.5">
+        {(['files', 'journey'] as const).map((key) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setTab(key)}
+            className={cn(
+              'rounded-md px-2 py-1 text-[11px] font-medium transition-colors',
+              tab === key
+                ? 'bg-[hsl(var(--sidebar-active))] text-foreground'
+                : 'text-muted-foreground/60 hover:text-foreground',
+            )}
+          >
+            {key === 'files' ? 'Files' : 'Journey'}
+          </button>
+        ))}
+      </div>
       <div className="flex items-center justify-between px-3 py-2">
         <div className="min-w-0">
           <span className="text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">Memories</span>
           <p className="mt-0.5 truncate text-[11px] text-muted-foreground/50">
-            {selectedSummary?.path ?? 'Canonical Hermes files'}
+            {providerLine || selectedSummary?.path || 'Canonical Hermes files'}
           </p>
         </div>
         <div className="flex items-center gap-1">

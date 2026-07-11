@@ -831,4 +831,82 @@ describe('CreatePRModal', () => {
     expect(await screen.findByText(/provider review skipped/i)).toBeInTheDocument();
     expect(screen.getByText(/provider-backed review was skipped: service unavailable\./i)).toBeInTheDocument();
   });
+
+  it('shows an error when Run checks is clicked without GitHub auth or a local clone', async () => {
+    useSettingsStore.setState({
+      ...useSettingsStore.getState(),
+      githubPAT: '',
+    });
+
+    render(
+      <CreatePRModal
+        isOpen
+        onClose={() => {}}
+        owner="octo"
+        repo="cloudchat"
+        baseBranch="main"
+        files={[{ path: 'src/App.tsx', content: 'export default 1', action: 'edit' }]}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /run checks/i }));
+      await Promise.resolve();
+    });
+
+    expect(
+      await screen.findByText(/connect github in settings or attach a local clone before running checks/i),
+    ).toBeInTheDocument();
+  });
+
+  it('runs checks using a local clone path when no GitHub PAT is configured', async () => {
+    useSettingsStore.setState({
+      ...useSettingsStore.getState(),
+      githubPAT: '',
+    });
+
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const payload = JSON.parse(String(init?.body || '{}'));
+      expect(payload.action).toBe('verify-changes');
+      expect(payload.pat).toBeUndefined();
+      expect(payload.localRepoPath).toBe('/tmp/workspace-repo');
+
+      return sseVerificationResponse({
+        summary: {
+          status: 'passed',
+          findings: 0,
+          commandsRun: 1,
+          commandsFailed: 0,
+        },
+        review: {
+          status: 'passed',
+          summary: 'No actionable issues found.',
+          findings: [],
+        },
+        commands: [],
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <CreatePRModal
+        isOpen
+        onClose={() => {}}
+        owner="octo"
+        repo="cloudchat"
+        baseBranch="main"
+        localRepoPath="/tmp/workspace-repo"
+        files={[{ path: 'src/App.tsx', content: 'export default 1', action: 'edit' }]}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /run checks/i }));
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText(/no actionable issues found/i)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });

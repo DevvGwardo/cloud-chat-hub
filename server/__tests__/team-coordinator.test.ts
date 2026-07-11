@@ -67,6 +67,18 @@ describe('teamCoordinator', () => {
       expect(team.delegations).toEqual([])
     })
 
+    it('stores execution backend in sharedContext for multi-domain task', async () => {
+      const team = await teamCoordinator.createTeam({
+        id: 'card-formation-route',
+        title: 'Build frontend and backend API',
+        spec: 'React + Python',
+      })
+
+      expect(team.sharedContext.formationStrategy).toBe('specialist_team')
+      expect(team.sharedContext.executionBackend).toBe('team_fanout')
+      expect(team.sharedContext.executionRouteReason).toContain('team_fanout')
+    })
+
     it('getTeams returns created team', async () => {
       const team = await teamCoordinator.createTeam({
         id: 'card-2',
@@ -232,20 +244,59 @@ describe('teamCoordinator', () => {
     })
   })
 
+  describe('recovery after restart', () => {
+    it('dispatchTeam recovers paused teams flagged needsRecovery', async () => {
+      const team = await teamCoordinator.createTeam({
+        id: 'card-recovery',
+        title: 'Recover me',
+      })
+      team.status = 'paused'
+      team.needsRecovery = true
+      team.subtasks.push({
+        id: 'st-rec-1',
+        title: 'Work',
+        description: '',
+        assignedTo: team.agents[0]?.profileName || null,
+        dependencies: [],
+        status: 'pending',
+        result: null,
+      })
+
+      const ok = await teamCoordinator.dispatchTeam(team.id)
+      expect(ok).toBe(true)
+      expect(team.needsRecovery).toBe(false)
+      expect(team.status).toBe('active')
+    })
+
+    it('resumeTeam re-dispatches when needsRecovery is set', async () => {
+      const team = await teamCoordinator.createTeam({
+        id: 'card-resume-recovery',
+        title: 'Resume recover',
+      })
+      team.status = 'paused'
+      team.needsRecovery = true
+
+      const ok = teamCoordinator.resumeTeam(team.id)
+      expect(ok).toBe(true)
+      // resume clears flag and schedules dispatch; allow microtask
+      await Promise.resolve()
+      expect(team.needsRecovery).toBe(false)
+    })
+  })
+
   describe('dispatchTeam atomic guard', () => {
     it('returns false for unknown team', async () => {
       const result = await teamCoordinator.dispatchTeam('nonexistent-id')
       expect(result).toBe(false)
     })
 
-    it('returns false for team not in forming status', async () => {
+    it('returns false for done team', async () => {
       const team = await teamCoordinator.createTeam({
         id: 'card-7',
-        title: 'Already active',
+        title: 'Already done',
       })
 
-      // Manually set to active (simulating edge case where status changed)
-      team.status = 'active'
+      team.status = 'done'
       const result = await teamCoordinator.dispatchTeam(team.id)
       expect(result).toBe(false)
     })

@@ -153,9 +153,10 @@ function TeamCard({
             onClick={(e) => { e.stopPropagation(); void handleResume(); }}
             disabled={actionLoading}
             className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50"
+            title={team.needsRecovery ? 'Re-dispatch after server restart' : 'Resume paused agents'}
           >
             {actionLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
-            Resume
+            {team.needsRecovery ? 'Recover' : 'Resume'}
           </button>
         )}
         <span className="ml-auto text-[9px] text-muted-foreground/40 font-mono" title={`Team ID: ${team.id}`}>{team.id.slice(0, 10)}…</span>

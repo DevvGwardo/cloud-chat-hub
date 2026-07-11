@@ -33,6 +33,8 @@ import {
   type HermesMcpCatalogEntry,
 } from '@/lib/hermes-api';
 import { cn } from '@/lib/utils';
+import { useHermesMcpToolIndex } from '@/hooks/useHermesMcpToolIndex';
+import { McpToolIndexPanel, McpToolThresholdChip } from '@/components/mcp/McpToolIndexPanel';
 
 const ACCENT = '#ff8f3f';
 
@@ -208,6 +210,7 @@ type McpTab = 'dashboard' | 'store';
 
 export function McpStoreView({ onExitFullscreen }: { onExitFullscreen?: () => void } = {}) {
   const [tab, setTab] = useState<McpTab>('dashboard');
+  const toolIndex = useHermesMcpToolIndex();
   const [servers, setServers] = useState<HermesMcpServerInfo[]>([]);
   const [catalog, setCatalog] = useState<HermesMcpCatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -222,12 +225,13 @@ export function McpStoreView({ onExitFullscreen }: { onExitFullscreen?: () => vo
       const [s, c] = await Promise.all([fetchHermesMcpServers(), fetchHermesMcpCatalog()]);
       setServers(s);
       setCatalog(c);
+      await toolIndex.reload();
     } catch (err) {
       setLoadError(err instanceof HermesApiError ? err.message : 'Could not reach the bridge.');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [toolIndex.reload]);
 
   useEffect(() => {
     void reload();
@@ -339,9 +343,10 @@ export function McpStoreView({ onExitFullscreen }: { onExitFullscreen?: () => vo
 
           {/* Installed */}
           <section>
-            <div className="mb-3 flex items-baseline gap-2">
+            <div className="mb-3 flex flex-wrap items-baseline gap-2">
               <h2 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/60">Installed</h2>
               <span className="text-[11px] text-muted-foreground/40">{servers.length}</span>
+              <McpToolThresholdChip total={toolIndex.totalTools} threshold={toolIndex.threshold} />
             </div>
             {servers.length === 0 && !loading ? (
               <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border/40 py-10">
@@ -361,6 +366,28 @@ export function McpStoreView({ onExitFullscreen }: { onExitFullscreen?: () => vo
               </div>
             )}
           </section>
+
+          {(toolIndex.tools.length > 0 || toolIndex.loading) && (
+            <section>
+              <div className="mb-3">
+                <h2 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/60">
+                  Tool index
+                </h2>
+                <p className="mt-1 text-[11px] text-muted-foreground/45">
+                  Search across all registered MCP tools — useful when tool count exceeds agent context limits.
+                </p>
+              </div>
+              <McpToolIndexPanel
+                tools={toolIndex.filteredTools}
+                total={toolIndex.totalTools}
+                threshold={toolIndex.threshold}
+                query={toolIndex.query}
+                onQueryChange={toolIndex.setQuery}
+                loading={toolIndex.loading}
+                maxHeightClass="max-h-64"
+              />
+            </section>
+          )}
 
           {/* Available */}
           <section>

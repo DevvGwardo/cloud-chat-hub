@@ -1365,6 +1365,7 @@ class AIAgent:
         max_iterations: int = 30,
         enabled_toolsets: Optional[list[str]] = None,
         repo_mode: bool = False,
+        worktree_mode: bool = False,
         repo_edit_intent: bool = False,
         github_pat: Optional[str] = None,
         github_repo_owner: Optional[str] = None,
@@ -1385,13 +1386,14 @@ class AIAgent:
         self.model = model
         self.max_iterations = max_iterations
         requested_toolsets = enabled_toolsets or ["web", "browser", "terminal", "vision"]
-        if repo_mode:
+        if repo_mode and not worktree_mode:
             requested_toolsets = [
                 toolset for toolset in requested_toolsets
                 if toolset not in REPO_MODE_BLOCKED_TOOLSETS
             ]
         self.enabled_toolsets = requested_toolsets
         self.repo_mode = repo_mode
+        self.worktree_mode = worktree_mode
         self.repo_edit_intent = repo_edit_intent
         self.github_pat = github_pat
         self.github_repo_owner = github_repo_owner
@@ -1410,8 +1412,9 @@ class AIAgent:
         for toolset in self.enabled_toolsets:
             self.tools.extend(TOOL_DEFINITIONS.get(toolset, []))
 
-        # Add repo tools when in repo mode
-        if self.repo_mode:
+        # Add repo tools when in repo mode (GitHub API). Skipped in worktree mode
+        # where local file/terminal tools operate on the isolated clone cwd.
+        if self.repo_mode and not self.worktree_mode:
             if not self.repo_edit_intent:
                 repo_tools = []
                 if self.github_pat and self.github_repo_owner and self.github_repo_name:

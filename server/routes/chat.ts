@@ -1,6 +1,4 @@
 import type { Express } from 'express';
-import { existsSync } from 'fs';
-import { join, isAbsolute } from 'path';
 import { StreamData, streamText, tool, type CoreMessage, type JSONValue } from 'ai';
 import { z } from 'zod';
 import { buildServerRepoTools, type ServerToolEvent } from '../agent-loop';
@@ -8,10 +6,12 @@ import {
   createProviderModel,
   getReasoningProviderOptions,
   resolveHermesExecutionMode,
+  resolveHermesUseRuns,
   resolveRuntimeProvider,
   usesFirstPartyProviderSdk,
 } from '../provider-config';
 import { runOpenClawTurn } from '../openclaw';
+import { resolveAttachedLocalRepoPath } from '../lib/github-utils';
 import { ensureRepoClone } from '../repo-clone-manager';
 import { getRepoTurnIntentInstruction } from '../../src/lib/repo-intent';
 import { bindClientDisconnect } from '../http-disconnect';
@@ -75,19 +75,6 @@ function parseToolsetList(raw: unknown): Set<string> {
       .map((entry) => entry.trim())
       .filter(Boolean),
   );
-}
-
-function resolveAttachedLocalRepoPath(rawPath: unknown): string | null {
-  if (typeof rawPath !== 'string') {
-    return null;
-  }
-
-  const normalizedPath = rawPath.trim();
-  if (!normalizedPath || !isAbsolute(normalizedPath)) {
-    return null;
-  }
-
-  return existsSync(join(normalizedPath, '.git')) ? normalizedPath : null;
 }
 
 function buildLocalRepoAccessPrompt(params: {
@@ -326,6 +313,8 @@ app.post('/functions/v1/chat', async (req, res) => {
       repo_file_tree,
       agent_toolsets,
       custom_tools,
+      hermes_worktree,
+      hermes_use_runs,
     } = req.body;
 
     const planMode = rawPlanMode === true || rawPlanMode === 'true';
@@ -630,6 +619,14 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
       provider === 'hermes' && runtimeProvider === 'hermes'
         ? resolveHermesExecutionMode({ activeRepo, githubPAT })
         : null;
+    const hermesUseRuns =
+      provider === 'hermes' && runtimeProvider === 'hermes'
+        ? resolveHermesUseRuns({
+            envEnabled: process.env.HERMES_USE_RUNS === '1',
+            headerValue: req.headers['x-hermes-use-runs'],
+            bodyValue: hermes_use_runs,
+          })
+        : false;
 
     // Collect server tool events to inject into the data stream
     const serverToolEvents: ServerToolEvent[] = [];
@@ -702,7 +699,7 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
       : repoTools;
 
     logger.info(
-      `[chat] provider=${provider} runtime=${runtimeProvider} model=${model} activeRepo=${activeRepo?.owner}/${activeRepo?.name || '-'} serverRepoTools=${hasServerRepoContext} hermesExecutionMode=${hermesExecutionMode ?? '-'} msgs=${messages?.length}`,
+      `[chat] provider=${provider} runtime=${runtimeProvider} model=${model} activeRepo=${activeRepo?.owner}/${activeRepo?.name || '-'} serverRepoTools=${hasServerRepoContext} hermesExecutionMode=${hermesExecutionMode ?? '-'} hermesUseRuns=${hermesUseRuns} msgs=${messages?.length}`,
     );
     if (activeRepo && !githubPAT && !resolvedLocalRepoPath) {
         logger.warn(`[chat] WARNING: activeRepo set (${activeRepo.owner}/${activeRepo.name}) but no valid github_pat in request body — repo tools unavailable`);
@@ -792,6 +789,7 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
         activeProfile: activeHermesProfile ?? undefined,
         conversationId: typeof conversation_id === 'string' ? conversation_id : undefined,
         reasoningEffort: typeof reasoning_effort === 'string' ? reasoning_effort : undefined,
+        hermesUseRuns,
       });
       return;
     }
@@ -836,6 +834,15 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
               ...(hermesExecutionMode === 'agent-loop' && activeRepo && githubPAT ? {
                 'X-Hermes-Github-PAT': githubPAT,
               } : {}),
+              ...(
+                hermesExecutionMode === 'agent-loop'
+                && (hermes_worktree === true || hermes_worktree === 'true')
+                ? {
+                    'X-Hermes-Worktree': '1',
+                    ...(resolvedLocalRepoPath ? { 'X-Hermes-Repo-Root': resolvedLocalRepoPath } : {}),
+                  }
+                : {}
+              ),
             }
           : undefined,
       });

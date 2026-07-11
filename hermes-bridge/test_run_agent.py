@@ -1880,6 +1880,58 @@ class HermesAdapterFinalResponseTests(unittest.TestCase):
                 ["⏳ Nous Portal rate limit active — resets in 15m 52s."],
             )
 
+    def test_parse_fallback_switch_status_arrow_form(self):
+        import hermes_adapter as ha
+
+        parsed = ha.parse_fallback_switch_status(
+            "🔄 Switched to fallback model: claude-opus-4 via anthropic → gpt-4.1-mini via openai"
+        )
+        self.assertEqual(parsed, {"model": "gpt-4.1-mini", "provider": "openai"})
+
+    def test_parse_fallback_switch_status_short_form(self):
+        import hermes_adapter as ha
+
+        parsed = ha.parse_fallback_switch_status(
+            "↻ Switched to fallback: deepseek-v4-flash (deepseek)"
+        )
+        self.assertEqual(parsed, {"model": "deepseek-v4-flash", "provider": "deepseek"})
+
+    def test_parse_fallback_switch_status_ignores_in_progress(self):
+        import hermes_adapter as ha
+
+        self.assertIsNone(
+            ha.parse_fallback_switch_status(
+                "⚠️ Rate limited — switching to fallback provider..."
+            )
+        )
+
+    def test_adapter_emits_fallback_switch_callback(self):
+        import hermes_adapter as ha
+
+        with patch.object(ha, "RealAIAgent") as mock_real_agent:
+            real_agent_instance = MagicMock()
+            mock_real_agent.return_value = real_agent_instance
+
+            seen = []
+            adapter = ha.HermesAgentAdapter(
+                base_url="https://inference-api.nousresearch.com/v1",
+                api_key="test-key",
+                model="qwen3.6-plus",
+                on_fallback_switch=lambda provider, model: seen.append((provider, model)),
+            )
+
+            adapter._on_status(
+                "lifecycle",
+                "🔄 Switched to fallback model: m1 via p1 → m2 via p2",
+            )
+
+            self.assertEqual(seen, [("p2", "m2")])
+            adapter._on_status(
+                "lifecycle",
+                "🔄 Switched to fallback model: m1 via p1 → m2 via p2",
+            )
+            self.assertEqual(seen, [("p2", "m2")])
+
 
 # ---------------------------------------------------------------------------
 # Swarm Pattern Integration Stubs for run_agent / hermes_adapter
