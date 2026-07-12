@@ -238,6 +238,8 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
   const setActiveSubTab = useUIStore((s) => s.setActiveSubTab);
   const setMiniBrowserOpen = useUIStore((s) => s.setMiniBrowserOpen);
   const setMiniBrowserUrl = useUIStore((s) => s.setMiniBrowserUrl);
+  const setMiniBrowserDocked = useUIStore((s) => s.setMiniBrowserDocked);
+  const setRightSidebarHidden = useUIStore((s) => s.setRightSidebarHidden);
   const setSidebarOpen = useUIStore((s) => s.setSidebarOpen);
   const setActiveTab = useUIStore((s) => s.setActiveTab);
 
@@ -468,6 +470,8 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
       setActiveTab,
       setMiniBrowserOpen,
       setMiniBrowserUrl,
+      setMiniBrowserDocked,
+      setRightSidebarHidden,
       ...commandCallbacks,
     };
 
@@ -493,7 +497,7 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
       onChange(`Error executing /${parsed.command}.`);
     }
     return true;
-  }, [commandCallbacks, onChange, setActiveSubTab, setMiniBrowserOpen, setMiniBrowserUrl, setSidebarOpen, setActiveTab]);
+  }, [commandCallbacks, onChange, setActiveSubTab, setMiniBrowserDocked, setMiniBrowserOpen, setMiniBrowserUrl, setRightSidebarHidden, setSidebarOpen, setActiveTab]);
 
   const handleSendOrCommand = useCallback(async () => {
     // With image attachments, compose text + image paths and send directly.

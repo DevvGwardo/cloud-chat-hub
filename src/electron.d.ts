@@ -24,15 +24,21 @@ export interface ElectronAPI {
     onExit: (callback: (id: string, exitCode: number) => void) => () => void
   }
   browser?: {
-    create: (url?: string) => Promise<void>
+    create: (url?: string) => Promise<boolean>
     navigate: (url: string) => Promise<void>
     goBack: () => Promise<void>
     goForward: () => Promise<void>
+    reload: () => Promise<void>
     close: () => Promise<void>
     resize: (bounds: { x: number; y: number; width: number; height: number }) => Promise<void>
     show: () => Promise<void>
     hide: () => Promise<void>
+    getUrl: () => Promise<string | null>
     onForceResize: (callback: () => void) => () => void
+    onNavigated: (callback: (url: string) => void) => () => void
+    onLoading: (callback: (loading: boolean) => void) => () => void
+    onFailLoad: (callback: (payload: { url: string; errorCode: number; errorDescription: string }) => void) => () => void
+    onNavState: (callback: (state: { canGoBack: boolean; canGoForward: boolean }) => void) => () => void
   }
   onNewChat?: (callback: () => void) => () => void
   bridge?: {

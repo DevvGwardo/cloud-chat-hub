@@ -28,6 +28,8 @@ export const HermesTerminal: React.FC = () => {
   const setActiveSubTab = useUIStore((s) => s.setActiveSubTab);
   const setMiniBrowserOpen = useUIStore((s) => s.setMiniBrowserOpen);
   const setMiniBrowserUrl = useUIStore((s) => s.setMiniBrowserUrl);
+  const setMiniBrowserDocked = useUIStore((s) => s.setMiniBrowserDocked);
+  const setRightSidebarHidden = useUIStore((s) => s.setRightSidebarHidden);
 
   const createConversation = useChatStore((s) => s.createConversation);
   const renameConversation = useChatStore((s) => s.renameConversation);
@@ -45,6 +47,8 @@ export const HermesTerminal: React.FC = () => {
     setActiveSubTab,
     setMiniBrowserOpen,
     setMiniBrowserUrl,
+    setMiniBrowserDocked,
+    setRightSidebarHidden,
     renameConversation: (title: string) => {
       const convId = focusedPanel?.conversationId;
       if (convId) renameConversation(convId, title);
@@ -62,7 +66,7 @@ export const HermesTerminal: React.FC = () => {
     openPanel: (conversationId: string | null) => {
       openPanel(conversationId);
     },
-  }), [createConversation, focusedPanel, openPanel, panels, renameConversation, setActiveSubTab, setActiveTab, setConversationForPanel, setMiniBrowserOpen, setMiniBrowserUrl]);
+  }), [createConversation, focusedPanel, openPanel, panels, renameConversation, setActiveSubTab, setActiveTab, setConversationForPanel, setMiniBrowserDocked, setMiniBrowserOpen, setMiniBrowserUrl, setRightSidebarHidden]);
 
   // Auto-scroll output to bottom
   useEffect(() => {

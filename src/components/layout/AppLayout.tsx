@@ -8,6 +8,7 @@ import { KanbanBoard } from '@/components/kanban/KanbanBoard';
 import { McpStoreView } from '@/components/mcp/McpStoreView';
 import { useHermesModelSync } from '@/hooks/useHermesModelSync';
 import { useBackgroundRuns } from '@/hooks/useBackgroundRuns';
+import { useMiniBrowserBridge } from '@/hooks/use-mini-browser-bridge';
 import { useUIStore } from '@/stores/ui-store';
 import { useShallow } from 'zustand/shallow';
 import { useSettingsStore } from '@/stores/settings-store';
@@ -151,6 +152,8 @@ export const AppLayout: React.FC = () => {
   // Track server-side hermes runs that outlive their panel/window so the
   // sidebar keeps showing them as active and finished runs re-hydrate.
   useBackgroundRuns();
+  // Store-driven BrowserView lifecycle (create / navigate / close).
+  useMiniBrowserBridge();
   const [prModalOpen, setPrModalOpen] = useState(false);
   const [prModalMode, setPrModalMode] = useState<'create' | 'review'>('create');
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);

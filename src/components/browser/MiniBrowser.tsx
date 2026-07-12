@@ -1,8 +1,9 @@
 import React, { useState, useCallback, useEffect, useRef, useImperativeHandle, forwardRef } from 'react';
-import { Globe, ArrowLeft, ArrowRight, X, ExternalLink, PanelRight, ChevronRight } from 'lucide-react';
+import { Globe, ArrowLeft, ArrowRight, X, ExternalLink, PanelRight, ChevronRight, RotateCw, CornerDownLeft } from 'lucide-react';
 import { useUIStore } from '@/stores/ui-store';
 import { cn } from '@/lib/utils';
 import { rafThrottle } from '@/lib/raf';
+import { openExternalUrl } from '@/lib/open-external';
 import type { ElectronAPI } from '@/electron';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -21,8 +22,121 @@ const CURSOR_MAP: Record<ResizeDir, string> = {
 const MIN_WIDTH = 400;
 const MIN_HEIGHT = 250;
 const TOOLBAR_HEIGHT = 36;
-const FOOTER_HEIGHT = 32;
 const EDGE_ZONE = 14; // px from edge to trigger resize
+
+function normalizeBrowserUrl(raw: string): string | null {
+  let url = raw.trim();
+  if (!url) return null;
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    url = `https://${url}`;
+  }
+  return url;
+}
+
+/** Shared chrome state for docked + floating toolbars. */
+function useMiniBrowserChrome() {
+  const miniBrowserUrl = useUIStore((s) => s.miniBrowserUrl);
+  const setMiniBrowserUrl = useUIStore((s) => s.setMiniBrowserUrl);
+  const setMiniBrowserOpen = useUIStore((s) => s.setMiniBrowserOpen);
+  const setMiniBrowserDocked = useUIStore((s) => s.setMiniBrowserDocked);
+
+  const [urlInput, setUrlInput] = useState('');
+  const [urlFocused, setUrlFocused] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [canGoBack, setCanGoBack] = useState(false);
+  const [canGoForward, setCanGoForward] = useState(false);
+
+  useEffect(() => {
+    if (!urlFocused && miniBrowserUrl && miniBrowserUrl !== 'about:blank') {
+      setUrlInput(miniBrowserUrl);
+    }
+  }, [miniBrowserUrl, urlFocused]);
+
+  useEffect(() => {
+    const api = window.electronAPI?.browser;
+    if (!api) return;
+
+    const unsubs = [
+      api.onLoading?.((isLoading) => setLoading(isLoading)),
+      api.onNavState?.((state) => {
+        setCanGoBack(state.canGoBack);
+        setCanGoForward(state.canGoForward);
+      }),
+      api.onFailLoad?.(({ errorDescription }) => {
+        setLoadError(errorDescription || 'Failed to load page');
+        setLoading(false);
+      }),
+      api.onNavigated?.(() => setLoadError(null)),
+    ];
+
+    return () => {
+      for (const unsub of unsubs) unsub?.();
+    };
+  }, []);
+
+  const handleNavigate = useCallback(() => {
+    const url = normalizeBrowserUrl(urlInput);
+    if (!url) return;
+    setUrlInput(url);
+    setLoadError(null);
+    setMiniBrowserUrl(url);
+  }, [urlInput, setMiniBrowserUrl]);
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter') handleNavigate();
+    },
+    [handleNavigate],
+  );
+
+  const handleBack = useCallback(() => {
+    void window.electronAPI?.browser?.goBack();
+  }, []);
+
+  const handleForward = useCallback(() => {
+    void window.electronAPI?.browser?.goForward();
+  }, []);
+
+  const handleReload = useCallback(() => {
+    setLoadError(null);
+    void window.electronAPI?.browser?.reload();
+  }, []);
+
+  const handleOpenExternal = useCallback(() => {
+    const url = normalizeBrowserUrl(urlInput) || (miniBrowserUrl !== 'about:blank' ? miniBrowserUrl : null);
+    if (url) openExternalUrl(url);
+  }, [urlInput, miniBrowserUrl]);
+
+  const handleClose = useCallback(() => {
+    setMiniBrowserOpen(false);
+    setMiniBrowserDocked(false);
+  }, [setMiniBrowserOpen, setMiniBrowserDocked]);
+
+  const handleToggleDock = useCallback(() => {
+    const { miniBrowserDocked: docked } = useUIStore.getState();
+    setMiniBrowserDocked(!docked);
+  }, [setMiniBrowserDocked]);
+
+  return {
+    urlInput,
+    setUrlInput,
+    urlFocused,
+    setUrlFocused,
+    loading,
+    loadError,
+    canGoBack,
+    canGoForward,
+    handleNavigate,
+    handleKeyDown,
+    handleBack,
+    handleForward,
+    handleReload,
+    handleOpenExternal,
+    handleClose,
+    handleToggleDock,
+  };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HermesPTYPanel — real terminal that spawns the hermes CLI via node-pty.
@@ -227,7 +341,6 @@ export const MiniBrowserToggle: React.FC<{ className?: string }> = ({ className 
 
   const handleToggle = useCallback(() => {
     if (miniBrowserOpen) {
-      window.electronAPI?.browser?.close();
       setMiniBrowserOpen(false);
       setMiniBrowserDocked(false);
     } else {
@@ -235,7 +348,6 @@ export const MiniBrowserToggle: React.FC<{ className?: string }> = ({ className 
       setMiniBrowserDocked(true);
       setMiniBrowserOpen(true);
       setRightSidebarHidden(false);
-      window.electronAPI?.browser?.create('about:blank');
     }
   }, [miniBrowserOpen, setMiniBrowserOpen, setMiniBrowserDocked, setMiniBrowserUrl, setRightSidebarHidden]);
 
@@ -266,79 +378,124 @@ interface ToolbarProps {
   onKeyDown: (e: React.KeyboardEvent) => void;
   onBack: () => void;
   onForward: () => void;
+  onReload: () => void;
+  onOpenExternal: () => void;
   onToggleDock: () => void;
   onClose: () => void;
   onUrlInputMouseDown?: (e: React.MouseEvent) => void;
   onUrlInputFocus?: () => void;
   onUrlInputBlur?: () => void;
   miniBrowserDocked: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  loading: boolean;
+  loadError: string | null;
 }
 
 const Toolbar: React.FC<ToolbarProps> = ({
   urlInput, onUrlChange, onNavigate, onKeyDown,
-  onBack, onForward, onToggleDock, onClose,
+  onBack, onForward, onReload, onOpenExternal, onToggleDock, onClose,
   onUrlInputMouseDown, onUrlInputFocus, onUrlInputBlur,
-  miniBrowserDocked,
+  miniBrowserDocked, canGoBack, canGoForward, loading, loadError,
 }) => (
-  <div className="flex items-center gap-1.5 h-9 px-2 bg-[#111] border-b border-border/30 flex-shrink-0">
-    <button
-      onClick={onBack}
-      className="inline-flex items-center justify-center h-6 w-6 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-      title="Back"
-    >
-      <ArrowLeft className="h-3.5 w-3.5" />
-    </button>
-    <button
-      onClick={onForward}
-      className="inline-flex items-center justify-center h-6 w-6 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-      title="Forward"
-    >
-      <ArrowRight className="h-3.5 w-3.5" />
-    </button>
+  <div className="flex flex-col flex-shrink-0 bg-[#111] border-b border-border/30">
+    <div className="flex items-center gap-1 h-9 px-1.5">
+      <button
+        onClick={onBack}
+        disabled={!canGoBack}
+        className="inline-flex items-center justify-center h-6 w-6 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-30 disabled:pointer-events-none"
+        title="Back"
+      >
+        <ArrowLeft className="h-3.5 w-3.5" />
+      </button>
+      <button
+        onClick={onForward}
+        disabled={!canGoForward}
+        className="inline-flex items-center justify-center h-6 w-6 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-30 disabled:pointer-events-none"
+        title="Forward"
+      >
+        <ArrowRight className="h-3.5 w-3.5" />
+      </button>
+      <button
+        onClick={onReload}
+        onMouseDown={(e) => e.preventDefault()}
+        className="inline-flex items-center justify-center h-6 w-6 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+        title="Reload"
+      >
+        <RotateCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
+      </button>
 
-    <input
-      type="text"
-      value={urlInput}
-      onChange={(e) => onUrlChange(e.target.value)}
-      onKeyDown={onKeyDown}
-      onMouseDown={onUrlInputMouseDown}
-      onFocus={onUrlInputFocus}
-      onBlur={onUrlInputBlur}
-      placeholder="Enter URL..."
-      className="flex-1 h-6 px-2 rounded bg-[#1a1a1a] border border-border/40 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/40"
-    />
+      <div className="relative flex-1 min-w-0">
+        <input
+          type="text"
+          value={urlInput}
+          onChange={(e) => onUrlChange(e.target.value)}
+          onKeyDown={onKeyDown}
+          onMouseDown={onUrlInputMouseDown}
+          onFocus={onUrlInputFocus}
+          onBlur={onUrlInputBlur}
+          placeholder="Enter URL..."
+          className="w-full h-6 px-2 rounded bg-[#1a1a1a] border border-border/40 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/40 font-mono"
+        />
+        {loading && (
+          <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-px bg-primary/40 overflow-hidden">
+            <div className="h-full w-full origin-left animate-pulse bg-primary/80" />
+          </div>
+        )}
+      </div>
 
-    <button
-      onClick={onNavigate}
-      onMouseDown={(e) => e.preventDefault()}
-      className="inline-flex items-center justify-center h-6 px-2 rounded text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-      title="Go"
-    >
-      <ExternalLink className="h-3.5 w-3.5" />
-    </button>
+      <button
+        onClick={onNavigate}
+        onMouseDown={(e) => e.preventDefault()}
+        className="inline-flex items-center justify-center h-6 w-6 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+        title="Go"
+      >
+        <CornerDownLeft className="h-3.5 w-3.5" />
+      </button>
+      <button
+        onClick={onOpenExternal}
+        onMouseDown={(e) => e.preventDefault()}
+        className="inline-flex items-center justify-center h-6 w-6 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+        title="Open in system browser"
+      >
+        <ExternalLink className="h-3.5 w-3.5" />
+      </button>
 
-    <button
-      onClick={onToggleDock}
-      onMouseDown={(e) => e.preventDefault()}
-      className={cn(
-        'inline-flex items-center justify-center h-6 w-6 rounded transition-colors ml-1',
-        miniBrowserDocked
-          ? 'text-primary bg-primary/10 hover:bg-primary/20'
-          : 'text-muted-foreground hover:text-foreground hover:bg-accent'
-      )}
-      title={miniBrowserDocked ? 'Undock (floating)' : 'Dock to right sidebar'}
-    >
-      <PanelRight className="h-3.5 w-3.5" />
-    </button>
+      <button
+        onClick={onToggleDock}
+        onMouseDown={(e) => e.preventDefault()}
+        className={cn(
+          'inline-flex items-center justify-center h-6 w-6 rounded transition-colors ml-0.5',
+          miniBrowserDocked
+            ? 'text-primary bg-primary/10 hover:bg-primary/20'
+            : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+        )}
+        title={miniBrowserDocked ? 'Undock (floating)' : 'Dock to right sidebar'}
+      >
+        <PanelRight className="h-3.5 w-3.5" />
+      </button>
 
-    <button
-      onClick={onClose}
-      onMouseDown={(e) => e.preventDefault()}
-      className="inline-flex items-center justify-center h-6 w-6 rounded text-muted-foreground hover:text-red-400 hover:bg-red-500/20 transition-colors ml-1"
-      title="Close"
-    >
-      <X className="h-3.5 w-3.5" />
-    </button>
+      <button
+        onClick={onClose}
+        onMouseDown={(e) => e.preventDefault()}
+        className="inline-flex items-center justify-center h-6 w-6 rounded text-muted-foreground hover:text-red-400 hover:bg-red-500/20 transition-colors"
+        title="Close"
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
+    </div>
+    {loadError && (
+      <div className="flex items-center gap-2 px-2 pb-1.5 text-[10px] text-red-400/90">
+        <span className="truncate flex-1">{loadError}</span>
+        <button
+          type="button"
+          onClick={onReload}
+          className="shrink-0 underline hover:text-red-300"
+        >
+          Retry
+        </button>
+      </div>
+    )}
   </div>
 );
 
@@ -348,30 +505,19 @@ const Toolbar: React.FC<ToolbarProps> = ({
 // ─────────────────────────────────────────────────────────────────────────────
 export const DockedMiniBrowser: React.FC = () => {
   const {
-    miniBrowserOpen, setMiniBrowserOpen,
-    miniBrowserUrl,
-    miniBrowserDocked, setMiniBrowserDocked,
+    miniBrowserOpen,
+    miniBrowserDocked,
     miniBrowserDockedWidth, setMiniBrowserDockedWidth,
     rightSidebarHidden, setRightSidebarHidden,
   } = useUIStore();
 
-  const [urlInput, setUrlInput] = useState('');
-
+  const chrome = useMiniBrowserChrome();
   const browserViewHidden = useRef(false);
   const dockedResizeRef = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const dockedResizeFrame = useRef<ReturnType<typeof rafThrottle<[number]>> | null>(null);
   const boundsFrame = useRef<ReturnType<typeof rafThrottle<[]>> | null>(null);
   const lastBoundsRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
-  // Ref for measuring the Hermes panel height to shrink BrowserView bounds
-
-
-  // Sync URL input with store
-  useEffect(() => {
-    if (miniBrowserUrl && miniBrowserUrl !== 'about:blank') {
-      setUrlInput(miniBrowserUrl);
-    }
-  }, [miniBrowserUrl]);
 
   // Sync BrowserView bounds whenever container size/position changes
   useEffect(() => {
@@ -382,18 +528,19 @@ export const DockedMiniBrowser: React.FC = () => {
 
     const updateBoundsNow = () => {
       const rect = container.getBoundingClientRect();
+      const toolbarH = container.querySelector('[data-mini-browser-toolbar]')?.getBoundingClientRect().height ?? TOOLBAR_HEIGHT;
       const nextBounds = rightSidebarHidden
         ? {
             x: -9999,
-            y: Math.round(rect.top + TOOLBAR_HEIGHT),
+            y: Math.round(rect.top + toolbarH),
             width: 1,
             height: 1,
           }
         : {
             x: Math.round(rect.left),
-            y: Math.round(rect.top + TOOLBAR_HEIGHT),
+            y: Math.round(rect.top + toolbarH),
             width: Math.max(1, Math.round(rect.width)),
-            height: Math.max(1, Math.round(rect.height - TOOLBAR_HEIGHT - FOOTER_HEIGHT)),
+            height: Math.max(1, Math.round(rect.height - toolbarH)),
           };
       const lastBounds = lastBoundsRef.current;
       if (
@@ -432,11 +579,8 @@ export const DockedMiniBrowser: React.FC = () => {
       window.removeEventListener('leave-html-full-screen', updateBounds);
       removeForceResize?.();
     };
-  }, [miniBrowserOpen, miniBrowserDocked, rightSidebarHidden]);
+  }, [miniBrowserOpen, miniBrowserDocked, rightSidebarHidden, chrome.loadError]);
 
-  // Hide/show BrowserView — used during sidebar resize to prevent flickering.
-  // In docked mode, BrowserView bounds are set below the toolbar so it's always
-  // visible; no mousemove-based hide/show is needed.
   const hideBrowserView = useCallback(() => {
     if (!browserViewHidden.current) {
       browserViewHidden.current = true;
@@ -451,32 +595,8 @@ export const DockedMiniBrowser: React.FC = () => {
     }
   }, []);
 
-  const handleNavigate = useCallback(() => {
-    let url = urlInput.trim();
-    if (!url) return;
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      url = `https://${url}`;
-      setUrlInput(url);
-    }
-    window.electronAPI?.browser?.navigate(url);
-  }, [urlInput]);
-
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => { if (e.key === 'Enter') handleNavigate(); },
-    [handleNavigate]
-  );
-
-  const handleBack = useCallback(() => window.electronAPI?.browser?.goBack(), []);
-  const handleForward = useCallback(() => window.electronAPI?.browser?.goForward(), []);
-  const handleClose = useCallback(() => {
-    window.electronAPI?.browser?.close();
-    setMiniBrowserOpen(false);
-    setMiniBrowserDocked(false);
-  }, [setMiniBrowserOpen, setMiniBrowserDocked]);
-  const handleToggleDock = useCallback(() => setMiniBrowserDocked(false), [setMiniBrowserDocked]);
   const handleHideSidebar = useCallback(() => setRightSidebarHidden(true), [setRightSidebarHidden]);
 
-  // Docked sidebar resize
   const handleDockedResizeStart = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
@@ -488,7 +608,6 @@ export const DockedMiniBrowser: React.FC = () => {
       });
       const startX = e.clientX;
       const startWidth = miniBrowserDockedWidth;
-      // If sidebar is hidden, show it immediately so drag works visually
       if (rightSidebarHidden) {
         setRightSidebarHidden(false);
       }
@@ -531,7 +650,6 @@ export const DockedMiniBrowser: React.FC = () => {
         minWidth: rightSidebarHidden ? 0 : miniBrowserDockedWidth,
       }}
     >
-      {/* Resize handle on left edge */}
       <div
         onMouseDown={handleDockedResizeStart}
         className="absolute top-0 -left-1.5 z-10 h-full w-3 cursor-col-resize group"
@@ -539,49 +657,52 @@ export const DockedMiniBrowser: React.FC = () => {
         <div className="absolute inset-y-6 bottom-6 left-1/2 w-px -translate-x-1/2 rounded-full bg-border/25 transition-colors group-hover:bg-foreground/25 group-active:bg-foreground/40" />
       </div>
 
-      {/* Toolbar area — always rendered to keep BrowserView bounds correct */}
-      <div className="flex items-center flex-shrink-0 h-9 bg-[#111] border-b border-border/30">
-        {/* Collapse sidebar button — only visible when not hidden */}
+      <div className="flex items-stretch flex-shrink-0" data-mini-browser-toolbar>
         {!rightSidebarHidden && (
           <button
             onClick={handleHideSidebar}
             onMouseDown={(e) => e.stopPropagation()}
-            className="inline-flex items-center justify-center h-6 w-6 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors ml-1"
+            className="inline-flex items-center justify-center h-9 w-7 shrink-0 bg-[#111] border-b border-border/30 text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
             title="Hide browser (keeps video playing)"
           >
             <ChevronRight className="h-3.5 w-3.5" />
           </button>
         )}
-        <Toolbar
-          urlInput={urlInput}
-          onUrlChange={setUrlInput}
-          onNavigate={handleNavigate}
-          onKeyDown={handleKeyDown}
-          onBack={handleBack}
-          onForward={handleForward}
-          onToggleDock={handleToggleDock}
-          onClose={handleClose}
-          miniBrowserDocked={miniBrowserDocked}
-        />
+        <div className="flex-1 min-w-0">
+          <Toolbar
+            urlInput={chrome.urlInput}
+            onUrlChange={chrome.setUrlInput}
+            onNavigate={chrome.handleNavigate}
+            onKeyDown={chrome.handleKeyDown}
+            onBack={chrome.handleBack}
+            onForward={chrome.handleForward}
+            onReload={chrome.handleReload}
+            onOpenExternal={chrome.handleOpenExternal}
+            onToggleDock={chrome.handleToggleDock}
+            onClose={chrome.handleClose}
+            onUrlInputFocus={() => chrome.setUrlFocused(true)}
+            onUrlInputBlur={() => chrome.setUrlFocused(false)}
+            miniBrowserDocked={miniBrowserDocked}
+            canGoBack={chrome.canGoBack}
+            canGoForward={chrome.canGoForward}
+            loading={chrome.loading}
+            loadError={chrome.loadError}
+          />
+        </div>
       </div>
 
-      <div className="flex-[2] min-h-0 bg-transparent" />
+      <div className="flex-1 min-h-0 bg-transparent" />
     </div>
   );
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MiniBrowser — rendered by AppLayout. In docked mode returns null because
-// DockedMiniBrowser is responsible for the flex layout rendering.
+// MiniBrowser — floating overlay. Docked mode is handled by DockedMiniBrowser.
 // ─────────────────────────────────────────────────────────────────────────────
 export const MiniBrowser: React.FC = () => {
-  const {
-    miniBrowserOpen, setMiniBrowserOpen,
-    miniBrowserUrl, setMiniBrowserUrl,
-    miniBrowserDocked,
-  } = useUIStore();
+  const { miniBrowserOpen, miniBrowserDocked } = useUIStore();
+  const chrome = useMiniBrowserChrome();
 
-  const [urlInput, setUrlInput] = useState('');
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [size, setSize] = useState({ width: 600, height: 400 });
   const isInteracting = useRef(false);
@@ -590,34 +711,40 @@ export const MiniBrowser: React.FC = () => {
   const floatingFrame = useRef<ReturnType<typeof rafThrottle<[{ x: number; y: number }, { width: number; height: number }]>> | null>(null);
   const floatingBoundsFrame = useRef<ReturnType<typeof rafThrottle<[]>> | null>(null);
   const lastFloatingBoundsRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  const sizeRef = useRef(size);
+  sizeRef.current = size;
 
-  // Sync URL input with store
-  useEffect(() => {
-    if (miniBrowserUrl && miniBrowserUrl !== 'about:blank') {
-      setUrlInput(miniBrowserUrl);
-    }
-  }, [miniBrowserUrl]);
+  const clampPosition = useCallback((pos: { x: number; y: number }, sz: { width: number; height: number }) => {
+    const maxX = Math.max(0, window.innerWidth - sz.width);
+    const maxY = Math.max(0, window.innerHeight - sz.height);
+    return {
+      x: Math.max(0, Math.min(pos.x, maxX)),
+      y: Math.max(0, Math.min(pos.y, maxY)),
+    };
+  }, []);
 
-  // Position in bottom-right by default (floating only)
+  // Position bottom-right when opening floating / undocking
   useEffect(() => {
     if (miniBrowserOpen && !miniBrowserDocked) {
-      const w = window.innerWidth;
-      const h = window.innerHeight;
-      setPosition({ x: w - size.width - 20, y: h - size.height - 60 });
+      const sz = sizeRef.current;
+      setPosition(clampPosition(
+        { x: window.innerWidth - sz.width - 20, y: window.innerHeight - sz.height - 60 },
+        sz,
+      ));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [miniBrowserOpen]);
+  }, [miniBrowserOpen, miniBrowserDocked, clampPosition]);
 
   // Update BrowserView bounds when position/size changes (floating mode)
   useEffect(() => {
     if (!miniBrowserOpen || miniBrowserDocked) return;
-    floatingBoundsFrame.current?.cancel();
-    floatingBoundsFrame.current = rafThrottle(() => {
+
+    const updateBoundsNow = () => {
+      const toolbarExtra = chrome.loadError ? 18 : 0;
       const nextBounds = {
         x: Math.round(position.x),
-        y: Math.round(position.y + TOOLBAR_HEIGHT),
+        y: Math.round(position.y + TOOLBAR_HEIGHT + toolbarExtra),
         width: Math.max(1, Math.round(size.width)),
-        height: Math.max(1, Math.round(size.height - TOOLBAR_HEIGHT)),
+        height: Math.max(1, Math.round(size.height - TOOLBAR_HEIGHT - toolbarExtra)),
       };
       const lastBounds = lastFloatingBoundsRef.current;
       if (
@@ -631,10 +758,30 @@ export const MiniBrowser: React.FC = () => {
       }
       lastFloatingBoundsRef.current = nextBounds;
       window.electronAPI?.browser?.resize(nextBounds);
-    });
+    };
+
+    floatingBoundsFrame.current?.cancel();
+    floatingBoundsFrame.current = rafThrottle(updateBoundsNow);
     floatingBoundsFrame.current();
-    return () => floatingBoundsFrame.current?.cancel();
-  }, [miniBrowserOpen, miniBrowserDocked, position, size]);
+
+    const onWindowResize = () => {
+      setPosition((prev) => clampPosition(prev, sizeRef.current));
+      floatingBoundsFrame.current?.();
+    };
+
+    window.addEventListener('resize', onWindowResize, { passive: true });
+    window.addEventListener('enter-html-full-screen', onWindowResize);
+    window.addEventListener('leave-html-full-screen', onWindowResize);
+    const removeForceResize = window.electronAPI?.browser?.onForceResize?.(onWindowResize);
+
+    return () => {
+      floatingBoundsFrame.current?.cancel();
+      window.removeEventListener('resize', onWindowResize);
+      window.removeEventListener('enter-html-full-screen', onWindowResize);
+      window.removeEventListener('leave-html-full-screen', onWindowResize);
+      removeForceResize?.();
+    };
+  }, [miniBrowserOpen, miniBrowserDocked, position, size, chrome.loadError, clampPosition]);
 
   const hideBrowserView = useCallback(() => {
     if (!browserViewHidden.current) {
@@ -650,7 +797,6 @@ export const MiniBrowser: React.FC = () => {
     }
   }, []);
 
-  // Cleanup: show BrowserView when component unmounts
   useEffect(() => {
     return () => {
       floatingFrame.current?.cancel();
@@ -661,34 +807,6 @@ export const MiniBrowser: React.FC = () => {
     };
   }, []);
 
-  const handleNavigate = useCallback(() => {
-    let url = urlInput.trim();
-    if (!url) return;
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      url = `https://${url}`;
-      setUrlInput(url);
-    }
-    setMiniBrowserUrl(url);
-    window.electronAPI?.browser?.navigate(url);
-  }, [urlInput, setMiniBrowserUrl]);
-
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => { if (e.key === 'Enter') handleNavigate(); },
-    [handleNavigate]
-  );
-
-  const handleBack = useCallback(() => window.electronAPI?.browser?.goBack(), []);
-  const handleForward = useCallback(() => window.electronAPI?.browser?.goForward(), []);
-  const handleClose = useCallback(() => {
-    window.electronAPI?.browser?.close();
-    setMiniBrowserOpen(false);
-  }, [setMiniBrowserOpen]);
-  const handleToggleDock = useCallback(() => {
-    const { miniBrowserDocked: docked, setMiniBrowserDocked } = useUIStore.getState();
-    setMiniBrowserDocked(!docked);
-  }, []);
-
-  // Unified mouseDown handler — detects drag (toolbar) vs resize (edges/corners)
   const handleContainerMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (isInteracting.current) return;
@@ -701,7 +819,6 @@ export const MiniBrowser: React.FC = () => {
       const w = rect.width;
       const h = rect.height;
 
-      // Detect edge/corner
       const nearLeft = relX < EDGE_ZONE;
       const nearRight = relX > w - EDGE_ZONE;
       const nearTop = relY < EDGE_ZONE;
@@ -713,7 +830,6 @@ export const MiniBrowser: React.FC = () => {
       if (nearLeft) dir += 'w';
       if (nearRight) dir += 'e';
 
-      // Edge/corner resize
       if (dir) {
         e.preventDefault();
         isInteracting.current = true;
@@ -781,7 +897,6 @@ export const MiniBrowser: React.FC = () => {
         return;
       }
 
-      // Toolbar drag (y < toolbar height, not on interactive elements)
       if (relY < TOOLBAR_HEIGHT) {
         e.preventDefault();
         isInteracting.current = true;
@@ -796,10 +911,13 @@ export const MiniBrowser: React.FC = () => {
 
         const onMouseMove = (ev: MouseEvent) => {
           floatingFrame.current?.(
-            {
-              x: ev.clientX - dragOffset.current.x,
-              y: ev.clientY - dragOffset.current.y,
-            },
+            clampPosition(
+              {
+                x: ev.clientX - dragOffset.current.x,
+                y: ev.clientY - dragOffset.current.y,
+              },
+              size,
+            ),
             size,
           );
         };
@@ -818,7 +936,7 @@ export const MiniBrowser: React.FC = () => {
         document.addEventListener('mouseup', onMouseUp);
       }
     },
-    [size, position, hideBrowserView, showBrowserView]
+    [size, position, hideBrowserView, showBrowserView, clampPosition]
   );
 
   const handleContainerMouseMove = useCallback(
@@ -863,11 +981,8 @@ export const MiniBrowser: React.FC = () => {
   }, [showBrowserView]);
 
   if (!miniBrowserOpen) return null;
-
-  // Docked mode: handled by DockedMiniBrowser component in AppLayout
   if (miniBrowserDocked) return null;
 
-  // Style helper for visual edge indicator zones
   const edgeStyle = (dir: ResizeDir): React.CSSProperties => {
     const s: React.CSSProperties = { position: 'absolute', pointerEvents: 'none' };
     const half = EDGE_ZONE / 2;
@@ -886,7 +1001,6 @@ export const MiniBrowser: React.FC = () => {
 
   const directions: ResizeDir[] = ['n', 's', 'e', 'w', 'nw', 'ne', 'sw', 'se'];
 
-  // Floating mode
   return (
     <div
       onMouseDown={handleContainerMouseDown}
@@ -900,25 +1014,31 @@ export const MiniBrowser: React.FC = () => {
         height: size.height,
       }}
     >
-      <Toolbar
-        urlInput={urlInput}
-        onUrlChange={setUrlInput}
-        onNavigate={handleNavigate}
-        onKeyDown={handleKeyDown}
-        onBack={handleBack}
-        onForward={handleForward}
-        onToggleDock={handleToggleDock}
-        onClose={handleClose}
-        onUrlInputMouseDown={(e) => { e.stopPropagation(); hideBrowserView(); }}
-        onUrlInputFocus={hideBrowserView}
-        onUrlInputBlur={showBrowserView}
-        miniBrowserDocked={miniBrowserDocked}
-      />
+      <div data-mini-browser-toolbar>
+        <Toolbar
+          urlInput={chrome.urlInput}
+          onUrlChange={chrome.setUrlInput}
+          onNavigate={chrome.handleNavigate}
+          onKeyDown={chrome.handleKeyDown}
+          onBack={chrome.handleBack}
+          onForward={chrome.handleForward}
+          onReload={chrome.handleReload}
+          onOpenExternal={chrome.handleOpenExternal}
+          onToggleDock={chrome.handleToggleDock}
+          onClose={chrome.handleClose}
+          onUrlInputMouseDown={(e) => { e.stopPropagation(); hideBrowserView(); }}
+          onUrlInputFocus={() => { chrome.setUrlFocused(true); hideBrowserView(); }}
+          onUrlInputBlur={() => { chrome.setUrlFocused(false); showBrowserView(); }}
+          miniBrowserDocked={miniBrowserDocked}
+          canGoBack={chrome.canGoBack}
+          canGoForward={chrome.canGoForward}
+          loading={chrome.loading}
+          loadError={chrome.loadError}
+        />
+      </div>
 
-      {/* BrowserView content area */}
       <div className="flex-1 bg-transparent" />
 
-      {/* Visual edge indicators */}
       {directions.map((dir) => (
         <div key={dir} style={edgeStyle(dir)} />
       ))}

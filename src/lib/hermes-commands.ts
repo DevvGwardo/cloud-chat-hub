@@ -5,6 +5,8 @@ export interface CommandContext {
   setActiveTab: (tab: 'chat' | 'github' | 'analyzer' | 'knowledge') => void;
   setMiniBrowserOpen: (open: boolean) => void;
   setMiniBrowserUrl: (url: string) => void;
+  setMiniBrowserDocked?: (docked: boolean) => void;
+  setRightSidebarHidden?: (hidden: boolean) => void;
   newConversation?: () => void;
   setConversationForPanel?: (panelId: string, conversationId: string | null) => void;
   openPanel?: (conversationId: string | null) => void;
@@ -193,6 +195,8 @@ const COMMANDS: HermesCommand[] = [
       }
 
       context.setMiniBrowserUrl(resolvedUrl);
+      context.setMiniBrowserDocked?.(true);
+      context.setRightSidebarHidden?.(false);
       context.setMiniBrowserOpen(true);
       return `Opening ${resolvedUrl} in mini-browser.`;
     },

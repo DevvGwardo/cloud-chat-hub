@@ -46,14 +46,42 @@ contextBridge.exposeInMainWorld('electronAPI', {
     navigate: (url: string) => ipcRenderer.invoke('browser:navigate', url),
     goBack: () => ipcRenderer.invoke('browser:go-back'),
     goForward: () => ipcRenderer.invoke('browser:go-forward'),
+    reload: () => ipcRenderer.invoke('browser:reload'),
     close: () => ipcRenderer.invoke('browser:close'),
     resize: (bounds: { x: number; y: number; width: number; height: number }) => ipcRenderer.invoke('browser:resize', bounds),
     show: () => ipcRenderer.invoke('browser:show'),
     hide: () => ipcRenderer.invoke('browser:hide'),
+    getUrl: (): Promise<string | null> => ipcRenderer.invoke('browser:get-url'),
     onForceResize: (callback: () => void) => {
       const handler = () => callback();
       ipcRenderer.on('browser:force-resize', handler);
       return () => { ipcRenderer.removeListener('browser:force-resize', handler); };
+    },
+    onNavigated: (callback: (url: string) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, url: string) => callback(url);
+      ipcRenderer.on('browser:navigated', handler);
+      return () => { ipcRenderer.removeListener('browser:navigated', handler); };
+    },
+    onLoading: (callback: (loading: boolean) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, loading: boolean) => callback(loading);
+      ipcRenderer.on('browser:loading', handler);
+      return () => { ipcRenderer.removeListener('browser:loading', handler); };
+    },
+    onFailLoad: (callback: (payload: { url: string; errorCode: number; errorDescription: string }) => void) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        payload: { url: string; errorCode: number; errorDescription: string },
+      ) => callback(payload);
+      ipcRenderer.on('browser:fail-load', handler);
+      return () => { ipcRenderer.removeListener('browser:fail-load', handler); };
+    },
+    onNavState: (callback: (state: { canGoBack: boolean; canGoForward: boolean }) => void) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        state: { canGoBack: boolean; canGoForward: boolean },
+      ) => callback(state);
+      ipcRenderer.on('browser:nav-state', handler);
+      return () => { ipcRenderer.removeListener('browser:nav-state', handler); };
     },
   },
   onNewChat: (callback: () => void) => {

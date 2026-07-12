@@ -501,14 +501,93 @@ ipcMain.handle('shell:open-external', async (_event, url: string) => {
 })
 
 // ── Mini Browser (BrowserView) management ───────────────────────────
-ipcMain.handle('browser:create', (_event, url?: string) => {
-  if (!mainWindow) return
-  if (miniBrowserView) {
-    mainWindow.removeBrowserView(miniBrowserView)
-    miniBrowserView.webContents.close()
-    miniBrowserView = null
-    lastMiniBrowserBounds = null
+const MINI_BROWSER_TOOLBAR_HEIGHT = 36
+
+function isAllowedBrowserUrl(url: string, allowBlank = false): boolean {
+  if (allowBlank && (url === 'about:blank' || url.startsWith('about:blank'))) {
+    return true
   }
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+function emitBrowserNavState() {
+  if (!mainWindow || !miniBrowserView) return
+  const wc = miniBrowserView.webContents
+  mainWindow.webContents.send('browser:nav-state', {
+    canGoBack: wc.canGoBack(),
+    canGoForward: wc.canGoForward(),
+  })
+}
+
+function attachMiniBrowserListeners(view: BrowserView) {
+  const wc = view.webContents
+
+  wc.on('will-navigate', (event, url) => {
+    if (!isAllowedBrowserUrl(url, true)) {
+      event.preventDefault()
+      console.warn('Blocked will-navigate to non-http URL:', url)
+    }
+  })
+
+  wc.setWindowOpenHandler(({ url }) => {
+    if (isAllowedBrowserUrl(url)) {
+      void shell.openExternal(url)
+    }
+    return { action: 'deny' }
+  })
+
+  wc.on('did-navigate', (_event, url) => {
+    mainWindow?.webContents.send('browser:navigated', url)
+    emitBrowserNavState()
+  })
+
+  wc.on('did-navigate-in-page', (_event, url) => {
+    mainWindow?.webContents.send('browser:navigated', url)
+    emitBrowserNavState()
+  })
+
+  wc.on('did-start-loading', () => {
+    mainWindow?.webContents.send('browser:loading', true)
+  })
+
+  wc.on('did-stop-loading', () => {
+    mainWindow?.webContents.send('browser:loading', false)
+    emitBrowserNavState()
+  })
+
+  wc.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    // -3 = ERR_ABORTED (common on redirects / cancelled loads)
+    if (!isMainFrame || errorCode === -3) return
+    mainWindow?.webContents.send('browser:fail-load', {
+      url: validatedURL,
+      errorCode,
+      errorDescription,
+    })
+    mainWindow?.webContents.send('browser:loading', false)
+  })
+}
+
+ipcMain.handle('browser:create', (_event, url?: string) => {
+  if (!mainWindow) return false
+  const initialUrl = url || 'about:blank'
+  if (!isAllowedBrowserUrl(initialUrl, true)) {
+    console.warn('Blocked creation with non-http URL:', initialUrl)
+    return false
+  }
+
+  // Reuse existing view — navigate instead of destroy/recreate
+  if (miniBrowserView) {
+    if (initialUrl !== 'about:blank') {
+      void miniBrowserView.webContents.loadURL(initialUrl)
+    }
+    return true
+  }
+
   miniBrowserView = new BrowserView({
     webPreferences: {
       nodeIntegration: false,
@@ -518,47 +597,29 @@ ipcMain.handle('browser:create', (_event, url?: string) => {
       plugins: true,  // Allow media plugins if needed
     }
   })
+  attachMiniBrowserListeners(miniBrowserView)
   mainWindow.addBrowserView(miniBrowserView)
   // Use getContentBounds() — BrowserView coords are relative to content area, not window frame
   const bounds = mainWindow.getContentBounds()
-  const TOOLBAR_HEIGHT = 36
   // Default: bottom-right corner, 600x400, with some padding from edges
   lastMiniBrowserBounds = {
     x: bounds.width - 620,
-    y: bounds.height - 460 + TOOLBAR_HEIGHT,
+    y: bounds.height - 460 + MINI_BROWSER_TOOLBAR_HEIGHT,
     width: 600,
-    height: 400 - TOOLBAR_HEIGHT,
+    height: 400 - MINI_BROWSER_TOOLBAR_HEIGHT,
   }
   miniBrowserView.setBounds(lastMiniBrowserBounds)
   miniBrowserView.setAutoResize({ width: false, height: false })
-  const initialUrl = url || 'about:blank'
-  if (initialUrl !== 'about:blank') {
-    try {
-      const parsed = new URL(initialUrl);
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        console.warn('Blocked creation with non-http URL:', initialUrl);
-        return;
-      }
-    } catch {
-      console.warn('Invalid URL:', initialUrl);
-      return;
-    }
-  }
-  miniBrowserView.webContents.loadURL(initialUrl)
+  void miniBrowserView.webContents.loadURL(initialUrl)
+  return true
 })
 
 ipcMain.handle('browser:navigate', (_event, url: string) => {
-  try {
-    const parsed = new URL(url);
-    if (!['http:', 'https:'].includes(parsed.protocol)) {
-      console.warn('Blocked navigation to non-http URL:', url);
-      return;
-    }
-  } catch {
-    console.warn('Invalid URL:', url);
-    return;
+  if (!isAllowedBrowserUrl(url)) {
+    console.warn('Blocked navigation to non-http URL:', url)
+    return
   }
-  miniBrowserView?.webContents.loadURL(url)
+  void miniBrowserView?.webContents.loadURL(url)
 })
 
 ipcMain.handle('browser:go-back', () => {
@@ -571,6 +632,14 @@ ipcMain.handle('browser:go-forward', () => {
   if (miniBrowserView?.webContents.canGoForward()) {
     miniBrowserView.webContents.goForward()
   }
+})
+
+ipcMain.handle('browser:reload', () => {
+  miniBrowserView?.webContents.reload()
+})
+
+ipcMain.handle('browser:get-url', () => {
+  return miniBrowserView?.webContents.getURL() ?? null
 })
 
 ipcMain.handle('browser:close', () => {
@@ -588,12 +657,11 @@ ipcMain.handle('browser:resize', (_event, bounds: { x: number; y: number; width:
   // BrowserView y must account for the 36px toolbar — never let it overlap the URL bar.
   // bounds.y is already the BrowserView's y (passed from renderer as position.y + TOOLBAR_HEIGHT).
   // Just clamp to stay below toolbar area and within window.
-  const TOOLBAR_HEIGHT = 36;
   const clamped = {
     x: Math.max(0, Math.min(bounds.x, winBounds.width - bounds.width)),
-    y: Math.max(TOOLBAR_HEIGHT, Math.min(bounds.y, winBounds.height - 100)),
+    y: Math.max(MINI_BROWSER_TOOLBAR_HEIGHT, Math.min(bounds.y, winBounds.height - 100)),
     width: Math.max(200, Math.min(bounds.width, winBounds.width)),
-    height: Math.max(150, Math.min(bounds.height, winBounds.height - TOOLBAR_HEIGHT)),
+    height: Math.max(150, Math.min(bounds.height, winBounds.height - MINI_BROWSER_TOOLBAR_HEIGHT)),
   };
   if (
     lastMiniBrowserBounds &&

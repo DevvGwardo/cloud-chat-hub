@@ -101,6 +101,8 @@ test.describe('Electron API Bridge (preload)', () => {
         hide: typeof api.hide === 'function',
         goBack: typeof api.goBack === 'function',
         goForward: typeof api.goForward === 'function',
+        reload: typeof api.reload === 'function',
+        getUrl: typeof api.getUrl === 'function',
       }
     })
     expect(browserAPI).not.toBeNull()
@@ -112,6 +114,8 @@ test.describe('Electron API Bridge (preload)', () => {
     expect(browserAPI!.hide).toBe(true)
     expect(browserAPI!.goBack).toBe(true)
     expect(browserAPI!.goForward).toBe(true)
+    expect(browserAPI!.reload).toBe(true)
+    expect(browserAPI!.getUrl).toBe(true)
   })
 
   test('electronAPI exposes terminal control methods', async () => {

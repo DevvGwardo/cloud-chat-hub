@@ -24,56 +24,62 @@ test.afterAll(async () => {
 
 test.describe('MiniBrowser IPC — Security Fixes', () => {
   test('browser:create with file:// URL is silently rejected', async () => {
-    // This is the critical security fix — file:// URLs should NOT load
     const result = await fixture.window.evaluate(async () => {
       const api = (window as any).electronAPI?.browser
-      if (!api?.create) return { error: 'no browser API' }
+      if (!api?.create || !api?.getUrl) return { error: 'no browser API' }
 
-      // Try creating a BrowserView with a file:// URL
+      await api.close()
       await api.create('file:///etc/passwd')
-      // If we get here without throwing, the main process handled it
-      return { success: true }
+      const url = await api.getUrl()
+      return { success: true, url }
     })
 
-    // Should complete without error (main process silently rejects it)
-    expect(result).toBeDefined()
+    expect(result).toEqual({ success: true, url: null })
   })
 
   test('browser:navigate with file:// URL is silently rejected', async () => {
     const result = await fixture.window.evaluate(async () => {
       const api = (window as any).electronAPI?.browser
-      if (!api?.navigate) return { error: 'no browser API' }
+      if (!api?.navigate || !api?.getUrl || !api?.create) return { error: 'no browser API' }
 
+      await api.create('https://example.com')
       await api.navigate('file:///etc/passwd')
-      return { success: true }
+      const url = await api.getUrl()
+      return { success: true, url, isFile: typeof url === 'string' && url.startsWith('file:') }
     })
 
-    // Should not crash or throw
-    expect(result).toBeDefined()
+    expect(result.success).toBe(true)
+    expect(result.isFile).toBe(false)
   })
 
   test('browser:navigate with javascript: URL is silently rejected', async () => {
     const result = await fixture.window.evaluate(async () => {
       const api = (window as any).electronAPI?.browser
-      if (!api?.navigate) return { error: 'no browser API' }
+      if (!api?.navigate || !api?.getUrl || !api?.create) return { error: 'no browser API' }
 
+      await api.create('https://example.com')
       await api.navigate('javascript:alert(1)')
-      return { success: true }
+      const url = await api.getUrl()
+      return { success: true, url, isJavascript: typeof url === 'string' && url.startsWith('javascript:') }
     })
 
-    expect(result).toBeDefined()
+    expect(result.success).toBe(true)
+    expect(result.isJavascript).toBe(false)
   })
 
   test('browser:navigate with data: URL is silently rejected', async () => {
     const result = await fixture.window.evaluate(async () => {
       const api = (window as any).electronAPI?.browser
-      if (!api?.navigate) return { error: 'no browser API' }
+      if (!api?.navigate || !api?.getUrl || !api?.create) return { error: 'no browser API' }
 
+      await api.create('https://example.com')
       await api.navigate('data:text/html,<h1>pwned</h1>')
-      return { success: true }
+      const url = await api.getUrl()
+      return { success: true, url, isData: typeof url === 'string' && url.startsWith('data:') }
     })
 
-    expect(result).toBeDefined()
+    expect(result.success).toBe(true)
+    expect(result.isData).toBe(false)
   })
 })
 
@@ -115,7 +121,7 @@ test.describe('MiniBrowser IPC — Lifecycle', () => {
     expect(result).toEqual({ success: true })
   })
 
-  test('browser:resize clamps y to toolbar area (y >= 48)', async () => {
+  test('browser:resize clamps y to toolbar area (y >= 36)', async () => {
     // The fix: bounds clamping prevents BrowserView from overlapping toolbar
     // We can't directly verify the clamped value from the renderer,
     // but we can verify the call doesn't crash with extreme values
@@ -123,7 +129,7 @@ test.describe('MiniBrowser IPC — Lifecycle', () => {
       const api = (window as any).electronAPI?.browser
       if (!api?.resize) return { error: 'no browser API' }
 
-      // Try to set y=0 (should be clamped to 48 by main process)
+      // Try to set y=0 (should be clamped to 36 by main process)
       await api.resize({ x: 0, y: 0, width: 500, height: 400 })
 
       // Try negative values
@@ -132,6 +138,19 @@ test.describe('MiniBrowser IPC — Lifecycle', () => {
       // Try huge values
       await api.resize({ x: 99999, y: 99999, width: 99999, height: 99999 })
 
+      return { success: true }
+    })
+
+    expect(result).toEqual({ success: true })
+  })
+
+  test('browser:reload completes', async () => {
+    const result = await fixture.window.evaluate(async () => {
+      const api = (window as any).electronAPI?.browser
+      if (!api?.reload || !api?.create) return { error: 'no browser API' }
+
+      await api.create('https://example.com')
+      await api.reload()
       return { success: true }
     })
 
