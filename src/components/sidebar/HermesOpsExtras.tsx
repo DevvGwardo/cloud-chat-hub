@@ -846,7 +846,7 @@ export function HermesOpsExtras() {
             <p className="mt-1 text-[11px] leading-snug text-muted-foreground/75">
               {gateway
                 ? gateway.reachable
-                  ? `chat: ${chatTransportLabel} · gateway runs=${gateway.run_submission ? 'yes' : 'no'} · ${gateway.base_url}`
+                  ? `chat default: ${chatTransportLabel} · gateway reports runs=${gateway.run_submission ? 'yes' : 'no'} · ${gateway.base_url}`
                   : `Unreachable · ${gateway.error || 'start hermes gateway'}`
                 : 'Unavailable'}
             </p>
@@ -855,7 +855,7 @@ export function HermesOpsExtras() {
             type="button"
             onClick={() => setUseRuns(!useRuns)}
             aria-pressed={useRuns}
-            title="Use gateway /v1/runs for Hermes chat (experimental)"
+            title="Use gateway /v1/runs for Hermes chat when the request supports it"
             className={cn(
               'shrink-0 rounded-md border px-2 py-1 text-[10px] transition-colors',
               useRuns
@@ -866,6 +866,9 @@ export function HermesOpsExtras() {
             Runs
           </button>
         </div>
+        <p className="mt-2 text-[10px] leading-snug text-muted-foreground/55">
+          Use gateway /v1/runs when the request supports it. Spark still falls back to the Hermes agent loop for repo-mode, custom tools, Computer Use, and other parity gaps.
+        </p>
       </div>
 
       {insights && (

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { filterCommands } from '@/lib/hermes-commands';
+import { describeCommandExecution, filterCommands } from '@/lib/hermes-commands';
 import { cn } from '@/lib/utils';
 
 interface CommandSuggestionsProps {
@@ -15,11 +15,10 @@ export function commandTakesArgs(cmd: { usage: string }): boolean {
   return cmd.usage.includes('<');
 }
 
-// Subtle right-aligned tag distinguishing skill / agent commands from the
-// native CloudChat (app) commands. Local 'ui' commands get no badge.
 const KIND_BADGE: Record<string, { label: string; className: string }> = {
+  local: { label: 'local', className: 'text-zinc-300/90 bg-zinc-500/10 border-zinc-500/20' },
   skill: { label: 'skill', className: 'text-emerald-300/80 bg-emerald-500/10 border-emerald-500/20' },
-  agent: { label: 'agent', className: 'text-sky-300/80 bg-sky-500/10 border-sky-500/20' },
+  forwarded: { label: 'forwarded', className: 'text-sky-300/80 bg-sky-500/10 border-sky-500/20' },
 };
 
 export const CommandSuggestions: React.FC<CommandSuggestionsProps> = ({
@@ -49,7 +48,6 @@ export const CommandSuggestions: React.FC<CommandSuggestionsProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [visible, onSelect]);
 
-  // Reset selection when list changes
   useEffect(() => {
     onSelectIndex(0);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -62,7 +60,6 @@ export const CommandSuggestions: React.FC<CommandSuggestionsProps> = ({
       ref={containerRef}
       className="absolute bottom-full left-0 right-0 mb-1 mx-3 z-50 rounded-lg border border-[#3F3F3F] bg-[#2A2A2A] shadow-lg overflow-hidden"
     >
-      {/* Header */}
       <div className="px-3 py-1.5 border-b border-[#3F3F3F] flex items-center justify-between">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-[#666666]">
           Commands
@@ -70,11 +67,10 @@ export const CommandSuggestions: React.FC<CommandSuggestionsProps> = ({
         <span className="text-[10px] text-[#555555]">↑↓ navigate · ↵ select</span>
       </div>
 
-      {/* Command list */}
-      <div className="py-1 max-h-48 overflow-y-auto">
+      <div className="py-1 max-h-56 overflow-y-auto">
         {filtered.map((cmd, i) => {
           const takesArgs = commandTakesArgs(cmd);
-          const badge = cmd.kind ? KIND_BADGE[cmd.kind] : undefined;
+          const badge = KIND_BADGE[cmd.kind];
           return (
             <button
               key={cmd.name}
@@ -84,7 +80,7 @@ export const CommandSuggestions: React.FC<CommandSuggestionsProps> = ({
               }}
               onMouseEnter={() => onSelectIndex(i)}
               className={cn(
-                'w-full text-left px-3 py-1.5 flex flex-col gap-0.5 transition-colors duration-75',
+                'w-full text-left px-3 py-2 flex flex-col gap-1 transition-colors duration-75',
                 i === selectedIndex
                   ? 'bg-[#3B6DB5]'
                   : 'hover:bg-[#363636]'
@@ -93,7 +89,7 @@ export const CommandSuggestions: React.FC<CommandSuggestionsProps> = ({
               <div className="flex items-center gap-2">
                 <span
                   className={cn(
-                    'text-xs font-mono w-16 shrink-0',
+                    'text-xs font-mono w-20 shrink-0',
                     i === selectedIndex ? 'text-white' : 'text-[#7BA3F7]'
                   )}
                 >
@@ -107,32 +103,35 @@ export const CommandSuggestions: React.FC<CommandSuggestionsProps> = ({
                 >
                   {cmd.description}
                 </span>
-                {(takesArgs || badge) && (
-                  <span className="ml-auto shrink-0 flex items-center gap-1.5">
-                    {takesArgs && (
-                      <span className="text-[10px] text-[#555555] italic">needs args</span>
+                <span className="ml-auto shrink-0 flex items-center gap-1.5">
+                  {takesArgs && (
+                    <span className="text-[10px] text-[#555555] italic">needs args</span>
+                  )}
+                  <span
+                    className={cn(
+                      'text-[9px] font-medium uppercase tracking-wide px-1 py-px rounded border',
+                      badge.className
                     )}
-                    {badge && (
-                      <span
-                        className={cn(
-                          'text-[9px] font-medium uppercase tracking-wide px-1 py-px rounded border',
-                          badge.className
-                        )}
-                      >
-                        {badge.label}
-                      </span>
-                    )}
+                  >
+                    {badge.label}
                   </span>
-                )}
+                </span>
               </div>
-              {/* Usage hint — shows what args are expected */}
               <span
                 className={cn(
-                  'text-[10px] pl-[4.5rem] truncate',
+                  'text-[10px] pl-20 truncate',
                   i === selectedIndex ? 'text-white/40' : 'text-[#555555]'
                 )}
               >
                 {cmd.usage}
+              </span>
+              <span
+                className={cn(
+                  'text-[10px] pl-20',
+                  i === selectedIndex ? 'text-white/55' : 'text-[#666666]'
+                )}
+              >
+                {describeCommandExecution(cmd)}
               </span>
             </button>
           );

@@ -7,7 +7,7 @@ describe('hermes agent command passthrough', () => {
     (name) => {
       const cmd = findCommand(name);
       expect(cmd).toBeDefined();
-      expect(cmd?.kind).toBe('agent');
+      expect(cmd?.kind).toBe('forwarded');
       expect(cmd?.handler).toBeUndefined();
     },
   );

@@ -57,6 +57,7 @@ function ChatRuntimeArea({
       activeModel={chat.activeModel}
       toolActivityMap={'toolActivityMap' in chat ? chat.toolActivityMap : undefined}
       agentStatus={'agentStatus' in chat ? chat.agentStatus : undefined}
+      transportStatusMessage={'transportStatusMessage' in chat ? chat.transportStatusMessage : undefined}
       computerUseDock={'computerUseDock' in chat ? chat.computerUseDock : undefined}
       onComputerUseDockExpand={'handleComputerUseDockExpand' in chat ? chat.handleComputerUseDockExpand : undefined}
       onComputerUseDockCollapse={'handleComputerUseDockCollapse' in chat ? chat.handleComputerUseDockCollapse : undefined}

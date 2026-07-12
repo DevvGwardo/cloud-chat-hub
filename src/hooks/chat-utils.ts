@@ -220,6 +220,12 @@ export interface FallbackSwitchEvent {
   model: string;
 }
 
+export interface HermesTransportStatusEvent {
+  requested: 'runs' | 'agent-loop';
+  actual: 'runs' | 'agent-loop';
+  reason?: string;
+}
+
 export function parseFallbackSwitchDelta(value: unknown): FallbackSwitchEvent | null {
   if (!value || typeof value !== 'object') {
     return null;
@@ -234,8 +240,39 @@ export function parseFallbackSwitchDelta(value: unknown): FallbackSwitchEvent | 
   return { provider: provider.trim(), model: model.trim() };
 }
 
+export function parseHermesTransportStatusDelta(value: unknown): HermesTransportStatusEvent | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const {
+    requested,
+    actual,
+    reason,
+  } = value as { requested?: unknown; actual?: unknown; reason?: unknown };
+  if ((requested !== 'runs' && requested !== 'agent-loop') || (actual !== 'runs' && actual !== 'agent-loop')) {
+    return null;
+  }
+  return {
+    requested,
+    actual,
+    reason: typeof reason === 'string' && reason.trim() ? reason.trim() : undefined,
+  };
+}
+
 export function formatFallbackSwitchToast(event: FallbackSwitchEvent): string {
   return `Switched to ${event.provider}/${event.model}`;
+}
+
+export function formatHermesTransportStatus(event: HermesTransportStatusEvent): string {
+  if (event.requested === event.actual) {
+    return event.actual === 'runs'
+      ? 'Using Hermes gateway /v1/runs.'
+      : 'Using Hermes agent loop.';
+  }
+  const requestedLabel = event.requested === 'runs' ? 'gateway /v1/runs' : 'agent loop';
+  const actualLabel = event.actual === 'runs' ? 'gateway /v1/runs' : 'agent loop';
+  const suffix = event.reason ? ` ${event.reason}` : '';
+  return `Requested ${requestedLabel}; using ${actualLabel}.${suffix ? ` ${suffix}` : ''}`;
 }
 
 export function isFallbackSwitchData(
@@ -249,6 +286,19 @@ export function isFallbackSwitchData(
     return false;
   }
   return (value as { type?: unknown }).type === 'fallback_switch';
+}
+
+export function isHermesTransportStatusData(
+  value: unknown,
+): value is { type: 'transport_status'; requested: 'runs' | 'agent-loop'; actual: 'runs' | 'agent-loop'; reason?: string } {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const parsed = parseHermesTransportStatusDelta(value);
+  if (!parsed) {
+    return false;
+  }
+  return (value as { type?: unknown }).type === 'transport_status';
 }
 
 export function isAgentStatusData(

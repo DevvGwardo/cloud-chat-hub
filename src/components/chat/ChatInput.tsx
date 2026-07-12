@@ -584,9 +584,9 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
     setShowCommandSuggestions(false);
     setSelectedIndex(0);
 
-    if (commandTakesArgs(cmd) || !cmd.handler) {
-      // Needs args, or is a skill/agent command — drop into the composer so the
-      // user can review/add input, then send (skills are expanded by the bridge).
+    if (commandTakesArgs(cmd) || cmd.kind !== 'local') {
+      // Needs args, or is a Hermes bridge/forwarded command — drop into the
+      // composer so the user can review/add input before sending.
       onChange('/' + cmd.name + ' ');
       setTimeout(() => textareaRef.current?.focus(), 0);
     } else {

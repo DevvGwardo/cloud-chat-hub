@@ -237,6 +237,7 @@ export function extractHermesChoiceText(choice: {
 export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProxyEvent | null {
   let parsed: {
     usage?: unknown;
+    transport_status?: unknown;
     tool_activity?: unknown;
     server_tool_event?: unknown;
     agent_status?: unknown;
@@ -250,6 +251,7 @@ export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProx
         server_tool_event?: unknown;
         agent_status?: unknown;
         fallback_switch?: unknown;
+        transport_status?: unknown;
       };
       message?: {
         content?: unknown;
@@ -266,6 +268,9 @@ export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProx
   const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : undefined;
   const data: Record<string, unknown>[] = [];
 
+  if (choice?.delta?.transport_status && typeof choice.delta.transport_status === 'object') {
+    data.push({ type: 'transport_status', ...(choice.delta.transport_status as Record<string, unknown>) });
+  }
   if (choice?.delta?.tool_activity && typeof choice.delta.tool_activity === 'object') {
     data.push({ type: 'hermes_tool_activity', activity: choice.delta.tool_activity as Record<string, unknown> });
   }
@@ -282,6 +287,9 @@ export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProx
       provider: switchPayload.provider,
       model: switchPayload.model,
     });
+  }
+  if (parsed.transport_status && typeof parsed.transport_status === 'object') {
+    data.push({ type: 'transport_status', ...(parsed.transport_status as Record<string, unknown>) });
   }
   if (parsed.tool_activity && typeof parsed.tool_activity === 'object') {
     data.push({ type: 'hermes_tool_activity', activity: parsed.tool_activity as Record<string, unknown> });

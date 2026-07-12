@@ -1,4 +1,4 @@
-import { fetchHermesAgentCommands, HermesApiError } from './hermes-api';
+import { fetchHermesAgentCommands, HermesApiError, type HermesAgentCommand } from './hermes-api';
 
 export interface CommandContext {
   setActiveSubTab: (tab: 'overview' | 'threads' | 'queue' | 'chats' | 'cron' | 'memories' | 'skills' | 'usage') => void;
@@ -32,29 +32,29 @@ export const COMPRESS_CONTEXT_MESSAGE =
   'while preserving task-critical facts, open todos, and recent tool results. ' +
   'Confirm when compression is complete.';
 
-// 'ui' = handled locally in CloudChat (intercepted, runs a handler).
-// 'skill' = a hermes-agent skill; sent to the agent, which expands & runs it.
-// 'agent' = another hermes-agent built-in; inserted as editable text to send.
-export type HermesCommandKind = 'ui' | 'skill' | 'agent';
+// 'local' = handled locally in CloudChat (intercepted, runs a handler).
+// 'skill' = a hermes-agent skill; sent to the bridge, which expands & runs it.
+// 'forwarded' = inserted into the composer and forwarded as raw slash text.
+export type HermesCommandKind = 'local' | 'skill' | 'forwarded';
 
 export interface HermesCommand {
   name: string;
   description: string;
   usage: string;
-  kind?: HermesCommandKind;
+  kind: HermesCommandKind;
   category?: string;
   aliases?: string[];
-  // Only local 'ui' commands carry a handler; skill/agent commands are sent
+  // Only local commands carry a handler; skill/forwarded commands are sent
   // to the bridge instead of being intercepted.
   handler?: (args: string, context: CommandContext) => Promise<string>;
 }
 
 const COMMANDS: HermesCommand[] = [
-  // ── Navigation ───────────────────────────────────────────────
   {
     name: 'overview',
     description: 'Open the Hermes overview tab',
     usage: '/overview',
+    kind: 'local',
     handler: async (_args, context) => {
       context.setActiveSubTab('overview');
       return 'Switched to Overview tab.';
@@ -64,6 +64,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'cron',
     description: 'Manage cron jobs',
     usage: '/cron list | /cron create <schedule> <prompt> | /cron pause <id> | /cron resume <id> | /cron delete <id>',
+    kind: 'local',
     handler: async (args, context) => {
       context.setActiveSubTab('cron');
       const parts = args.trim().split(/\s+/);
@@ -93,6 +94,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'memories',
     description: 'Open the Hermes memories editor',
     usage: '/memories',
+    kind: 'local',
     handler: async (_args, context) => {
       context.setActiveSubTab('memories');
       return 'Switched to Memories tab.';
@@ -102,6 +104,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'skills',
     description: 'Open the Hermes skills browser',
     usage: '/skills',
+    kind: 'local',
     handler: async (_args, context) => {
       context.setActiveSubTab('skills');
       return 'Switched to Skills tab.';
@@ -111,6 +114,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'usage',
     description: 'Open the Hermes usage dashboard',
     usage: '/usage',
+    kind: 'local',
     handler: async (_args, context) => {
       context.setActiveSubTab('usage');
       return 'Switched to Usage tab.';
@@ -120,6 +124,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'sessions',
     description: 'Switch to Sessions tab',
     usage: '/sessions',
+    kind: 'local',
     handler: async (_args, context) => {
       context.setActiveSubTab('chats');
       return 'Switched to Sessions tab.';
@@ -129,6 +134,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'chats',
     description: 'Switch to Sessions tab',
     usage: '/chats',
+    kind: 'local',
     handler: async (_args, context) => {
       context.setActiveSubTab('chats');
       return 'Switched to Sessions tab.';
@@ -138,6 +144,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'threads',
     description: 'Switch to Threads tab',
     usage: '/threads',
+    kind: 'local',
     handler: async (_args, context) => {
       context.setActiveSubTab('threads');
       return 'Switched to Threads tab.';
@@ -147,6 +154,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'queue',
     description: 'Open the Hermes queue monitor',
     usage: '/queue',
+    kind: 'local',
     handler: async (_args, context) => {
       context.setActiveSubTab('queue');
       return 'Switched to Queue tab.';
@@ -156,6 +164,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'github',
     description: 'Switch to GitHub tab',
     usage: '/github',
+    kind: 'local',
     handler: async (_args, context) => {
       context.setActiveTab('github');
       return 'Switched to GitHub tab.';
@@ -165,6 +174,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'analyzer',
     description: 'Switch to Analyzer tab',
     usage: '/analyzer',
+    kind: 'local',
     handler: async (_args, context) => {
       context.setActiveTab('analyzer');
       return 'Switched to Analyzer tab.';
@@ -174,6 +184,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'knowledge',
     description: 'Switch to Knowledge tab',
     usage: '/knowledge',
+    kind: 'local',
     handler: async (_args, context) => {
       context.setActiveTab('knowledge');
       return 'Switched to Knowledge tab.';
@@ -183,6 +194,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'browse',
     description: 'Open the mini-browser with a URL',
     usage: '/browse <url>',
+    kind: 'local',
     handler: async (args, context) => {
       const url = args.trim();
       if (!url) {
@@ -201,12 +213,11 @@ const COMMANDS: HermesCommand[] = [
       return `Opening ${resolvedUrl} in mini-browser.`;
     },
   },
-
-  // ── Conversation ─────────────────────────────────────────────
   {
     name: 'new',
     description: 'Start a new conversation',
     usage: '/new',
+    kind: 'local',
     handler: async (_args, context) => {
       if (!context.newConversation) return callbackUnavailable();
       context.newConversation();
@@ -217,6 +228,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'reset',
     description: 'Reset the current conversation session',
     usage: '/reset',
+    kind: 'local',
     handler: async (_args, context) => {
       if (!context.resetSession) return callbackUnavailable();
       context.resetSession();
@@ -227,6 +239,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'stop',
     description: 'Stop the running agent',
     usage: '/stop',
+    kind: 'local',
     handler: async (_args, context) => {
       if (!context.stopAgent) return callbackUnavailable();
       context.stopAgent();
@@ -237,6 +250,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'title',
     description: 'Set the conversation title',
     usage: '/title <name>',
+    kind: 'local',
     handler: async (args, context) => {
       const title = args.trim();
       if (!title) return 'Usage: /title <name>';
@@ -249,6 +263,7 @@ const COMMANDS: HermesCommand[] = [
     name: 'retry',
     description: 'Retry the last message',
     usage: '/retry',
+    kind: 'local',
     handler: async (_args, context) => {
       if (!context.retryMessage) return callbackUnavailable();
       context.retryMessage();
@@ -259,18 +274,18 @@ const COMMANDS: HermesCommand[] = [
     name: 'undo',
     description: 'Remove the last exchange',
     usage: '/undo',
+    kind: 'local',
     handler: async (_args, context) => {
       if (!context.undoMessage) return callbackUnavailable();
       context.undoMessage();
       return 'Last exchange removed.';
     },
   },
-
-  // ── Moderation ────────────────────────────────────────────────
   {
     name: 'approve',
     description: 'Approve the pending dangerous command',
     usage: '/approve',
+    kind: 'local',
     handler: async (_args, context) => {
       if (!context.approveCommand) return callbackUnavailable();
       context.approveCommand();
@@ -281,18 +296,18 @@ const COMMANDS: HermesCommand[] = [
     name: 'deny',
     description: 'Deny the pending dangerous command',
     usage: '/deny',
+    kind: 'local',
     handler: async (_args, context) => {
       if (!context.denyCommand) return callbackUnavailable();
       context.denyCommand();
       return 'Denied.';
     },
   },
-
-  // ── Context ───────────────────────────────────────────────────
   {
     name: 'compress',
     description: 'Manually trigger context compression',
     usage: '/compress',
+    kind: 'local',
     handler: async (_args, context) => {
       if (!context.compressContext) return callbackUnavailable();
       context.compressContext();
@@ -301,29 +316,27 @@ const COMMANDS: HermesCommand[] = [
   },
   {
     name: 'moa',
-    description: 'Run one prompt through the default MoA preset',
+    description: 'Forward a prompt to Hermes MoA execution',
     usage: '/moa <prompt>',
-    kind: 'agent',
+    kind: 'forwarded',
   },
   {
     name: 'goal',
-    description: 'Set or manage a standing goal (Ralph loop)',
+    description: 'Forward a standing-goal command to Hermes',
     usage: '/goal <objective>',
-    kind: 'agent',
+    kind: 'forwarded',
   },
-
-  // ── Filesystem ───────────────────────────────────────────────
   {
     name: 'rollback',
-    description: 'List or restore filesystem checkpoints',
+    description: 'Forward a checkpoint restore command to Hermes',
     usage: '/rollback [number]',
-    // No local handler → sent through to Hermes (native /rollback).
-    kind: 'agent',
+    kind: 'forwarded',
   },
   {
     name: 'resume',
     description: 'Attach a Hermes session so the next message continues it',
     usage: '/resume [session-id]',
+    kind: 'local',
     handler: async (args, context) => {
       if (!context.resumeSession) return callbackUnavailable();
       try {
@@ -333,15 +346,19 @@ const COMMANDS: HermesCommand[] = [
       }
     },
   },
-
-  // ── Meta ──────────────────────────────────────────────────────
   {
     name: 'help',
-    description: 'List available hermes commands',
+    description: 'List available Hermes commands',
     usage: '/help',
+    kind: 'local',
     handler: async () => {
-      const lines = COMMANDS.map(
-        (cmd) => `  ${cmd.usage.split('|')[0].trim()}  — ${cmd.description}`
+      const labelForKind: Record<HermesCommandKind, string> = {
+        local: 'local',
+        skill: 'skill-expanded',
+        forwarded: 'forwarded',
+      };
+      const lines = allCommands().map(
+        (cmd) => `  ${cmd.usage.split('|')[0].trim()}  — ${cmd.description} [${labelForKind[cmd.kind]}]`
       );
       return 'Hermes Commands:\n' + lines.join('\n');
     },
@@ -350,22 +367,27 @@ const COMMANDS: HermesCommand[] = [
 
 export { COMMANDS };
 
-// Dynamic commands fetched from the installed hermes-agent (skills + built-ins).
-// Local 'ui' COMMANDS always take precedence on a name collision.
 let DYNAMIC_COMMANDS: HermesCommand[] = [];
-// "Resolved" means we're done trying for this session — either the catalog
-// loaded, or the gateway told us the endpoint isn't there. Either way, stop.
 let agentCommandsResolved = false;
 let agentCommandsInflight: Promise<void> | null = null;
 
-export function setHermesAgentCommands(commands: HermesCommand[]): void {
+function normalizeDynamicCommand(command: HermesAgentCommand): HermesCommand {
+  return {
+    ...command,
+    kind: command.kind === 'skill' ? 'skill' : 'forwarded',
+  };
+}
+
+export function setHermesAgentCommands(commands: HermesAgentCommand[]): void {
   const localNames = new Set(COMMANDS.map((c) => c.name));
   const seen = new Set<string>();
-  DYNAMIC_COMMANDS = commands.filter((c) => {
-    if (localNames.has(c.name) || seen.has(c.name)) return false;
-    seen.add(c.name);
-    return true;
-  });
+  DYNAMIC_COMMANDS = commands
+    .map(normalizeDynamicCommand)
+    .filter((c) => {
+      if (localNames.has(c.name) || seen.has(c.name)) return false;
+      seen.add(c.name);
+      return true;
+    });
   agentCommandsResolved = true;
 }
 
@@ -373,18 +395,6 @@ export function agentCommandsAlreadyLoaded(): boolean {
   return agentCommandsResolved;
 }
 
-/**
- * Load the installed hermes-agent's slash-command catalog at most once per
- * session, shared across every ChatInput via a single in-flight promise.
- *
- * Each ChatInput used to run its own 5×-with-backoff retry loop, and the guard
- * only flipped on success — so when the gateway returns 404 for
- * `/workspace/commands` (older bridge that doesn't expose it), every panel
- * retried forever, producing the 4-requests-every-4s hammering seen in the
- * bridge logs. Now: one shared loader; a 4xx means the endpoint genuinely
- * isn't there, so we stop immediately; only transient errors (network / bridge
- * still starting) are retried.
- */
 export function ensureHermesAgentCommandsLoaded(): Promise<void> {
   if (agentCommandsResolved) return Promise.resolve();
   if (agentCommandsInflight) return agentCommandsInflight;
@@ -394,22 +404,16 @@ export function ensureHermesAgentCommandsLoaded(): Promise<void> {
       try {
         const commands = await fetchHermesAgentCommands();
         if (commands.length) setHermesAgentCommands(commands);
-        // The endpoint answered (even if empty) — nothing more to retry.
         agentCommandsResolved = true;
         return;
       } catch (err) {
-        // A 4xx (e.g. 404) means this gateway doesn't expose the endpoint;
-        // retrying it from every panel is pointless and is the loop we're
-        // fixing. Give up for the session.
         if (err instanceof HermesApiError && err.status >= 400 && err.status < 500) {
           agentCommandsResolved = true;
           return;
         }
-        // Transient (network / 5xx / bridge still coming up) — back off, retry.
       }
       await new Promise((r) => setTimeout(r, 2000));
     }
-    // Exhausted transient retries — stop trying this session.
     agentCommandsResolved = true;
   })();
 
@@ -457,4 +461,24 @@ export function filterCommands(partial: string): HermesCommand[] {
       cmd.aliases?.some((a) => a.startsWith(query)) ||
       cmd.description.toLowerCase().includes(query)
   );
+}
+
+export const SUBTAB_NAV_COMMANDS = new Set([
+  'overview', 'cron', 'memories', 'skills', 'usage', 'sessions', 'chats', 'threads', 'queue',
+]);
+
+export function commandTakesArgs(cmd: HermesCommand): boolean {
+  return cmd.usage.includes('<');
+}
+
+export function describeCommandExecution(cmd: HermesCommand): string {
+  switch (cmd.kind) {
+    case 'local':
+      return 'Runs inside CloudChat immediately';
+    case 'skill':
+      return 'Expanded by the Hermes bridge before agent execution';
+    case 'forwarded':
+    default:
+      return 'Forwarded to Hermes as raw slash text';
+  }
 }

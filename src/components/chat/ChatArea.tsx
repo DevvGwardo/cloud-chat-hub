@@ -472,6 +472,7 @@ interface ChatAreaProps {
   activeModel: string;
   toolActivityMap?: Record<string, ToolActivityEvent[]>;
   agentStatus?: AgentStatusEvent | null;
+  transportStatusMessage?: string | null;
   computerUseDock?: ComputerUseDockState;
   onComputerUseDockExpand?: () => void;
   onComputerUseDockCollapse?: () => void;
@@ -506,6 +507,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   activeModel,
   toolActivityMap,
   agentStatus,
+  transportStatusMessage,
   computerUseDock,
   onComputerUseDockExpand,
   onComputerUseDockCollapse,
@@ -1160,6 +1162,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         )}
         <div className="px-4">
           {errorBanner}
+          {transportStatusMessage ? (
+            <div className="mx-auto mb-2 w-full max-w-[720px] rounded-md border border-sky-500/20 bg-sky-500/10 px-3 py-2 text-xs text-sky-200">
+              {transportStatusMessage}
+            </div>
+          ) : null}
         </div>
         <ContextualSuggestions
           messages={messages}

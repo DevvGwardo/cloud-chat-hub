@@ -4696,6 +4696,30 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             flush=True,
         )
     _transport_label = "Starting Hermes gateway run..." if _route_via_runs else "Starting Hermes agent loop..."
+    _transport_reason = None
+    if _use_runs_flag and not _route_via_runs:
+        if _hermes_runs.enabled_toolsets_need_agent_loop_parity(enabled_toolsets):
+            _transport_reason = "Computer Use still requires the agent loop because gateway runs events do not include screenshot results."
+        elif resolved_provider == MOA_PROVIDER_ID:
+            _transport_reason = "Mixture of Agents still needs the agent loop unless gateway MoA runs support is enabled."
+        else:
+            _requested_custom_tools = (body.model_extra or {}).get("custom_tools")
+            _needs_loop, _needs_loop_reason = _hermes_runs.needs_agent_loop_parity(
+                runs_parity_available=_runs_parity_available,
+                worktree_active=use_worktree,
+                explicit_provider=resolved_provider,
+                moa_provider_id=MOA_PROVIDER_ID,
+                moa_runs_allowed=_hermes_runs.parse_runs_moa_flag(),
+                enabled_toolsets=enabled_toolsets,
+                toolsets_overridden=toolsets_overridden,
+                default_toolsets=default_toolsets,
+                repo_mode=has_repo_tools,
+                github_pat=github_pat or None,
+                custom_tools=_requested_custom_tools if isinstance(_requested_custom_tools, list) else None,
+                reasoning_effort=(body.model_extra or {}).get("reasoning_effort"),
+            )
+            if _needs_loop and _needs_loop_reason:
+                _transport_reason = _needs_loop_reason[:1].upper() + _needs_loop_reason[1:]
 
     chunk_id = f"chatcmpl-hermes-{os.urandom(8).hex()}"
     # Brain MCP: register per-request session so overseer can address it directly
@@ -4808,6 +4832,12 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
     def on_fallback_switch(provider: str, model: str):
         _qput(("fallback_switch", {"provider": provider, "model": model}))
 
+    def on_transport_status(requested: str, actual: str, reason: str | None = None):
+        event = {"requested": requested, "actual": actual}
+        if reason:
+            event["reason"] = reason
+        _qput(("transport_status", event))
+
     def on_computer_use_frame(frame: dict):
         _qput(("computer_use_frame", frame))
 
@@ -4828,6 +4858,11 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                         "[hermes-bridge] Worktree requested but setup failed — continuing in original cwd",
                         flush=True,
                     )
+            on_transport_status(
+                "runs" if _use_runs_flag else "agent-loop",
+                "runs" if _route_via_runs else "agent-loop",
+                _transport_reason,
+            )
             print(f"[hermes-bridge] Using {'real' if _using_real_agent else 'custom'} Hermes agent", flush=True)
             # Log message roles for debugging system prompt delivery
             msg_roles = [m["role"] for m in request_messages]
@@ -5188,12 +5223,12 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                     yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
                         "reasoning": reasoning_text
                     }))
-                elif event[0] == "server_tool_event":
-                    event_data = event[1]
+                elif event[0] == "transport_status":
+                    status_event = event[1]
                     yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
-                        "server_tool_event": event_data
+                        "transport_status": status_event
                     }))
-                elif event[0] == "fallback_switch":
+                elif event[0] == "server_tool_event":
                     switch = event[1]
                     yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
                         "fallback_switch": switch

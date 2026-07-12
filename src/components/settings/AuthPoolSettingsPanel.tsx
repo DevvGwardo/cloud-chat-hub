@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { KeyRound, Loader2, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
+import { KeyRound, Loader2, Plus, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
 import {
+  addAuthPoolApiKey,
   fetchAuthPool,
   removeAuthPoolCredential,
   resetAuthPoolProvider,
@@ -24,23 +25,54 @@ export function AuthPoolSettingsPanel({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [provider, setProvider] = useState('openrouter');
+  const [apiKey, setApiKey] = useState('');
+  const [label, setLabel] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const data = await fetchAuthPool();
-      setProviders(Array.isArray(data.providers) ? data.providers : []);
+      const nextProviders = Array.isArray(data.providers) ? data.providers : [];
+      setProviders(nextProviders);
+      if (!nextProviders.some((item) => item.provider === provider) && nextProviders[0]?.provider) {
+        setProvider(nextProviders[0].provider);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load credential pool');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [provider]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  const handleAdd = async () => {
+    const trimmedProvider = provider.trim();
+    const trimmedApiKey = apiKey.trim();
+    if (!trimmedProvider || !trimmedApiKey) {
+      setError('Provider and API key are required');
+      return;
+    }
+    setBusy('add');
+    setError(null);
+    setStatus(null);
+    try {
+      const res = await addAuthPoolApiKey(trimmedProvider, trimmedApiKey, label.trim() || undefined);
+      if (!res.ok) throw new Error(res.output || 'Add failed');
+      setStatus(`Added ${trimmedProvider} API key`);
+      setApiKey('');
+      setLabel('');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Add failed');
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const handleReset = async (provider: string) => {
     setBusy(`reset:${provider}`);
@@ -75,6 +107,9 @@ export function AuthPoolSettingsPanel({
     }
   };
 
+  const providerOptions = providers.map((item) => item.provider);
+  const knownOptions = providerOptions.length > 0 ? providerOptions : ['openrouter', 'anthropic', 'openai', 'google'];
+
   return (
     <div className={cn(settingsCardClass, 'space-y-3 px-5 py-5')}>
       <div className="flex items-start justify-between gap-3">
@@ -85,7 +120,7 @@ export function AuthPoolSettingsPanel({
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             Pooled API keys in <span className="font-mono text-[11px]">~/.hermes/auth.json</span>.
-            Add OAuth via terminal:{' '}
+            OAuth/browser login still happens in terminal:{' '}
             <span className="font-mono text-[11px]">hermes auth add &lt;provider&gt;</span>
           </p>
         </div>
@@ -97,6 +132,59 @@ export function AuthPoolSettingsPanel({
         >
           <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
         </button>
+      </div>
+
+      <div className="rounded-lg border border-border/50 bg-white/[0.02] p-3 space-y-2">
+        <div className="flex items-center gap-1.5 text-[11px] font-medium text-foreground">
+          <Plus className="h-3.5 w-3.5 text-primary/80" />
+          Add API key
+        </div>
+        <div className="grid gap-2 md:grid-cols-3">
+          <label className="space-y-1">
+            <span className="text-[11px] text-muted-foreground">Provider</span>
+            <input
+              list="auth-pool-provider-options"
+              value={provider}
+              onChange={(e) => setProvider(e.target.value)}
+              className="w-full rounded-md border border-border/60 bg-background px-2 py-1.5 text-xs text-foreground"
+              placeholder="openrouter"
+            />
+            <datalist id="auth-pool-provider-options">
+              {knownOptions.map((option) => (
+                <option key={option} value={option} />
+              ))}
+            </datalist>
+          </label>
+          <label className="space-y-1 md:col-span-2">
+            <span className="text-[11px] text-muted-foreground">API key</span>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              className="w-full rounded-md border border-border/60 bg-background px-2 py-1.5 text-xs text-foreground"
+              placeholder="sk-..."
+            />
+          </label>
+        </div>
+        <div className="flex items-end gap-2">
+          <label className="flex-1 space-y-1">
+            <span className="text-[11px] text-muted-foreground">Label (optional)</span>
+            <input
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              className="w-full rounded-md border border-border/60 bg-background px-2 py-1.5 text-xs text-foreground"
+              placeholder="Work key"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={() => void handleAdd()}
+            disabled={busy === 'add' || !provider.trim() || !apiKey.trim()}
+            className="rounded-md border border-border/60 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+          >
+            {busy === 'add' ? 'Adding…' : 'Add key'}
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -117,7 +205,7 @@ export function AuthPoolSettingsPanel({
         </div>
       ) : providers.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          No pooled credentials. Run{' '}
+          No pooled credentials yet. Add an API key above, or run{' '}
           <span className="font-mono text-[11px]">hermes auth add openrouter --type api-key</span>{' '}
           in a terminal.
         </p>

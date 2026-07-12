@@ -63,12 +63,14 @@ import {
   formatMissingRepoFileError,
   formatRepoTreeUnavailableError,
   formatFallbackSwitchToast,
+  formatHermesTransportStatus,
   getPendingProposalKey,
   getRepoToolExistingPaths,
   getServerToolEventKey,
   hasRecoverablePseudoRepoWrites,
   isAgentStatusData,
   isFallbackSwitchData,
+  isHermesTransportStatusData,
   isHermesLoopStatusData,
   isHermesToolActivityData,
   isInvalidRepoReadPath,
@@ -76,6 +78,7 @@ import {
   isServerToolEvent,
   normalizeRepoPath,
   parseFallbackSwitchDelta,
+  parseHermesTransportStatusDelta,
   resolveRepoWriteAction,
   sanitizePartialToolCalls,
   synthesizeToolInvocationsForPersistence,
@@ -664,6 +667,7 @@ When the user asks you to make changes:
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const [toolActivityMap, setToolActivityMap] = useState<Record<string, ToolActivityEvent[]>>({});
   const [agentStatus, setAgentStatus] = useState<AgentStatusEvent | null>(null);
+  const [transportStatusMessage, setTransportStatusMessage] = useState<string | null>(null);
   const [computerUseDock, setComputerUseDock] = useState<ComputerUseDockState>(INITIAL_COMPUTER_USE_DOCK_STATE);
   const [conversationAutoApproveEnabled, setConversationAutoApproveEnabled] = useState(false);
   const requestConversationIdRef = useRef<string | null>(conversationId);
@@ -968,6 +972,10 @@ When the user asks you to make changes:
       });
     };
 
+    const notifyTransportStatus = (message: string | null) => {
+      setTransportStatusMessage((current) => (current === message ? current : message));
+    };
+
     const seenFallbackSwitches = new Set<string>();
     const notifyFallbackSwitch = (switchEvent: { provider: string; model: string }) => {
       const key = `${switchEvent.provider}:${switchEvent.model}`;
@@ -1030,6 +1038,10 @@ When the user asks you to make changes:
               if (delta?.agent_status && typeof delta.agent_status === 'object') {
                 updateAgentStatus(delta.agent_status as AgentStatusEvent);
               }
+              const transportStatus = parseHermesTransportStatusDelta(delta?.transport_status);
+              if (transportStatus) {
+                notifyTransportStatus(formatHermesTransportStatus(transportStatus));
+              }
               const fallbackSwitch = parseFallbackSwitchDelta(delta?.fallback_switch);
               if (fallbackSwitch) {
                 notifyFallbackSwitch(fallbackSwitch);
@@ -1077,6 +1089,10 @@ When the user asks you to make changes:
                 }
                 if (isFallbackSwitchData(item)) {
                   notifyFallbackSwitch({ provider: item.provider, model: item.model });
+                  continue;
+                }
+                if (isHermesTransportStatusData(item)) {
+                  notifyTransportStatus(formatHermesTransportStatus(item));
                   continue;
                 }
                 if (isHermesLoopStatusData(item)) {
@@ -3026,6 +3042,7 @@ When the user asks you to make changes:
     activeModel: effectiveModel,
     toolActivityMap,
     agentStatus,
+    transportStatusMessage,
     computerUseDock,
     handleComputerUseDockExpand,
     handleComputerUseDockCollapse,
