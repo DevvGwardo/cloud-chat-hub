@@ -385,6 +385,54 @@ export async function fetchCheckpoints(workdir?: string): Promise<CheckpointsSta
   return hermesFetch<CheckpointsStatus>(`/checkpoints${suffix}`);
 }
 
+export interface DelegationLiveManifest {
+  object?: string;
+  delegation_id: string;
+  started?: string;
+  completed?: string;
+  task_count?: number;
+  tasks?: Array<{
+    index: number;
+    goal?: string;
+    log?: string;
+    status?: string;
+  }>;
+}
+
+export interface DelegationLiveTail {
+  object?: string;
+  delegation_id: string;
+  task_index: number;
+  offset: number;
+  next_offset: number;
+  done: boolean;
+  text: string;
+  lines: string[];
+  size?: number;
+}
+
+export async function fetchDelegationLiveLatest(): Promise<DelegationLiveManifest> {
+  return hermesFetch<DelegationLiveManifest>('/delegation/live/latest');
+}
+
+export async function fetchDelegationLiveManifest(
+  delegationId: string,
+): Promise<DelegationLiveManifest> {
+  return hermesFetch<DelegationLiveManifest>(
+    `/delegation/live/${encodeURIComponent(delegationId)}`,
+  );
+}
+
+export async function fetchDelegationLiveTail(
+  delegationId: string,
+  taskIndex: number,
+  offset = 0,
+): Promise<DelegationLiveTail> {
+  return hermesFetch<DelegationLiveTail>(
+    `/delegation/live/${encodeURIComponent(delegationId)}/task/${taskIndex}?offset=${offset}`,
+  );
+}
+
 export async function pruneCheckpoints(): Promise<{ ok: boolean; output: string }> {
   return hermesFetch('/checkpoints/prune', { method: 'POST', body: '{}' });
 }

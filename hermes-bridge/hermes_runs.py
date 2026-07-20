@@ -24,7 +24,9 @@ import httpx
 from hermes_ops import assert_safe_gateway_base_url, probe_gateway_capabilities
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
-_VALID_REASONING_EFFORT = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+_VALID_REASONING_EFFORT = frozenset({
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+})
 _AGENT_LOOP_PARITY_TOOLSETS = frozenset({"computer", "computer_use"})
 _active_runs_lock = threading.Lock()
 _active_runs: dict[str, "_ActiveRun"] = {}

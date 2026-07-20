@@ -86,6 +86,61 @@ describe('deriveAgentTaskPanelState', () => {
     ]);
   });
 
+  it('parses Hermes 0.19 live_transcripts from delegate_task output', () => {
+    const state = deriveAgentTaskPanelState([
+      {
+        tool: 'delegate_task',
+        status: 'running',
+        input: JSON.stringify({
+          tasks: [{ goal: 'Count files' }, { goal: 'List dirs' }],
+        }),
+        output: JSON.stringify({
+          status: 'dispatched',
+          mode: 'background',
+          delegation_id: 'deleg_abc12345',
+          live_transcripts: [
+            '/Users/dev/.hermes/cache/delegation/live/deleg_abc12345/task-0.log',
+            '/Users/dev/.hermes/cache/delegation/live/deleg_abc12345/task-1.log',
+          ],
+        }),
+      },
+    ]);
+    expect(state.subagents).toHaveLength(2);
+    expect(state.subagents[0]).toMatchObject({
+      goal: 'Count files',
+      delegationId: 'deleg_abc12345',
+      taskIndex: 0,
+      liveTranscriptPath: '/Users/dev/.hermes/cache/delegation/live/deleg_abc12345/task-0.log',
+    });
+    expect(state.subagents[1].taskIndex).toBe(1);
+  });
+
+  it('extracts delegation id from per-result live_transcript paths', () => {
+    const state = deriveAgentTaskPanelState([
+      {
+        tool: 'delegate_task',
+        status: 'completed',
+        input: JSON.stringify({ goal: 'Fix tests' }),
+        output: JSON.stringify({
+          results: [
+            {
+              task_index: 0,
+              status: 'completed',
+              summary: 'all green',
+              live_transcript: '/tmp/live/deleg_deadbeef/task-0.log',
+            },
+          ],
+          live_transcripts: ['/tmp/live/deleg_deadbeef/task-0.log'],
+        }),
+      },
+    ]);
+    expect(state.subagents[0]).toMatchObject({
+      delegationId: 'deleg_deadbeef',
+      output: 'all green',
+      liveTranscriptPath: '/tmp/live/deleg_deadbeef/task-0.log',
+    });
+  });
+
   it('tracks background terminal processes and appends process poll output', () => {
     const state = deriveAgentTaskPanelState([
       {

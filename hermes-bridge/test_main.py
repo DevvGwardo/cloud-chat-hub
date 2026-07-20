@@ -698,6 +698,24 @@ class MixtureOfAgentsTests(unittest.TestCase):
         self.assertEqual(moa_provider["name"], "Mixture of Agents")
         self.assertEqual(moa_provider["models"], ["review"])
 
+    def test_list_providers_hides_disabled_and_excluded(self):
+        with patch.object(main, "_load_moa_config", return_value={"presets": {}, "default_preset": "default"}), \
+             patch.object(main, "_load_cli_model_config", return_value={
+                 "default": "gpt-4o", "provider": "openai", "base_url": None, "api_key": None,
+             }), \
+             patch.object(main, "_load_provider_visibility", return_value={
+                 "excluded": {"openrouter"},
+                 "disabled": {"anthropic"},
+             }), \
+             patch.object(main, "_models_for_provider", return_value=["m1"]), \
+             patch.object(main, "_provider_has_credentials", return_value=True):
+            response = asyncio.run(main.list_providers(_FakeRequest({})))
+
+        ids = {row["id"] for row in response["data"]}
+        self.assertNotIn("openrouter", ids)
+        self.assertNotIn("anthropic", ids)
+        self.assertIn("openai", ids)
+
     def test_moa_rejects_passthrough_mode(self):
         body = main.ChatCompletionRequest.model_validate({
             "model": "review",

@@ -14,6 +14,12 @@ export interface PanelSubagent {
   context?: string;
   status: 'running' | 'completed';
   output: string | null;
+  /** Hermes 0.19 live transcript id (deleg_<hex>). */
+  delegationId?: string;
+  /** Index into the parallel batch / live log task-N.log. */
+  taskIndex?: number;
+  /** Absolute path to the live transcript log when known. */
+  liveTranscriptPath?: string;
 }
 
 export interface PanelBackgroundProcess {
@@ -85,35 +91,110 @@ function applyTodoWrite(current: PanelTodo[], incoming: PanelTodo[], merge: bool
   return next;
 }
 
+function extractDelegationMeta(output: string | null | undefined): {
+  delegationId?: string;
+  liveTranscripts: string[];
+  resultSummaries: Array<{ taskIndex: number; summary: string | null; status?: string; livePath?: string }>;
+} {
+  const parsed = safeParseJson(output);
+  const liveTranscripts: string[] = [];
+  const resultSummaries: Array<{
+    taskIndex: number;
+    summary: string | null;
+    status?: string;
+    livePath?: string;
+  }> = [];
+
+  if (!parsed) {
+    return { liveTranscripts, resultSummaries };
+  }
+
+  let delegationId =
+    typeof parsed.delegation_id === 'string' && parsed.delegation_id.trim()
+      ? parsed.delegation_id.trim()
+      : undefined;
+
+  const rawLive = parsed.live_transcripts;
+  if (Array.isArray(rawLive)) {
+    for (const item of rawLive) {
+      if (typeof item === 'string' && item.trim()) liveTranscripts.push(item.trim());
+    }
+  }
+
+  if (!delegationId && liveTranscripts[0]) {
+    const match = liveTranscripts[0].match(/\/live\/(deleg_[0-9a-fA-F]+)\//);
+    if (match) delegationId = match[1];
+  }
+
+  const results = Array.isArray(parsed.results) ? parsed.results : [];
+  results.forEach((item, index) => {
+    if (!item || typeof item !== 'object') return;
+    const row = item as Record<string, unknown>;
+    const taskIndex =
+      typeof row.task_index === 'number' && Number.isFinite(row.task_index)
+        ? row.task_index
+        : index;
+    const livePath =
+      typeof row.live_transcript === 'string' && row.live_transcript.trim()
+        ? row.live_transcript.trim()
+        : undefined;
+    if (livePath && !liveTranscripts.includes(livePath)) liveTranscripts.push(livePath);
+    if (!delegationId && livePath) {
+      const match = livePath.match(/\/live\/(deleg_[0-9a-fA-F]+)\//);
+      if (match) delegationId = match[1];
+    }
+    resultSummaries.push({
+      taskIndex,
+      summary: typeof row.summary === 'string' ? row.summary : null,
+      status: typeof row.status === 'string' ? row.status : undefined,
+      livePath,
+    });
+  });
+
+  return { delegationId, liveTranscripts, resultSummaries };
+}
+
 function deriveSubagents(event: ToolActivityEvent, eventIndex: number): PanelSubagent[] {
   const args = safeParseJson(event.input) ?? {};
   const status: PanelSubagent['status'] = event.status === 'completed' ? 'completed' : 'running';
   const sharedContext = typeof args.context === 'string' ? args.context : undefined;
+  const meta = extractDelegationMeta(event.output);
 
   const tasks = Array.isArray(args.tasks)
     ? args.tasks.filter((task): task is Record<string, unknown> => !!task && typeof task === 'object')
     : [];
 
   if (tasks.length > 0) {
-    return tasks.map((task, taskIndex) => ({
-      id: `subagent-${eventIndex}-${taskIndex}`,
-      goal: String(task.goal ?? 'Subagent task').trim() || 'Subagent task',
-      context: typeof task.context === 'string' ? task.context : sharedContext,
-      status,
-      output: event.output,
-    }));
+    return tasks.map((task, taskIndex) => {
+      const result = meta.resultSummaries.find((row) => row.taskIndex === taskIndex);
+      const livePath = result?.livePath ?? meta.liveTranscripts[taskIndex];
+      return {
+        id: `subagent-${eventIndex}-${taskIndex}`,
+        goal: String(task.goal ?? 'Subagent task').trim() || 'Subagent task',
+        context: typeof task.context === 'string' ? task.context : sharedContext,
+        status,
+        output: result?.summary ?? event.output,
+        delegationId: meta.delegationId,
+        taskIndex,
+        liveTranscriptPath: livePath,
+      };
+    });
   }
 
   const goal = typeof args.goal === 'string' && args.goal.trim()
     ? args.goal.trim()
     : extractJsonStringField(event.input, 'goal') ?? 'Subagent task';
 
+  const result = meta.resultSummaries.find((row) => row.taskIndex === 0);
   return [{
     id: `subagent-${eventIndex}-0`,
     goal,
     context: sharedContext,
     status,
-    output: event.output,
+    output: result?.summary ?? event.output,
+    delegationId: meta.delegationId,
+    taskIndex: 0,
+    liveTranscriptPath: result?.livePath ?? meta.liveTranscripts[0],
   }];
 }
 

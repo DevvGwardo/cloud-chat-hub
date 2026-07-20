@@ -471,7 +471,7 @@ export async function proxyHermesAgentLoopToDataStream(input: {
   customTools?: unknown[];
   activeProfile?: string;
   conversationId?: string;
-  /** Hermes agent reasoning effort ('none'|'minimal'|'low'|'medium'|'high'|'xhigh'). */
+  /** Hermes agent reasoning effort ('none'|'minimal'|'low'|'medium'|'high'|'xhigh'|'max'|'ultra'). */
   reasoningEffort?: string;
   /** Phase 7: opt-in gateway /v1/runs transport via bridge translate layer. */
   hermesUseRuns?: boolean;

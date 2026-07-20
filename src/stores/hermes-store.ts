@@ -105,10 +105,18 @@ export interface LoopState {
 }
 
 /** Reasoning effort levels accepted by the Hermes agent (hermes_constants.parse_reasoning_effort). */
-export type HermesReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type HermesReasoningEffort =
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
+  | 'ultra';
 
 export const HERMES_REASONING_EFFORTS: HermesReasoningEffort[] = [
-  'none', 'minimal', 'low', 'medium', 'high', 'xhigh',
+  'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra',
 ];
 
 interface HermesState {

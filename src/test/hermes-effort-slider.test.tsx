@@ -20,8 +20,8 @@ describe('HermesEffortSlider', () => {
     expect(screen.getByText('Smarter')).toBeInTheDocument();
 
     const slider = screen.getByRole('slider', { name: 'Reasoning effort' });
-    fireEvent.change(slider, { target: { value: '5' } });
-    expect(useHermesStore.getState().reasoningEffort).toBe('xhigh');
+    fireEvent.change(slider, { target: { value: '7' } });
+    expect(useHermesStore.getState().reasoningEffort).toBe('ultra');
 
     fireEvent.change(slider, { target: { value: '0' } });
     expect(useHermesStore.getState().reasoningEffort).toBe('none');

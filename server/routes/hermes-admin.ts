@@ -271,6 +271,26 @@ export function registerHermesAdminRoute(app: Express) {
     await proxyTo(req, res, '/checkpoints');
   });
 
+  app.get('/api/hermes/delegation/live/latest', async (req: Request, res: Response) => {
+    const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    await proxyTo(req, res, `/delegation/live/latest${qs}`);
+  });
+
+  app.get('/api/hermes/delegation/live/:delegationId', async (req: Request, res: Response) => {
+    const id = encodeURIComponent(String(req.params.delegationId || ''));
+    await proxyTo(req, res, `/delegation/live/${id}`);
+  });
+
+  app.get(
+    '/api/hermes/delegation/live/:delegationId/task/:taskIndex',
+    async (req: Request, res: Response) => {
+      const id = encodeURIComponent(String(req.params.delegationId || ''));
+      const index = encodeURIComponent(String(req.params.taskIndex || '0'));
+      const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+      await proxyTo(req, res, `/delegation/live/${id}/task/${index}${qs}`);
+    },
+  );
+
   app.post('/api/hermes/checkpoints/prune', async (req: Request, res: Response) => {
     await proxyTo(req, res, '/checkpoints/prune', { method: 'POST', body: '{}' });
   });
