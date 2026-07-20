@@ -70,4 +70,36 @@ describe('hermes-store toolset defaults', () => {
     expect(enabled).toContain('video');
     expect(enabled).toContain('video_gen');
   });
+
+  it('disables Computer Use when enabling Runs so gateway routing can work', () => {
+    useHermesStore.setState({
+      useRuns: false,
+      toolsets: {
+        ...useHermesStore.getState().toolsets,
+        computer: true,
+      },
+    });
+
+    useHermesStore.getState().setUseRuns(true);
+
+    const state = useHermesStore.getState();
+    expect(state.useRuns).toBe(true);
+    expect(state.toolsets.computer).toBe(false);
+  });
+
+  it('turns off Runs when Computer Use is enabled', () => {
+    useHermesStore.setState({
+      useRuns: true,
+      toolsets: {
+        ...useHermesStore.getState().toolsets,
+        computer: false,
+      },
+    });
+
+    useHermesStore.getState().setToolset('computer', true);
+
+    const state = useHermesStore.getState();
+    expect(state.toolsets.computer).toBe(true);
+    expect(state.useRuns).toBe(false);
+  });
 });

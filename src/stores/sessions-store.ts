@@ -93,7 +93,8 @@ export const useSessionsStore = create<SessionsState>()((set, get) => ({
 
   refreshSessions: async () => {
     const { sessions, query } = get();
-    const limit = Math.max(SESSIONS_PAGE_SIZE, sessions.length);
+    // Cap silent refresh so scrolled windows don't re-fetch unbounded rows every 10s.
+    const limit = Math.min(Math.max(SESSIONS_PAGE_SIZE, sessions.length), SESSIONS_PAGE_SIZE * 2);
     try {
       const page = await apiFetchSessions({ limit, offset: 0, q: query });
       if (get().query !== query) return;

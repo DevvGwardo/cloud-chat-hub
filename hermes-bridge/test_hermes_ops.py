@@ -103,9 +103,17 @@ class HermesOpsTests(unittest.TestCase):
             hermes_ops.select_pet("")
 
     def test_gateway_probe_offline_shape(self):
-        res = hermes_ops.probe_gateway_capabilities(base_url="http://127.0.0.1:1")
+        hermes_ops.clear_gateway_capabilities_cache()
+        res = hermes_ops.probe_gateway_capabilities(base_url="http://127.0.0.1:1", force=True)
         self.assertIn("reachable", res)
         self.assertIn("recommended_transport", res)
+
+    def test_gateway_probe_uses_ttl_cache(self):
+        hermes_ops.clear_gateway_capabilities_cache()
+        first = hermes_ops.probe_gateway_capabilities(base_url="http://127.0.0.1:1", force=True)
+        second = hermes_ops.probe_gateway_capabilities(base_url="http://127.0.0.1:1")
+        self.assertEqual(first.get("reachable"), second.get("reachable"))
+        self.assertEqual(first.get("error"), second.get("error"))
 
     def test_checkpoint_entries_format_and_workdir_resolution(self):
         projects = [

@@ -28,6 +28,9 @@ _VALID_REASONING_EFFORT = frozenset({"none", "minimal", "low", "medium", "high",
 _AGENT_LOOP_PARITY_TOOLSETS = frozenset({"computer", "computer_use"})
 _active_runs_lock = threading.Lock()
 _active_runs: dict[str, "_ActiveRun"] = {}
+# Connect fast; allow up to 5 minutes between SSE lines (long tool steps) so a
+# hung gateway cannot pin a bridge worker forever with timeout=None.
+_DEFAULT_RUN_SSE_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
 
 
 @dataclass
@@ -681,7 +684,7 @@ def iter_run_sse_events(
     base_url: str,
     api_key: Optional[str],
     run_id: str,
-    timeout: Optional[float] = None,
+    timeout: Optional[httpx.Timeout] = None,
 ):
     """Yield parsed JSON dicts from GET /v1/runs/{run_id}/events SSE."""
     base_url = assert_safe_gateway_base_url(base_url)
@@ -692,7 +695,8 @@ def iter_run_sse_events(
     if key:
         headers["Authorization"] = f"Bearer {key}"
 
-    with httpx.Client(timeout=timeout) as client:
+    client_timeout = timeout if timeout is not None else _DEFAULT_RUN_SSE_TIMEOUT
+    with httpx.Client(timeout=client_timeout) as client:
         with client.stream("GET", url, headers=headers) as resp:
             resp.raise_for_status()
             for line in resp.iter_lines():
@@ -727,7 +731,6 @@ def pump_run_events(
         base_url=base_url,
         api_key=api_key,
         run_id=run_id,
-        timeout=None,
     ):
         if should_stop and should_stop():
             stop_run(base_url=base_url, api_key=api_key, run_id=run_id)

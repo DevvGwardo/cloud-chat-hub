@@ -235,9 +235,15 @@ export const useHermesStore = create<HermesState>()(
       useRuns: false,
 
       setToolset: (key, enabled) =>
-        set((state) => ({
-          toolsets: { ...state.toolsets, [key]: enabled },
-        })),
+        set((state) => {
+          const toolsets = { ...state.toolsets, [key]: enabled };
+          // Computer Use has no screenshot payloads on /v1/runs — turning it on
+          // while Runs is enabled would silently force agent-loop. Drop Runs so
+          // the transport toggle matches what chat actually does.
+          const useRuns =
+            key === 'computer' && enabled && state.useRuns ? false : state.useRuns;
+          return { toolsets, useRuns };
+        }),
 
       setUnderlyingProvider: (provider) =>
         set(() => ({ underlyingProvider: provider })),
@@ -252,7 +258,18 @@ export const useHermesStore = create<HermesState>()(
         set(() => ({ useWorktree: enabled })),
 
       setUseRuns: (enabled) =>
-        set(() => ({ useRuns: enabled })),
+        set((state) => {
+          if (!enabled) return { useRuns: false };
+          // Gateway /v1/runs cannot stream Computer Use screenshots. Auto-disable
+          // CU so enabling Runs actually routes via the gateway when other gates pass.
+          if (state.toolsets.computer) {
+            return {
+              useRuns: true,
+              toolsets: { ...state.toolsets, computer: false },
+            };
+          }
+          return { useRuns: true };
+        }),
 
       getEnabledToolsets: () => {
         const ts = get().toolsets;

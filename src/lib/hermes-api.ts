@@ -3,6 +3,23 @@ import { getActiveProfile } from '@/stores/profiles-store';
 
 const BRIDGE_BASE = '/api/hermes';
 
+/** jsdom / older runtimes may lack AbortSignal.timeout — polyfill with AbortController. */
+function abortAfter(ms: number): AbortSignal {
+  const timeoutFn = (AbortSignal as typeof AbortSignal & {
+    timeout?: (delay: number) => AbortSignal;
+  }).timeout;
+  if (typeof timeoutFn === 'function') {
+    return timeoutFn(ms);
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  // Avoid keeping the process awake in Node if the request finishes early.
+  if (typeof timer === 'object' && timer && 'unref' in timer) {
+    (timer as NodeJS.Timeout).unref?.();
+  }
+  return controller.signal;
+}
+
 export class HermesApiError extends Error {
   status: number;
   data: Record<string, unknown>;
@@ -178,6 +195,9 @@ export interface HermesUsageOverview {
   recent_days: HermesUsageDay[];
 }
 
+/** Default client timeout for bridge ops. Long CLI jobs pass a longer signal. */
+export const HERMES_FETCH_TIMEOUT_MS = 15_000;
+
 async function hermesFetch<T = unknown>(
   path: string,
   options?: RequestInit,
@@ -185,6 +205,7 @@ async function hermesFetch<T = unknown>(
   const baseUrl = getApiBaseUrl();
   const response = await fetch(`${baseUrl}${BRIDGE_BASE}${path}`, {
     ...options,
+    signal: options?.signal ?? abortAfter(HERMES_FETCH_TIMEOUT_MS),
     headers: {
       'Content-Type': 'application/json',
       'X-Hermes-Profile': getActiveProfile(),
@@ -527,7 +548,9 @@ export async function updateGoalsConfig(body: Partial<GoalsConfig>): Promise<Goa
 }
 
 export async function fetchInsights(days = 7): Promise<{ ok: boolean; days: number; report: string }> {
-  return hermesFetch(`/insights?days=${days}`);
+  return hermesFetch(`/insights?days=${days}`, {
+    signal: abortAfter(60_000),
+  });
 }
 
 // ─── Journey / learning graph ─────────────────────────────────────────────

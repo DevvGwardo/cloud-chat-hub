@@ -23,6 +23,9 @@ export function useBackgroundRuns() {
     let cancelled = false;
 
     const poll = async () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
       try {
         const response = await fetch(`${getApiBaseUrl()}/api/hermes/chat/active`);
         if (!response.ok || cancelled) return;
@@ -52,11 +55,17 @@ export function useBackgroundRuns() {
       }
     };
 
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void poll();
+    };
+
     void poll();
     const timer = setInterval(() => { void poll(); }, POLL_INTERVAL_MS);
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
       cancelled = true;
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, []);
 }

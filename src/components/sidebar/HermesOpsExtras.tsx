@@ -102,49 +102,62 @@ export function HermesOpsExtras() {
   const [petId, setPetId] = useState('');
   const useRuns = useHermesStore((s) => s.useRuns);
   const setUseRuns = useHermesStore((s) => s.setUseRuns);
+  const computerEnabled = useHermesStore((s) => s.toolsets.computer);
   const chatTransportLabel = useRuns
-    ? 'runs (gateway-native; no repo/toolset overrides)'
+    ? computerEnabled
+      ? 'runs requested (blocked by Computer Use → agent-loop)'
+      : 'runs (gateway when request supports it)'
     : 'agent-loop (default)';
 
-  const load = useCallback(async () => {
+  const loadPrimary = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [m, c, cu, comp, b, i, p, g, pl, hk, ls, sec, dash] = await Promise.all([
+      const [m, c, cu, comp, g] = await Promise.all([
         fetchMemoryStatus().catch(() => null),
         fetchCheckpoints().catch(() => null),
         fetchCuratorStatus().catch(() => null),
         fetchComputerUseStatus().catch(() => null),
-        fetchSkillBundles().catch(() => ({ bundles: [] as SkillBundle[] })),
-        fetchInsights(7).catch(() => ({ report: '' })),
-        fetchPetsStatus().catch(() => null),
         fetchGatewayCapabilities().catch(() => null),
-        fetchPluginsStatus(120).catch(() => null),
-        fetchHooksStatus().catch(() => null),
-        fetchLspStatus().catch(() => null),
-        fetchSecretsStatus().catch(() => null),
-        fetchHermesDashboardUrl().catch(() => ({ ok: false, url: null })),
       ]);
       setMemory(m);
       setCheckpoints(c);
       setCurator(cu);
       setComputer(comp);
-      setBundles(b.bundles || []);
-      setInsights(i.report || '');
-      setPets(p);
       setGateway(g);
-      setPlugins(pl?.plugins || []);
-      setPluginsSummary(pl ? { total: pl.total, enabled: pl.enabled_count } : null);
-      setHooks(hk);
-      setLsp(ls);
-      setSecrets(sec);
-      setDashboardUrl(dash.ok && dash.url ? dash.url : null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load ops status');
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const loadSecondary = useCallback(async () => {
+    const [b, i, p, pl, hk, ls, sec, dash] = await Promise.all([
+      fetchSkillBundles().catch(() => ({ bundles: [] as SkillBundle[] })),
+      fetchInsights(7).catch(() => ({ report: '' })),
+      fetchPetsStatus().catch(() => null),
+      fetchPluginsStatus(120).catch(() => null),
+      fetchHooksStatus().catch(() => null),
+      fetchLspStatus().catch(() => null),
+      fetchSecretsStatus().catch(() => null),
+      fetchHermesDashboardUrl().catch(() => ({ ok: false, url: null })),
+    ]);
+    setBundles(b.bundles || []);
+    setInsights(i.report || '');
+    setPets(p);
+    setPlugins(pl?.plugins || []);
+    setPluginsSummary(pl ? { total: pl.total, enabled: pl.enabled_count } : null);
+    setHooks(hk);
+    setLsp(ls);
+    setSecrets(sec);
+    setDashboardUrl(dash.ok && dash.url ? dash.url : null);
+  }, []);
+
+  const load = useCallback(async () => {
+    await loadPrimary();
+    void loadSecondary();
+  }, [loadPrimary, loadSecondary]);
 
   useEffect(() => {
     void load();
@@ -855,7 +868,11 @@ export function HermesOpsExtras() {
             type="button"
             onClick={() => setUseRuns(!useRuns)}
             aria-pressed={useRuns}
-            title="Use gateway /v1/runs for Hermes chat when the request supports it"
+            title={
+              useRuns
+                ? 'Using gateway /v1/runs when the request supports it (Computer Use is disabled while Runs is on)'
+                : 'Use gateway /v1/runs for Hermes chat when the request supports it. Enabling this turns off Computer Use.'
+            }
             className={cn(
               'shrink-0 rounded-md border px-2 py-1 text-[10px] transition-colors',
               useRuns
@@ -867,7 +884,11 @@ export function HermesOpsExtras() {
           </button>
         </div>
         <p className="mt-2 text-[10px] leading-snug text-muted-foreground/55">
-          Use gateway /v1/runs when the request supports it. Spark still falls back to the Hermes agent loop for repo-mode, custom tools, Computer Use, and other parity gaps.
+          {useRuns
+            ? 'Runs is on — Computer Use stays off so chat can use the gateway. Repo-mode, custom tools, and other parity gaps still fall back to the agent loop.'
+            : 'Use gateway /v1/runs when the request supports it. Enabling Runs turns off Computer Use (no screenshots on the runs path).'}
+          {' '}
+          Mid-turn reconnect still uses background partial polling; the /api/hermes/chat/stream resume buffer is server-ready but not wired into the AI SDK chat client yet.
         </p>
       </div>
 

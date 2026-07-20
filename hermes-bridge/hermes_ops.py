@@ -978,18 +978,43 @@ def claw_migrate(
 
 # ─── Hermes gateway /v1 capabilities + runs foundation ─────────────────────
 
+_GATEWAY_CAPS_TTL_SECONDS = 45.0
+_gateway_caps_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_gateway_caps_lock = threading.Lock()
+
+
+def clear_gateway_capabilities_cache() -> None:
+    """Drop the process-local capabilities cache (tests / after hermes update)."""
+    with _gateway_caps_lock:
+        _gateway_caps_cache.clear()
+
+
 def probe_gateway_capabilities(
     base_url: str = "http://127.0.0.1:8642",
     api_key: Optional[str] = None,
+    *,
+    force: bool = False,
 ) -> dict[str, Any]:
-    """Probe local Hermes API server for /v1/runs and related features."""
+    """Probe local Hermes API server for /v1/runs and related features.
+
+    Results are cached for ``_GATEWAY_CAPS_TTL_SECONDS`` so UI mounts and chat
+    routing don't each pay two synchronous urllib round-trips.
+    """
     import urllib.error
     import urllib.request
 
     base_url = assert_safe_gateway_base_url(base_url)
+    key = api_key or os.environ.get("HERMES_API_KEY") or os.environ.get("API_SERVER_KEY") or ""
+    cache_key = f"{base_url}|{bool(key)}"
+    now = time.time()
+    if not force:
+        with _gateway_caps_lock:
+            hit = _gateway_caps_cache.get(cache_key)
+            if hit and now - hit[0] < _GATEWAY_CAPS_TTL_SECONDS:
+                return dict(hit[1])
+
     url = base_url.rstrip("/") + "/health"
     headers = {"Accept": "application/json"}
-    key = api_key or os.environ.get("HERMES_API_KEY") or os.environ.get("API_SERVER_KEY") or ""
     if key:
         headers["Authorization"] = f"Bearer {key}"
     health_body = None
@@ -999,13 +1024,16 @@ def probe_gateway_capabilities(
             health_body = resp.read().decode("utf-8", errors="replace")
             health_ok = resp.status < 400
     except Exception as exc:
-        return {
+        result = {
             "reachable": False,
             "base_url": base_url,
             "error": str(exc)[:300],
             "features": {},
             "recommended_transport": "bridge",
         }
+        with _gateway_caps_lock:
+            _gateway_caps_cache[cache_key] = (now, result)
+        return dict(result)
 
     caps_url = base_url.rstrip("/") + "/v1/capabilities"
     features: dict[str, Any] = {}
@@ -1020,7 +1048,7 @@ def probe_gateway_capabilities(
         pass
 
     runs = bool(features.get("run_submission") or features.get("runs"))
-    return {
+    result = {
         "reachable": health_ok,
         "base_url": base_url,
         "health_body": (health_body or "")[:500] or None,
@@ -1030,6 +1058,9 @@ def probe_gateway_capabilities(
         "skills_api": bool(features.get("skills_api")),
         "recommended_transport": "runs" if runs else "bridge",
     }
+    with _gateway_caps_lock:
+        _gateway_caps_cache[cache_key] = (now, result)
+    return dict(result)
 
 
 def _gateway_api_key(api_key: Optional[str] = None) -> str:
