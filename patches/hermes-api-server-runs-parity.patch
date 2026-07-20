@@ -1,11 +1,12 @@
 diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
-index 5ba09d674..23076409c 100644
+index 973ba5507..fe9843e6d 100644
 --- a/gateway/platforms/api_server.py
 +++ b/gateway/platforms/api_server.py
-@@ -109,6 +109,44 @@ _TRUE_REQUEST_BOOL_STRINGS = frozenset({"1", "true", "yes", "on"})
+@@ -139,6 +139,45 @@ _TRUE_REQUEST_BOOL_STRINGS = frozenset({"1", "true", "yes", "on"})
  _FALSE_REQUEST_BOOL_STRINGS = frozenset({"0", "false", "no", "off"})
  
  
++
 +def _validate_run_cwd(cwd: str) -> Optional[str]:
 +    """Validate an absolute existing directory for /v1/runs cwd override.
 +
@@ -47,7 +48,7 @@ index 5ba09d674..23076409c 100644
  def _coerce_request_bool(value: Any, default: bool = False) -> bool:
      """Normalize boolean-like API payload values.
  
-@@ -1241,6 +1279,9 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -1754,6 +1793,9 @@ class APIServerAdapter(BasePlatformAdapter):
          tool_complete_callback=None,
          gateway_session_key: Optional[str] = None,
          route: Optional[Dict[str, Any]] = None,
@@ -57,7 +58,7 @@ index 5ba09d674..23076409c 100644
      ) -> Any:
          """
          Create an AIAgent instance using the gateway's runtime config.
-@@ -1273,7 +1314,11 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -1787,7 +1829,11 @@ class APIServerAdapter(BasePlatformAdapter):
          from hermes_cli.tools_config import _get_platform_tools
  
          runtime_kwargs = _resolve_runtime_agent_kwargs()
@@ -70,7 +71,7 @@ index 5ba09d674..23076409c 100644
          model = _resolve_gateway_model()
  
          # When the primary provider's auth fails (expired token / 429 quota
-@@ -1333,8 +1378,34 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -1847,8 +1893,34 @@ class APIServerAdapter(BasePlatformAdapter):
                  gateway_session_key or session_id,
              )
  
@@ -106,7 +107,7 @@ index 5ba09d674..23076409c 100644
  
          max_iterations = _current_max_iterations()
  
-@@ -1493,6 +1564,8 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -2031,6 +2103,8 @@ class APIServerAdapter(BasePlatformAdapter):
                  "run_events_sse": True,
                  "run_stop": True,
                  "run_approval_response": True,
@@ -115,7 +116,7 @@ index 5ba09d674..23076409c 100644
                  "tool_progress_events": True,
                  "approval_events": True,
                  "session_resources": True,
-@@ -3992,6 +4065,7 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -4595,6 +4669,7 @@ class APIServerAdapter(BasePlatformAdapter):
          chat_id: str = "",
          session_key: str = "",
          session_id: str = "",
@@ -123,7 +124,7 @@ index 5ba09d674..23076409c 100644
      ) -> list:
          """Bind session contextvars for an API-server agent run.
  
-@@ -4015,6 +4089,7 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -4618,6 +4693,7 @@ class APIServerAdapter(BasePlatformAdapter):
              chat_id=chat_id,
              session_key=session_key,
              session_id=session_id,
@@ -131,10 +132,11 @@ index 5ba09d674..23076409c 100644
              async_delivery=False,
          )
  
-@@ -4285,6 +4360,36 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -4897,6 +4973,37 @@ class APIServerAdapter(BasePlatformAdapter):
+ 
          # Per-client model routing for /v1/runs (see model_routes).
          route = self._resolve_route(body.get("model"))
- 
++
 +        cwd_raw = body.get("cwd")
 +        if cwd_raw is None:
 +            cwd_raw = body.get("working_directory")
@@ -165,24 +167,24 @@ index 5ba09d674..23076409c 100644
 +
 +            run_reasoning_config = parse_reasoning_effort(body.get("reasoning_effort"))
 +
-         async def _run_and_close():
-             try:
-                 self._set_run_status(run_id, "running")
-@@ -4295,6 +4400,9 @@ class APIServerAdapter(BasePlatformAdapter):
-                     tool_progress_callback=event_cb,
-                     gateway_session_key=gateway_session_key,
-                     route=route,
-+                    enabled_toolsets_override=run_toolsets,
-+                    provider_override=run_provider,
-+                    reasoning_config_override=run_reasoning_config,
-                 )
+         # Background task outlives the HTTP response (and thus the middleware
+         # profile scope). Capture now and re-enter inside the task/executor.
+         request_profile = _api_request_profile.get()
+@@ -4924,6 +5031,9 @@ class APIServerAdapter(BasePlatformAdapter):
+                         tool_progress_callback=event_cb,
+                         gateway_session_key=gateway_session_key,
+                         route=route,
++                        enabled_toolsets_override=run_toolsets,
++                        provider_override=run_provider,
++                        reasoning_config_override=run_reasoning_config,
+                     )
                  self._active_run_agents[run_id] = agent
  
-@@ -4343,6 +4451,7 @@ class APIServerAdapter(BasePlatformAdapter):
-                         approval_token = set_current_session_key(approval_session_key)
-                         session_tokens = self._bind_api_server_session(
-                             session_key=approval_session_key,
-+                            cwd=run_cwd or "",
-                         )
-                         register_gateway_notify(approval_session_key, _approval_notify)
-                         r = agent.run_conversation(
+@@ -4976,6 +5086,7 @@ class APIServerAdapter(BasePlatformAdapter):
+                             approval_token = set_current_session_key(approval_session_key)
+                             session_tokens = self._bind_api_server_session(
+                                 session_key=approval_session_key,
++                                cwd=run_cwd or "",
+                             )
+                             register_gateway_notify(approval_session_key, _approval_notify)
+                             r = agent.run_conversation(

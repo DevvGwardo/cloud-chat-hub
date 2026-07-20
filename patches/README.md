@@ -11,11 +11,16 @@ re-apply:
 
 ```bash
 cd ~/.hermes/hermes-agent
-patch -p1 < /path/to/cloud-chat-hub/patches/hermes-api-server-runs-parity.patch
+git apply /path/to/cloud-chat-hub/patches/hermes-api-server-runs-parity.patch
+# or: patch -p1 < .../hermes-api-server-runs-parity.patch
 ```
 
 Restart the Hermes gateway (API server on port 8642) so `/v1/capabilities`
 advertises `features.runs_parity`.
+
+**Rebased for Hermes 0.19.0 (2026.7.20).** If `git apply` fails after a future
+update, regenerate against the current `api_server.py` — line anchors drift
+quickly around `_handle_runs` / `_create_agent`.
 
 ## What the runs-parity patch adds
 

@@ -14,7 +14,9 @@ export const HERMES_EFFORT_LABELS: Record<HermesReasoningEffort, string> = {
   low: 'Low',
   medium: 'Medium',
   high: 'High',
-  xhigh: 'Ultra',
+  xhigh: 'XHigh',
+  max: 'Max',
+  ultra: 'Ultra',
 };
 
 /**
@@ -62,7 +64,7 @@ export function HermesEffortSlider() {
         <span className="hidden sm:inline">Effort</span>
         {/* Fixed width so changing levels (Off ↔ Minimal ↔ Ultra) doesn't
             reflow the composer toolbar. Sized to the widest label. */}
-        <span className="inline-block w-12 text-left text-primary">{label}</span>
+        <span className="inline-block w-14 text-left text-primary">{label}</span>
       </button>
 
       {open && (

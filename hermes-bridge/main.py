@@ -15,6 +15,7 @@ from typing import Optional
 import httpx
 import pricing
 import mcp_telemetry
+import delegation_live
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -3056,6 +3057,59 @@ async def list_models():
     return {"object": "list", "data": models}
 
 
+def _load_provider_visibility(hermes_home: Optional[Path] = None) -> dict:
+    """Read Hermes 0.19 provider hide flags from config.yaml.
+
+    Returns ``{"excluded": set[str], "disabled": set[str]}`` where
+    ``excluded`` comes from ``model_catalog.excluded_providers`` and
+    ``disabled`` from ``providers.<name>.enabled: false``.
+    """
+    excluded: set[str] = set()
+    disabled: set[str] = set()
+    try:
+        config_path = (hermes_home or Path.home() / ".hermes") / "config.yaml"
+        if not config_path.is_file():
+            return {"excluded": excluded, "disabled": disabled}
+        try:
+            import yaml
+            with open(config_path) as f:
+                cfg = yaml.safe_load(f) or {}
+        except ImportError:
+            return {"excluded": excluded, "disabled": disabled}
+        if not isinstance(cfg, dict):
+            return {"excluded": excluded, "disabled": disabled}
+
+        catalog = cfg.get("model_catalog") or {}
+        if isinstance(catalog, dict):
+            raw_excluded = catalog.get("excluded_providers") or []
+            if isinstance(raw_excluded, list):
+                excluded = {
+                    str(item).strip().lower()
+                    for item in raw_excluded
+                    if str(item).strip()
+                }
+
+        providers = cfg.get("providers") or {}
+        if isinstance(providers, dict):
+            for name, block in providers.items():
+                pid = str(name).strip().lower()
+                if not pid or not isinstance(block, dict):
+                    continue
+                flag = block.get("enabled", True)
+                enabled = True
+                if isinstance(flag, bool):
+                    enabled = flag
+                elif isinstance(flag, str):
+                    enabled = flag.strip().lower() not in {"false", "0", "no", "off"}
+                else:
+                    enabled = bool(flag)
+                if not enabled:
+                    disabled.add(pid)
+    except Exception:
+        pass
+    return {"excluded": excluded, "disabled": disabled}
+
+
 @app.get("/v1/providers")
 async def list_providers(request: Request):
     """List configured providers with credential status and known models.
@@ -3075,9 +3129,11 @@ async def list_providers(request: Request):
     global_moa_config = _load_moa_config()
     moa_config = profile_moa_config if _enabled_moa_preset_names(profile_moa_config) else global_moa_config
     moa_models = _enabled_moa_preset_names(moa_config)
+    visibility = _load_provider_visibility(profile_home)
+    hidden = visibility["excluded"] | visibility["disabled"]
 
     data = []
-    if moa_models:
+    if moa_models and MOA_PROVIDER_ID not in hidden:
         data.append({
             "id": MOA_PROVIDER_ID,
             "name": MOA_PROVIDER_NAME,
@@ -3089,6 +3145,8 @@ async def list_providers(request: Request):
         })
 
     for pid, cfg in _PROVIDER_CONFIG.items():
+        if pid in hidden:
+            continue
         try:
             models = _models_for_provider(pid)
         except Exception:
@@ -3101,6 +3159,14 @@ async def list_providers(request: Request):
             "credentialed": _provider_has_credentials(pid),
             "models": models,
         })
+
+    if default_provider in hidden:
+        # Prefer an enabled credentialed provider so the picker default stays usable.
+        fallback = next(
+            (row["id"] for row in data if row.get("credentialed") and row["id"] != MOA_PROVIDER_ID),
+            None,
+        )
+        default_provider = fallback or (data[0]["id"] if data else "openrouter")
 
     # The agent's CLI-configured default model (config.yaml `model.default`),
     # read fresh so a model change in the terminal is reflected by clients that
@@ -3206,6 +3272,63 @@ async def put_fallback(request: Request):
         return JSONResponse(status_code=400, content={"error": str(exc)})
     dump()
     return {"object": "fallback.chain", "providers": saved}
+
+
+@app.get("/delegation/live/latest")
+async def get_delegation_live_latest(request: Request):
+    """Return the most recently started Hermes live-transcript manifest."""
+    home = _ops_home(request)
+    try:
+        limit = int(request.query_params.get("limit", "1"))
+    except (TypeError, ValueError):
+        limit = 1
+    if limit <= 1:
+        manifest = await _ops_thread(delegation_live.latest_manifest, home)
+        if not manifest:
+            return JSONResponse(status_code=404, content={"error": "no live delegations"})
+        return {"object": "delegation.live.manifest", **manifest}
+    manifests = await _ops_thread(delegation_live.list_recent_manifests, home, limit=limit)
+    return {"object": "list", "data": manifests}
+
+
+@app.get("/delegation/live/{delegation_id}")
+async def get_delegation_live_manifest(delegation_id: str, request: Request):
+    """Read Hermes cache/delegation/live/<id>/manifest.json."""
+    home = _ops_home(request)
+    try:
+        manifest = await _ops_thread(delegation_live.read_manifest, home, delegation_id)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    except FileNotFoundError as exc:
+        return JSONResponse(status_code=404, content={"error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": f"manifest read failed: {exc}"})
+    return {"object": "delegation.live.manifest", **manifest}
+
+
+@app.get("/delegation/live/{delegation_id}/task/{task_index}")
+async def get_delegation_live_task_log(delegation_id: str, task_index: int, request: Request):
+    """Tail an append-only subagent live transcript log by byte offset."""
+    home = _ops_home(request)
+    try:
+        offset = int(request.query_params.get("offset", "0"))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        payload = await _ops_thread(
+            delegation_live.tail_task_log,
+            home,
+            delegation_id,
+            task_index,
+            offset=offset,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    except FileNotFoundError as exc:
+        return JSONResponse(status_code=404, content={"error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": f"log read failed: {exc}"})
+    return {"object": "delegation.live.tail", **payload}
 
 
 @app.get("/checkpoints")
@@ -4907,7 +5030,9 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             reasoning_effort = (
                 reasoning_effort_raw.strip().lower()
                 if isinstance(reasoning_effort_raw, str)
-                and reasoning_effort_raw.strip().lower() in {"none", "minimal", "low", "medium", "high", "xhigh"}
+                and reasoning_effort_raw.strip().lower() in {
+                    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+                }
                 else None
             )
             if reasoning_effort:
