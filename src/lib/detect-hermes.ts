@@ -46,12 +46,72 @@ export interface HermesBridgeStatus {
   hermesDefaultModel?: string;
 }
 
-/**
- * Check if the Hermes bridge is running locally and get its credential status.
- * This is used to determine if the user needs to provide an API key manually
- * or if Hermes can use its local credentials fallback.
- */
-export async function detectHermesBridge(): Promise<HermesBridgeStatus | null> {
+/** Short TTL so StatusPill + AppLayout model-sync share one health round-trip. */
+const HEALTH_CACHE_TTL_MS = 5_000;
+
+let healthCache: { at: number; profile: string; status: HermesBridgeStatus | null } | null = null;
+let healthInflight: { profile: string; promise: Promise<HermesBridgeStatus | null> } | null = null;
+
+function parseHealthPayload(data: {
+  status?: string;
+  has_openrouter_creds?: boolean;
+  has_minimax_creds?: boolean;
+  provider_credentials?: Record<string, boolean>;
+  default_model_credentialed?: boolean;
+  credential_sources?: {
+    env?: boolean;
+    auth_json?: boolean;
+    openclaw_gateway?: boolean;
+  };
+  credential_sources_minimax?: {
+    env?: boolean;
+    openclaw_gateway?: boolean;
+  };
+  launch_token_present?: boolean;
+  brain_initialized?: boolean;
+  active_requests?: number;
+  hermes_provider?: string;
+  hermes_base_url?: string;
+  hermes_default_model?: string;
+}): HermesBridgeStatus | null {
+  if (data.status !== 'ok') {
+    return null;
+  }
+
+  const providerCredentials = data.provider_credentials ?? {};
+  const defaultModelCredentialed = data.default_model_credentialed ?? false;
+  const hasAnyCreds =
+    (data.has_openrouter_creds ?? false) ||
+    (data.has_minimax_creds ?? false) ||
+    defaultModelCredentialed ||
+    Object.values(providerCredentials).some(Boolean);
+
+  return {
+    isReachable: true,
+    hasOpenRouterCreds: data.has_openrouter_creds ?? false,
+    hasMiniMaxCreds: data.has_minimax_creds ?? false,
+    providerCredentials,
+    hasAnyCreds,
+    defaultModelCredentialed,
+    credentialSources: {
+      env: data.credential_sources?.env ?? false,
+      authJson: data.credential_sources?.auth_json ?? false,
+      openclawGateway: data.credential_sources?.openclaw_gateway ?? false,
+    },
+    credentialSourcesMinimax: {
+      env: data.credential_sources_minimax?.env ?? false,
+      openclawGateway: data.credential_sources_minimax?.openclaw_gateway ?? false,
+    },
+    launchTokenPresent: data.launch_token_present ?? false,
+    brainInitialized: data.brain_initialized ?? false,
+    activeRequests: data.active_requests ?? 0,
+    hermesProvider: data.hermes_provider,
+    hermesBaseUrl: data.hermes_base_url,
+    hermesDefaultModel: data.hermes_default_model,
+  };
+}
+
+async function fetchHermesBridgeHealth(): Promise<HermesBridgeStatus | null> {
   try {
     const healthUrl = `${getApiBaseUrl()}/api/hermes/health`;
     const response = await fetch(healthUrl, {
@@ -67,68 +127,52 @@ export async function detectHermesBridge(): Promise<HermesBridgeStatus | null> {
       return null;
     }
 
-    const data = await response.json() as {
-      status?: string;
-      has_openrouter_creds?: boolean;
-      has_minimax_creds?: boolean;
-      provider_credentials?: Record<string, boolean>;
-      default_model_credentialed?: boolean;
-      credential_sources?: {
-        env?: boolean;
-        auth_json?: boolean;
-        openclaw_gateway?: boolean;
-      };
-      credential_sources_minimax?: {
-        env?: boolean;
-        openclaw_gateway?: boolean;
-      };
-      launch_token_present?: boolean;
-      brain_initialized?: boolean;
-      active_requests?: number;
-      hermes_provider?: string;
-      hermes_base_url?: string;
-      hermes_default_model?: string;
-    };
-
-    if (data.status !== 'ok') {
-      return null;
-    }
-
-    const providerCredentials = data.provider_credentials ?? {};
-    const defaultModelCredentialed = data.default_model_credentialed ?? false;
-    const hasAnyCreds =
-      (data.has_openrouter_creds ?? false) ||
-      (data.has_minimax_creds ?? false) ||
-      defaultModelCredentialed ||
-      Object.values(providerCredentials).some(Boolean);
-
-    return {
-      isReachable: true,
-      hasOpenRouterCreds: data.has_openrouter_creds ?? false,
-      hasMiniMaxCreds: data.has_minimax_creds ?? false,
-      providerCredentials,
-      hasAnyCreds,
-      defaultModelCredentialed,
-      credentialSources: {
-        env: data.credential_sources?.env ?? false,
-        authJson: data.credential_sources?.auth_json ?? false,
-        openclawGateway: data.credential_sources?.openclaw_gateway ?? false,
-      },
-      credentialSourcesMinimax: {
-        env: data.credential_sources_minimax?.env ?? false,
-        openclawGateway: data.credential_sources_minimax?.openclaw_gateway ?? false,
-      },
-      launchTokenPresent: data.launch_token_present ?? false,
-      brainInitialized: data.brain_initialized ?? false,
-      activeRequests: data.active_requests ?? 0,
-      hermesProvider: data.hermes_provider,
-      hermesBaseUrl: data.hermes_base_url,
-      hermesDefaultModel: data.hermes_default_model,
-    };
+    const data = await response.json() as Parameters<typeof parseHealthPayload>[0];
+    return parseHealthPayload(data);
   } catch {
-    // Bridge is not reachable
     return null;
   }
+}
+
+/**
+ * Check if the Hermes bridge is running locally and get its credential status.
+ * Coalesces concurrent callers and caches for HEALTH_CACHE_TTL_MS so the status
+ * pill and model-sync poller share one /health round-trip.
+ */
+export async function detectHermesBridge(options?: {
+  force?: boolean;
+}): Promise<HermesBridgeStatus | null> {
+  const profile = getActiveProfile();
+  const now = Date.now();
+
+  if (
+    !options?.force &&
+    healthCache &&
+    healthCache.profile === profile &&
+    now - healthCache.at < HEALTH_CACHE_TTL_MS
+  ) {
+    return healthCache.status;
+  }
+
+  if (healthInflight && healthInflight.profile === profile) {
+    return healthInflight.promise;
+  }
+
+  const promise = fetchHermesBridgeHealth().then((status) => {
+    healthCache = { at: Date.now(), profile, status };
+    if (healthInflight?.promise === promise) {
+      healthInflight = null;
+    }
+    return status;
+  });
+  healthInflight = { profile, promise };
+  return promise;
+}
+
+/** Test/helpers: drop the shared health cache. */
+export function __resetHermesHealthCacheForTests(): void {
+  healthCache = null;
+  healthInflight = null;
 }
 
 /**

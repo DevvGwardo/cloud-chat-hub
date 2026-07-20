@@ -370,9 +370,10 @@ export function HermesChatsPanel() {
     return () => clearTimeout(timer);
   }, [query, loadSessions]);
 
-  // Poll every 10s: silently refresh the loaded window plus active/selected detail.
+  // Poll every 10s while visible: silently refresh the loaded window plus active/selected detail.
   useEffect(() => {
     intervalRef.current = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
       void (async () => {
         await refreshSessions();
         if (viewMode === 'all-active') {

@@ -3172,6 +3172,11 @@ def _ops_home(request: Request) -> Path:
     return Path(_resolve_hermes_home(_resolve_profile_name(request)))
 
 
+async def _ops_thread(fn, /, *args, **kwargs):
+    """Run sync hermes_ops / CLI work off the event loop so chat stays responsive."""
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
+
 @app.get("/fallback")
 async def get_fallback(request: Request):
     import hermes_ops
@@ -3207,13 +3212,15 @@ async def put_fallback(request: Request):
 async def get_checkpoints(request: Request):
     import hermes_ops
     workdir = request.query_params.get("workdir")
-    return hermes_ops.get_checkpoints_status(_ops_home(request), workdir=workdir)
+    return await _ops_thread(
+        hermes_ops.get_checkpoints_status, _ops_home(request), workdir=workdir
+    )
 
 
 @app.post("/checkpoints/prune")
 async def post_checkpoints_prune(request: Request):
     import hermes_ops
-    return hermes_ops.prune_checkpoints(_ops_home(request))
+    return await _ops_thread(hermes_ops.prune_checkpoints, _ops_home(request))
 
 
 @app.post("/checkpoints/restore")
@@ -3230,7 +3237,8 @@ async def post_checkpoints_restore(request: Request):
         return JSONResponse(status_code=400, content={"error": "index is required"})
     workdir = body.get("workdir")
     try:
-        result = hermes_ops.restore_checkpoint(
+        result = await _ops_thread(
+            hermes_ops.restore_checkpoint,
             index,
             workdir=str(workdir).strip() if workdir else None,
             hermes_home=_ops_home(request),
@@ -3244,31 +3252,31 @@ async def post_checkpoints_restore(request: Request):
 @app.get("/memory/status")
 async def get_memory_status(request: Request):
     import hermes_ops
-    return hermes_ops.get_memory_status(_ops_home(request))
+    return await _ops_thread(hermes_ops.get_memory_status, _ops_home(request))
 
 
 @app.get("/curator/status")
 async def get_curator_status(request: Request):
     import hermes_ops
-    return hermes_ops.get_curator_status(_ops_home(request))
+    return await _ops_thread(hermes_ops.get_curator_status, _ops_home(request))
 
 
 @app.post("/curator/run")
 async def post_curator_run(request: Request):
     import hermes_ops
-    return hermes_ops.run_curator(_ops_home(request))
+    return await _ops_thread(hermes_ops.run_curator, _ops_home(request))
 
 
 @app.get("/computer-use/status")
 async def get_computer_use_status(request: Request):
     import hermes_ops
-    return hermes_ops.get_computer_use_status(_ops_home(request))
+    return await _ops_thread(hermes_ops.get_computer_use_status, _ops_home(request))
 
 
 @app.get("/bundles")
 async def get_bundles(request: Request):
     import hermes_ops
-    return hermes_ops.list_skill_bundles(_ops_home(request))
+    return await _ops_thread(hermes_ops.list_skill_bundles, _ops_home(request))
 
 
 @app.get("/bundles/{name}")
@@ -3396,31 +3404,33 @@ async def get_insights(request: Request):
         days = int(days_raw)
     except (TypeError, ValueError):
         days = 7
-    return hermes_ops.get_insights(days=days, hermes_home=_ops_home(request))
+    return await _ops_thread(
+        hermes_ops.get_insights, days=days, hermes_home=_ops_home(request)
+    )
 
 
 @app.get("/journey")
 async def get_journey(request: Request):
     import hermes_ops
-    return hermes_ops.get_journey_graph(_ops_home(request))
+    return await _ops_thread(hermes_ops.get_journey_graph, _ops_home(request))
 
 
 @app.post("/computer-use/install")
 async def post_computer_use_install(request: Request):
     import hermes_ops
-    return hermes_ops.install_computer_use(_ops_home(request))
+    return await _ops_thread(hermes_ops.install_computer_use, _ops_home(request))
 
 
 @app.get("/computer-use/doctor")
 async def get_computer_use_doctor(request: Request):
     import hermes_ops
-    return hermes_ops.doctor_computer_use(_ops_home(request))
+    return await _ops_thread(hermes_ops.doctor_computer_use, _ops_home(request))
 
 
 @app.get("/pets")
 async def get_pets(request: Request):
     import hermes_ops
-    return hermes_ops.get_pets_status(_ops_home(request))
+    return await _ops_thread(hermes_ops.get_pets_status, _ops_home(request))
 
 
 @app.get("/pets/gallery")
@@ -3431,7 +3441,9 @@ async def get_pets_gallery(request: Request):
         limit = int(limit_raw)
     except (TypeError, ValueError):
         limit = 40
-    return hermes_ops.list_pets_gallery(limit=limit, hermes_home=_ops_home(request))
+    return await _ops_thread(
+        hermes_ops.list_pets_gallery, limit=limit, hermes_home=_ops_home(request)
+    )
 
 
 @app.post("/pets/select")
@@ -3627,7 +3639,7 @@ async def get_gateway_capabilities(request: Request):
         hermes_ops.assert_safe_gateway_base_url(base)
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
-    return hermes_ops.probe_gateway_capabilities(base_url=base)
+    return await _ops_thread(hermes_ops.probe_gateway_capabilities, base_url=base)
 
 
 @app.post("/v1/runs/cancel")
@@ -3775,13 +3787,15 @@ async def post_projects_bind_board(request: Request):
 async def get_security_audit(request: Request):
     import hermes_ops
     skip_venv = request.query_params.get("skip_venv", "").lower() in ("1", "true", "yes")
-    return hermes_ops.run_security_audit(_ops_home(request), skip_venv=skip_venv)
+    return await _ops_thread(
+        hermes_ops.run_security_audit, _ops_home(request), skip_venv=skip_venv
+    )
 
 
 @app.get("/secrets/status")
 async def get_secrets_status(request: Request):
     import hermes_ops
-    return hermes_ops.get_secrets_status(_ops_home(request))
+    return await _ops_thread(hermes_ops.get_secrets_status, _ops_home(request))
 
 
 class ChatMessage(BaseModel):
@@ -4705,7 +4719,7 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
         else:
             _requested_custom_tools = (body.model_extra or {}).get("custom_tools")
             _needs_loop, _needs_loop_reason = _hermes_runs.needs_agent_loop_parity(
-                runs_parity_available=_runs_parity_available,
+                runs_parity_available=_runs_parity,
                 worktree_active=use_worktree,
                 explicit_provider=resolved_provider,
                 moa_provider_id=MOA_PROVIDER_ID,
