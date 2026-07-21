@@ -46,7 +46,11 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Must match CI (Node 22). better-sqlite3 12.10+ ships win32
+          # prebuilds for ABI 127+ (Node 22+), not Node 20 — a Node 20
+          # install falls through to node-gyp and fails on windows-latest
+          # (no usable VS toolchain for native rebuild).
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
