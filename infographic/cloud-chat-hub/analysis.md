@@ -39,7 +39,7 @@ After viewing this infographic, the viewer should understand:
 - "Slash commands — 9/26"
 - "E2E tests — ⚠️ Not run"
 - "version: 1.0.0-beta.3"
-- "license: PolyForm-Shield-1.0.0"
+- "license: MIT"
 - "Sum: 1660 files, 106236 code, 11516 comment"
 
 ## Layout × Style Signals

@@ -8,7 +8,7 @@
 
 **The AI desktop with an autonomous agent brain.**
 
-[![License](https://img.shields.io/badge/license-PolyForm--Shield--1.0.0-blue?style=flat-square)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/badge/version-1.0.0--beta.4-orange?style=flat-square)](package.json)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%2B%20Windows%20%2B%20Linux-lightgrey?style=flat-square)](electron-builder.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-green?style=flat-square)](package.json)
@@ -405,9 +405,9 @@ electron/               # Desktop app shell
 
 ## License
 
-**PolyForm Shield 1.0.0** — see [LICENSE](LICENSE).
+**MIT** — see [LICENSE](LICENSE).
 
-You can use, modify, and distribute Spark freely. The only restriction: you can't offer a competing service using it.
+Free to use, modify, and distribute — including commercial and competing products.
 
 ---
 

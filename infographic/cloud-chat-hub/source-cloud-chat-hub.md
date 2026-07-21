@@ -49,7 +49,7 @@
 ## package.json facts
 
 "version: 1.0.0-beta.3"
-"license: PolyForm-Shield-1.0.0"
+"license: MIT"
 "test: vitest run"
 "typecheck: tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.electron.json --noEmit"
 "server: tsx server/index.ts"

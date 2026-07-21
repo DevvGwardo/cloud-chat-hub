@@ -140,6 +140,4 @@ first.
 
 ## License
 
-PolyForm Shield 1.0.0 — same as the parent CloudChat project.  You can use,
-modify, and redistribute this client freely; you just can't offer a service
-that competes with CloudChat.
+MIT — same as the parent Spark project. See [LICENSE](LICENSE).

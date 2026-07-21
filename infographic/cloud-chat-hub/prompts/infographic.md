@@ -82,7 +82,7 @@ The viewer will understand:
   - AI chat client built around Hermes — an autonomous AI agent with real tool access. Hermes can read and edit your code, browse the web, run terminals, and manage GitHub repos. CloudChat gives it a beautiful interface, multi-provider routing, and live code preview.
   - Also supports 16 other LLM providers, an orchestrator for parallel sub-tasks, and ships as a native macOS Electron app.
   - version: 1.0.0-beta.3
-  - license: PolyForm-Shield-1.0.0
+  - license: MIT
 
 ### MOD-2 — Hermes Capabilities
 - Use headline: Hermes capabilities
@@ -162,4 +162,4 @@ The viewer will understand:
 - Keep the overall composition polished, publication-ready, and highly legible despite the density.
 
 Text labels (in en):
-CloudChat; AI chat client built around Hermes; Hermes capabilities; Core feature surface; Agent-first + repo-aware + multi-provider; Architecture; UI → server → bridge; Current status; Repo scale + contribution loop; TypeScript-heavy codebase in closed beta; 1.0.0-beta.3; PolyForm-Shield-1.0.0; 17 providers; 6 themes; 10 accent colors; port 3001; port 3002; 9/26; 3.8s; 2.3MB; 106236 code; 1660 files; main @ cd1712c
+CloudChat; AI chat client built around Hermes; Hermes capabilities; Core feature surface; Agent-first + repo-aware + multi-provider; Architecture; UI → server → bridge; Current status; Repo scale + contribution loop; TypeScript-heavy codebase in closed beta; 1.0.0-beta.3; MIT; 17 providers; 6 themes; 10 accent colors; port 3001; port 3002; 9/26; 3.8s; 2.3MB; 106236 code; 1660 files; main @ cd1712c
