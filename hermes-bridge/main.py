@@ -1871,6 +1871,131 @@ def _load_cli_default_model() -> str | None:
     return _load_cli_model_config().get("default")
 
 
+def _cli_config_is_custom(cfg: dict) -> bool:
+    """True when config.yaml model.base_url is a non-hardcoded custom endpoint."""
+    base_url = (cfg.get("base_url") or "").strip()
+    if not base_url:
+        return False
+    return not any(h in base_url for h in _KNOWN_HOSTS)
+
+
+def _synthetic_cli_provider_id(cfg: dict) -> str:
+    """Stable id for a config.yaml custom endpoint (e.g. custom:api.bullinf.fun)."""
+    from urllib.parse import urlparse
+
+    base_url = (cfg.get("base_url") or "").strip()
+    provider = (cfg.get("provider") or "").strip().lower()
+    if provider and provider not in _PROVIDER_CONFIG and provider not in ("", "custom", "auto", "default"):
+        return provider if provider.startswith("custom:") else f"custom:{provider}"
+    host = ""
+    try:
+        host = (urlparse(base_url).hostname or "").strip().lower()
+    except Exception:
+        host = ""
+    if host:
+        return f"custom:{host}"
+    return "custom"
+
+
+def _load_custom_providers_list(hermes_home: Optional[Path] = None) -> list[dict]:
+    """Read config.yaml `custom_providers:` entries (name/base_url/model/models/api_key)."""
+    try:
+        config_path = (hermes_home or Path.home() / ".hermes") / "config.yaml"
+        if not config_path.is_file():
+            return []
+        try:
+            import yaml
+            with open(config_path) as f:
+                cfg = yaml.safe_load(f) or {}
+        except ImportError:
+            return []
+        raw = cfg.get("custom_providers") if isinstance(cfg, dict) else None
+        if not isinstance(raw, list):
+            return []
+        return [entry for entry in raw if isinstance(entry, dict)]
+    except Exception:
+        return []
+
+
+def _models_for_custom_base_url(base_url: str, hermes_home: Optional[Path] = None) -> list[str]:
+    """Collect model ids declared for a custom base_url in custom_providers."""
+    base_norm = (base_url or "").strip().rstrip("/").lower()
+    if not base_norm:
+        return []
+    models: list[str] = []
+    seen: set[str] = set()
+    for entry in _load_custom_providers_list(hermes_home):
+        entry_base = (entry.get("base_url") or "").strip().rstrip("/").lower()
+        if entry_base != base_norm:
+            continue
+        for mid in entry.get("models") or []:
+            if isinstance(mid, str) and mid.strip() and mid.strip() not in seen:
+                seen.add(mid.strip())
+                models.append(mid.strip())
+        default = entry.get("model")
+        if isinstance(default, str) and default.strip() and default.strip() not in seen:
+            seen.add(default.strip())
+            models.insert(0, default.strip())
+    return models
+
+
+def _cli_custom_endpoint_credentialed(cfg: dict, hermes_home: Optional[Path] = None) -> bool:
+    """True when the CLI custom base_url has its own key (not OpenClaw gateway alone).
+
+    A local gateway token does not prove the custom host accepts that token, so
+    synthetic /v1/providers rows must not show as connected unless config.yaml or
+    auth.json actually supplies a key for this endpoint.
+    """
+    if (cfg.get("api_key") or "").strip():
+        return True
+    provider = (cfg.get("provider") or "").strip().lower()
+    if provider and _get_credential_pool_key(provider):
+        return True
+    custom_id = _synthetic_cli_provider_id(cfg)
+    if _get_credential_pool_key(custom_id) or _get_credential_pool_key("custom"):
+        return True
+    base_norm = (cfg.get("base_url") or "").strip().rstrip("/").lower()
+    if not base_norm:
+        return False
+    for entry in _load_custom_providers_list(hermes_home):
+        entry_base = (entry.get("base_url") or "").strip().rstrip("/").lower()
+        if entry_base == base_norm and (entry.get("api_key") or "").strip():
+            return True
+    return False
+
+
+def _cli_custom_provider_row(cfg: dict, hermes_home: Optional[Path] = None) -> Optional[dict]:
+    """Synthetic /v1/providers row for the active CLI custom base_url, or None."""
+    if not _cli_config_is_custom(cfg):
+        return None
+    base_url = (cfg.get("base_url") or "").strip()
+    default_model = (cfg.get("default") or "").strip() or "auto"
+    pid = _synthetic_cli_provider_id(cfg)
+    models = _models_for_custom_base_url(base_url, hermes_home)
+    # Always surface the configured default first so Settings/model pickers do
+    # not lock onto catalog lead entries (e.g. e2ee-*) when default is present.
+    if default_model:
+        models = [m for m in models if m != default_model]
+        models = [default_model, *models]
+    # Prefer a short human name from matching custom_providers entries.
+    name = pid.removeprefix("custom:") if pid.startswith("custom:") else pid
+    base_norm = base_url.rstrip("/").lower()
+    for entry in _load_custom_providers_list(hermes_home):
+        entry_base = (entry.get("base_url") or "").strip().rstrip("/").lower()
+        if entry_base == base_norm and isinstance(entry.get("name"), str) and entry["name"].strip():
+            name = entry["name"].strip()
+            break
+    return {
+        "id": pid,
+        "name": name,
+        "base_url": base_url,
+        "is_aggregator": True,
+        "credentialed": _cli_custom_endpoint_credentialed(cfg, hermes_home),
+        "models": models,
+        "default_model": default_model,
+    }
+
+
 _cli_model_config = _load_cli_model_config()
 _cli_default_model = _cli_model_config.get("default")
 DEFAULT_MODEL = os.environ.get("HERMES_DEFAULT_MODEL", _cli_default_model or "meta-llama/llama-4-maverick")
@@ -2977,10 +3102,12 @@ async def diag(request: Request):
     return payload
 
 
-def _provider_has_credentials(pid: str) -> bool:
-    """Whether a configured bridge provider has usable credentials.
+def _provider_has_native_credentials(pid: str) -> bool:
+    """Whether a provider has its own credentials (excludes OpenClaw gateway token).
 
-    Mirrors the exact credential logic the /health endpoint reports.
+    The gateway token can talk to the local OpenClaw gateway, but it is not an
+    OpenRouter/Anthropic/etc. key. Callers that demote or advertise provider-
+    specific auth must use this rather than `_provider_has_credentials`.
     """
     if pid == "cursor-composer":
         try:
@@ -2999,11 +3126,20 @@ def _provider_has_credentials(pid: str) -> bool:
         or _get_credential_pool_key(auth_provider)
         or (pid == "nous" and _get_nous_agent_key())
         or (pid == "openrouter" and _get_openrouter_key_from_hermes_creds())
-        or bool(_get_local_gateway_key())
     )
 
 
-def _default_model_credentialed() -> bool:
+def _provider_has_credentials(pid: str) -> bool:
+    """Whether a configured bridge provider has usable credentials.
+
+    Mirrors the exact credential logic the /health endpoint reports.
+    Includes the local OpenClaw gateway token as a last-resort "can serve
+    something" signal for generic provider_credentials maps.
+    """
+    return _provider_has_native_credentials(pid) or bool(_get_local_gateway_key())
+
+
+def _default_model_credentialed(hermes_home: Optional[Path] = None) -> bool:
     """Whether the agent's configured default model can actually be served.
 
     `provider_credentials` only covers _PROVIDER_CONFIG, so a default model
@@ -3011,12 +3147,18 @@ def _default_model_credentialed() -> bool:
     opencode-go, which is not a _PROVIDER_CONFIG entry — is invisible there.
     This mirrors the chat route's credential resolution for the configured
     model so /health doesn't under-report what the bridge can serve.
+
+    Profile-aware when `hermes_home` is passed (active profile home).
+    Custom base_url endpoints require a real endpoint key — gateway alone
+    does not count.
     """
-    cfg = _load_cli_model_config()
+    cfg = _load_cli_model_config(hermes_home)
     if (cfg.get("api_key") or "").strip():
         return True
+    if _cli_config_is_custom(cfg):
+        return _cli_custom_endpoint_credentialed(cfg, hermes_home)
     provider = (cfg.get("provider") or "").strip().lower()
-    if provider in _PROVIDER_CONFIG and _provider_has_credentials(provider):
+    if provider in _PROVIDER_CONFIG and _provider_has_native_credentials(provider):
         return True
     if provider and _get_credential_pool_key(provider):
         return True
@@ -3024,20 +3166,35 @@ def _default_model_credentialed() -> bool:
 
 
 @app.get("/health")
-async def health():
+async def health(request: Request):
+    # Profile-aware: honor X-Hermes-Profile like /v1/providers and chat do so
+    # detectHermesBridge.hasAnyCreds matches the active profile's config.yaml.
+    profile_name = _resolve_profile_name(request)
+    profile_home = _resolve_hermes_home(profile_name)
+    cfg = _load_cli_model_config(profile_home)
+
     # Check credential availability for all configured providers
     provider_credentials: dict[str, bool] = {}
     for pid in _PROVIDER_CONFIG:
         provider_credentials[pid] = _provider_has_credentials(pid)
 
-    cursor_composer = _cursor_composer_integration_status(hermes_home=_HERMES_HOME)
+    cursor_composer = _cursor_composer_integration_status(hermes_home=profile_home)
+
+    hermes_provider = None
+    hermes_base_url = (cfg.get("base_url") or "").strip() or None
+    if _cli_config_is_custom(cfg):
+        hermes_provider = _synthetic_cli_provider_id(cfg)
+    else:
+        p = (cfg.get("provider") or "").strip().lower()
+        if p:
+            hermes_provider = p
 
     return {
         "status": "ok",
         "has_openrouter_creds": provider_credentials.get("openrouter", False),
         "has_minimax_creds": provider_credentials.get("minimax", False),
         "provider_credentials": provider_credentials,
-        "default_model_credentialed": _default_model_credentialed(),
+        "default_model_credentialed": _default_model_credentialed(profile_home),
         "cursor_composer_bridge": cursor_composer,
         "launch_token_present": bool(HERMES_BRIDGE_TOKEN),
         "brain_initialized": _brain_initialized,
@@ -3047,7 +3204,11 @@ async def health():
         # back to the startup-cached DEFAULT_MODEL if the config file is missing
         # or unreadable. The file read is tiny (~KB) and only happens on this
         # endpoint, which is polled at low rates by the UI.
-        "hermes_default_model": _load_cli_default_model() or DEFAULT_MODEL,
+        "hermes_default_model": (cfg.get("default") or "").strip() or DEFAULT_MODEL,
+        # Surface active CLI custom endpoint so the UI can show provider/host
+        # without a separate /v1/providers fetch.
+        "hermes_provider": hermes_provider,
+        "hermes_base_url": hermes_base_url,
     }
 
 
@@ -3117,14 +3278,30 @@ async def list_providers(request: Request):
     Profile-aware: honors `X-Hermes-Profile` (like chat requests do) so the
     reported default model/provider reflects the active profile's config.yaml,
     falling back to the global ~/.hermes config for unset values.
+
+    When `hermes model` selected a custom base_url (provider: custom / opencode /
+    bullinf / etc.), that endpoint is exposed as a synthetic credentialed row and
+    becomes default_provider — never silently rewritten to openrouter.
     """
     profile_home = _resolve_hermes_home(_resolve_profile_name(request))
     profile_cfg = _load_cli_model_config(profile_home)
     global_cfg = _load_cli_model_config()
-    cfg_provider = (profile_cfg.get("provider") or global_cfg.get("provider") or "").strip().lower()
-    default_provider = cfg_provider if (
-        cfg_provider and (cfg_provider in _PROVIDER_CONFIG or cfg_provider == MOA_PROVIDER_ID)
-    ) else "openrouter"
+    # Prefer the profile's model block when it has a base_url/default; otherwise
+    # fall back field-by-field so partial profile configs still work.
+    active_cfg = {
+        "default": profile_cfg.get("default") or global_cfg.get("default"),
+        "provider": profile_cfg.get("provider") or global_cfg.get("provider"),
+        "base_url": profile_cfg.get("base_url") or global_cfg.get("base_url"),
+        "api_key": profile_cfg.get("api_key") or global_cfg.get("api_key"),
+    }
+    cfg_provider = (active_cfg.get("provider") or "").strip().lower()
+    cli_custom_row = _cli_custom_provider_row(active_cfg, profile_home)
+    if cfg_provider and (cfg_provider in _PROVIDER_CONFIG or cfg_provider == MOA_PROVIDER_ID):
+        default_provider = cfg_provider
+    elif cli_custom_row:
+        default_provider = cli_custom_row["id"]
+    else:
+        default_provider = "openrouter"
     profile_moa_config = _load_moa_config(profile_home)
     global_moa_config = _load_moa_config()
     moa_config = profile_moa_config if _enabled_moa_preset_names(profile_moa_config) else global_moa_config
@@ -3143,6 +3320,11 @@ async def list_providers(request: Request):
             "models": moa_models,
             "default_model": moa_config.get("default_preset") or moa_models[0],
         })
+
+    # Active CLI custom endpoint first so the picker surfaces the model the user
+    # just set with `hermes model` above the built-in catalog.
+    if cli_custom_row and cli_custom_row["id"] not in hidden:
+        data.append(cli_custom_row)
 
     for pid, cfg in _PROVIDER_CONFIG.items():
         if pid in hidden:
@@ -3179,7 +3361,11 @@ async def list_providers(request: Request):
             or (moa_models[0] if moa_models else "default")
         )
     else:
-        default_model = profile_cfg.get("default") or global_cfg.get("default") or DEFAULT_MODEL
+        default_model = (
+            active_cfg.get("default")
+            or (cli_custom_row or {}).get("default_model")
+            or DEFAULT_MODEL
+        )
 
     return {
         "object": "list",
@@ -4463,13 +4649,25 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
 
     # Key priority: 1. Explicit Authorization header, 2. HERMES_OPENROUTER_KEY env var,
     # 3. OpenRouter keys from hermes auth.json credential pool, 4. Local gateway token fallback.
-    auth_header = request.headers.get("authorization", "")
+    # Strip whitespace/placeholders — Spark used to send `Bearer ` / `Bearer undefined`,
+    # which is truthy and blocked the env/config fallbacks (and produced misleading 401s).
+    auth_header = request.headers.get("authorization", "") or ""
+    header_key = ""
+    if auth_header.lower().startswith("bearer "):
+        header_key = auth_header[7:].strip()
+    if header_key.lower() in {"", "undefined", "null", "none"}:
+        header_key = ""
     api_key = (
-        (auth_header[7:] if auth_header.startswith("Bearer ") else "")
+        header_key
         or OPENROUTER_KEY
         or _get_openrouter_key_from_hermes_creds()
         or _get_local_gateway_key()
+        or ""
     )
+    if isinstance(api_key, str):
+        api_key = api_key.strip()
+    if not api_key or str(api_key).lower() in {"undefined", "null", "none"}:
+        api_key = ""
 
     # ── Provider Routing ──────────────────────────────────────────────────
     # Priority, strongest first:
@@ -4521,9 +4719,20 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
 
     #   0. Explicit provider header (strongest — caller named the provider)
     model_prefix_provider = _resolve_provider_from_model(body.model)
+    # Synthetic CLI custom id from /v1/providers (e.g. custom:api.bullinf.fun).
+    # Treat as an explicit request to use config.yaml's custom base_url — NOT openrouter.
+    cli_custom_id = _synthetic_cli_provider_id(cli_cfg) if cli_is_custom else ""
     if explicit_provider == MOA_PROVIDER_ID:
         resolved_provider = MOA_PROVIDER_ID
         route_source = "explicit-header"
+    elif (
+        explicit_provider
+        and cli_is_custom
+        and explicit_provider in {cli_custom_id, "custom", cli_provider}
+    ):
+        # UI picked the CLI custom endpoint row — keep custom routing, don't force openrouter.
+        resolved_provider = "custom"
+        route_source = "explicit-custom"
     elif explicit_provider and explicit_provider in _PROVIDER_CONFIG:
         resolved_provider = explicit_provider
         route_source = "explicit-header"
@@ -4538,6 +4747,11 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
     elif cli_provider and cli_provider in _PROVIDER_CONFIG:
         resolved_provider = cli_provider
         route_source = "config.yaml"
+    elif cli_is_custom:
+        # provider: custom / unknown with a non-hardcoded base_url — do NOT fall
+        # through to openrouter (that produces a misleading HERMES_OPENROUTER_KEY 401).
+        resolved_provider = "custom"
+        route_source = "config.yaml-custom"
     #   3. auth.json active_provider
     elif active_provider and active_provider in _PROVIDER_CONFIG:
         resolved_provider = active_provider
@@ -4601,6 +4815,43 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             route_source = "credential-fallback"
             break
 
+    # If the UI pinned OpenRouter (often from a stale picker default when the
+    # CLI is actually on a custom endpoint) but OpenRouter is not credentialed
+    # and config.yaml has a custom base_url, always prefer the CLI endpoint.
+    # Do NOT require the Authorization header to be empty — Spark always sends
+    # `Bearer ${apiKey}` (often empty or a placeholder), and treating that as
+    # an OpenRouter key produced the misleading HERMES_OPENROUTER_KEY 401.
+    # IMPORTANT: use native OpenRouter credentials only — a local OpenClaw
+    # gateway token must NOT count as OpenRouter auth or demotion never runs
+    # on typical Hermes+OpenClaw installs.
+    openrouter_credentialed = bool(
+        OPENROUTER_KEY
+        or _get_openrouter_key_from_hermes_creds()
+        or _provider_has_native_credentials("openrouter")
+    )
+    if (
+        resolved_provider == "openrouter"
+        and cli_is_custom
+        and not openrouter_credentialed
+        and (
+            cli_api_key
+            or _get_credential_pool_key(cli_provider)
+            or _get_credential_pool_key(cli_custom_id)
+            or _cli_custom_endpoint_credentialed(cli_cfg, _resolve_hermes_home(request_profile))
+            # Gateway alone is still a last-resort route signal so demotion can
+            # attempt custom base_url rather than hard-401ing OpenRouter.
+            or _get_local_gateway_key()
+        )
+    ):
+        print(
+            "[hermes-bridge] Ignoring uncredentialed openrouter pin — "
+            f"using CLI custom base_url={cli_base_url} model={body.model} "
+            f"(was source={route_source})",
+            flush=True,
+        )
+        resolved_provider = "custom"
+        route_source = "config.yaml-custom-override"
+
     # Custom non-hardcoded base_url overrides the resolved provider — UNLESS the
     # caller explicitly named a provider (UI picker), which always wins so the
     # selection isn't silently hijacked by a custom base_url in config.yaml.
@@ -4634,7 +4885,28 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             f"[hermes-bridge] Routing via native Hermes MoA preset. preset={preset_name}",
             flush=True,
         )
-    elif cli_is_custom and cli_provider not in _PROVIDER_CONFIG and route_source != "explicit-header":
+    elif cli_is_custom and (
+        route_source in {
+            "explicit-custom",
+            "config.yaml-custom",
+            "config.yaml-custom-override",
+        }
+        # After the openrouter demotion above, always honor custom base_url.
+        or resolved_provider == "custom"
+        or (
+            # Legacy path: custom base_url with unknown provider id.
+            # Do NOT hijack when model-prefix/credential-fallback already
+            # resolved a real native provider (e.g. MiniMax-M2.7 → minimax).
+            cli_provider not in _PROVIDER_CONFIG
+            and resolved_provider not in _PROVIDER_CONFIG
+            and resolved_provider != MOA_PROVIDER_ID
+            and route_source not in {
+                "explicit-header",
+                "model-prefix",
+                "credential-fallback",
+            }
+        )
+    ):
         # Credential priority for a custom base_url: the api_key configured
         # alongside the model in ~/.hermes/config.yaml wins (the user set it
         # there explicitly), then the auth.json credential pool, then a key
@@ -4644,16 +4916,74 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
         cli_key = (
             cli_api_key
             or _get_credential_pool_key(cli_provider)
-            or api_key
+            or _get_credential_pool_key(cli_custom_id)
+            or (api_key if api_key and api_key.lower() not in {"undefined", "null", "none"} else "")
             or _get_local_gateway_key()
         )
         if not cli_key:
             return _no_api_key_error(cli_provider or "cli-config")
         agent_base_url = cli_base_url
         agent_api_key = cli_key
+        # `auto`/`fast` are router aliases some gateways accept for plain chat
+        # but reject (or 500) when tools are attached. Prefer a concrete model
+        # from the matching custom_providers entry so agent-loop can run.
+        # Prefer a known-good id that appears in the catalog over the first
+        # listed entry — catalogs often lead with e2ee-* / offline models that
+        # 404 with "no chat offers" (BullInf).
+        model_lower = (body.model or "").strip().lower()
+        if model_lower in {"", "auto", "fast", "default"}:
+            catalog = [
+                mid.strip()
+                for mid in _models_for_custom_base_url(
+                    cli_base_url, _resolve_hermes_home(request_profile)
+                )
+                if isinstance(mid, str) and mid.strip()
+                and mid.strip().lower() not in {"", "auto", "fast", "default"}
+            ]
+            catalog_by_lower = {m.lower(): m for m in catalog}
+            # Prefer known-good ids *when they appear in the catalog* — never
+            # invent a BullInf-specific id for an empty/unrelated custom host.
+            preferred_order = (
+                "deepseek-v4-flash",
+                "mimo-v2.5",
+                "mimo-v2.5-pro",
+                "gpt-5.4-mini",
+                "minimax-m2.5",
+                "minimax-m2.1",
+                "deepseek-v4-pro",
+            )
+            concrete = None
+            for preferred in preferred_order:
+                hit = catalog_by_lower.get(preferred.lower())
+                if hit:
+                    concrete = hit
+                    break
+            if not concrete:
+                # Skip e2ee-* / private-prefix entries when a public model exists.
+                for mid in catalog:
+                    if not mid.lower().startswith("e2ee-"):
+                        concrete = mid
+                        break
+            if not concrete and catalog:
+                concrete = catalog[0]
+            # Fall back to config.yaml model.default when it is a concrete id.
+            if not concrete:
+                cfg_default = (cli_cfg.get("default") or "").strip()
+                if cfg_default and cfg_default.lower() not in {"", "auto", "fast", "default"}:
+                    concrete = cfg_default
+            # Do NOT invent preferred_order[0] when catalog is empty — that
+            # hard-coded BullInf id 404s on generic custom base_urls.
+            if concrete:
+                print(
+                    f"[hermes-bridge] Resolving model {body.model!r} → {concrete!r} "
+                    f"for custom base_url (agent/tool compatible)",
+                    flush=True,
+                )
+                body.model = concrete
         print(
             f"[hermes-bridge] Routing via ~/.hermes/config.yaml custom base_url. "
-            f"provider={cli_provider} base_url={cli_base_url} model={body.model}",
+            f"provider={cli_provider} base_url={cli_base_url} model={body.model} "
+            f"source={route_source}",
             flush=True,
         )
     elif pool_custom_route:
@@ -4854,6 +5184,16 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                 github_pat=github_pat or None,
                 custom_tools=_requested_custom_tools if isinstance(_requested_custom_tools, list) else None,
                 reasoning_effort=(body.model_extra or {}).get("reasoning_effort"),
+                custom_cli_base_url=(
+                    cli_base_url
+                    if cli_is_custom and (
+                        resolved_provider == "custom"
+                        or (resolved_provider or "").startswith("custom:")
+                        or route_source.startswith("config.yaml-custom")
+                        or route_source == "explicit-custom"
+                    )
+                    else None
+                ),
             )
             if _needs_loop and _needs_loop_reason:
                 _transport_reason = _needs_loop_reason[:1].upper() + _needs_loop_reason[1:]
@@ -5099,7 +5439,9 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                 needs_loop, parity_reason = _hermes_runs.needs_agent_loop_parity(
                     runs_parity_available=_runs_parity,
                     worktree_active=worktree_active,
-                    explicit_provider=explicit_provider or None,
+                    # Use resolved_provider so demoted openrouter → custom still
+                    # forces agent-loop; header-only would miss that path.
+                    explicit_provider=(explicit_provider or resolved_provider or None),
                     moa_provider_id=MOA_PROVIDER_ID,
                     moa_runs_allowed=moa_runs_allowed,
                     enabled_toolsets=agent_toolsets,
@@ -5109,6 +5451,15 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                     github_pat=github_pat if github_pat else None,
                     custom_tools=custom_tools or None,
                     reasoning_effort=reasoning_effort,
+                    custom_cli_base_url=(
+                        cli_base_url
+                        if cli_is_custom and (
+                            resolved_provider == "custom"
+                            or str(resolved_provider or "").startswith("custom:")
+                            or (agent_base_url and agent_base_url == cli_base_url)
+                        )
+                        else None
+                    ),
                 )
                 if needs_loop:
                     print(

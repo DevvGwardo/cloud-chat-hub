@@ -240,6 +240,8 @@ export interface HermesProviderInfo {
   is_aggregator: boolean;
   credentialed: boolean;
   models: string[];
+  /** Present on the synthetic CLI custom base_url row from /v1/providers. */
+  default_model?: string;
 }
 
 export interface HermesProvidersResponse {

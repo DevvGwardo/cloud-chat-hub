@@ -176,6 +176,7 @@ def needs_agent_loop_parity(
     github_pat: Optional[str] = None,
     custom_tools: Optional[list[Any]] = None,
     reasoning_effort: Optional[str] = None,
+    custom_cli_base_url: Optional[str] = None,
 ) -> tuple[bool, Optional[str]]:
     """Return (True, reason) when gateway /v1/runs cannot honor the request."""
     if worktree_active and not runs_parity_available:
@@ -184,11 +185,18 @@ def needs_agent_loop_parity(
     if enabled_toolsets_need_agent_loop_parity(enabled_toolsets):
         return True, "computer_use requires agent-loop (gateway runs lacks screenshot payloads)"
 
+    # Gateway /v1/runs only accepts provider id under runs_parity — it cannot set
+    # a CLI custom model.base_url / endpoint key. Force agent-loop for custom CLI.
+    if custom_cli_base_url and str(custom_cli_base_url).strip():
+        return True, "custom CLI base_url requires agent-loop (gateway /v1/runs cannot set base_url)"
+
     provider = str(explicit_provider or "").strip().lower()
     if provider and provider not in {"auto", "default"}:
         if provider == moa_provider_id:
             if not moa_runs_allowed:
                 return True, "provider=moa requires agent-loop (gateway MoA not enabled)"
+        elif provider == "custom" or provider.startswith("custom:"):
+            return True, f"custom provider={provider} requires agent-loop (gateway /v1/runs cannot set base_url)"
         elif not runs_parity_available:
             return True, f"explicit provider={provider} not supported on /v1/runs (model alias only)"
 

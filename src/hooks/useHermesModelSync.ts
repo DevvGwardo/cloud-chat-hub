@@ -16,7 +16,16 @@ export function useHermesModelSync(): void {
   const hermesModel = useSettingsStore((s) => s.providers.hermes.model);
   const updateProviderConfig = useSettingsStore((s) => s.updateProviderConfig);
   const followAgentModel = useHermesStore((s) => s.followAgentModel);
+  const underlyingProvider = useHermesStore((s) => s.underlyingProvider);
+  const setUnderlyingProvider = useHermesStore((s) => s.setUnderlyingProvider);
   const { defaultModel, reload } = useHermesProviders(activeProvider === 'hermes');
+
+  // Agent default must not keep a stale openrouter (or other) pin that would
+  // override the CLI custom base_url with an empty Authorization header.
+  useEffect(() => {
+    if (!followAgentModel || !underlyingProvider) return;
+    setUnderlyingProvider('');
+  }, [followAgentModel, underlyingProvider, setUnderlyingProvider]);
 
   // Adopt the agent's CLI model while following it.
   useEffect(() => {

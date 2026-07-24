@@ -32,6 +32,30 @@ const activeAgentRuns = new Map<string, {
 
 const HERMES_BRIDGE_ROOT = (process.env.HERMES_BRIDGE_URL || 'http://localhost:3002').replace(/\/v1\/?$/, '');
 
+/** Usable Hermes bridge auth + provider pin headers.
+ * Never send empty/placeholder Authorization — it confuses OpenRouter key
+ * detection and can block CLI custom base_url demotion. Never pin openrouter
+ * without a usable client key (stale picker defaults). */
+function hermesBridgeAuthHeaders(
+  apiKey: string | undefined | null,
+  hermesProvider?: string | null,
+): Record<string, string> {
+  const hermesAuthKey = typeof apiKey === 'string' ? apiKey.trim() : '';
+  const hermesAuthUsable =
+    hermesAuthKey.length > 0
+    && !['undefined', 'null', 'none'].includes(hermesAuthKey.toLowerCase());
+  const hermesProviderPin =
+    hermesProvider
+    && hermesProvider !== 'auto'
+    && !(hermesProvider === 'openrouter' && !hermesAuthUsable)
+      ? hermesProvider
+      : undefined;
+  return {
+    ...(hermesAuthUsable ? { Authorization: `Bearer ${hermesAuthKey}` } : {}),
+    ...(hermesProviderPin ? { 'X-Hermes-Provider': hermesProviderPin } : {}),
+  };
+}
+
 async function stopHermesGatewayRun(conversationId: string): Promise<void> {
   try {
     await fetch(`${HERMES_BRIDGE_ROOT}/v1/runs/cancel`, {
@@ -529,10 +553,9 @@ export async function proxyHermesAgentLoopToDataStream(input: {
     bridgeResponse = await fetchHermesWithReadinessRetry(bridgeUrl, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${input.apiKey}`,
+        ...hermesBridgeAuthHeaders(input.apiKey, input.hermesProvider),
         'Content-Type': 'application/json',
         ...(input.hermesToolsets ? { 'X-Hermes-Toolsets': input.hermesToolsets } : {}),
-        ...(input.hermesProvider && input.hermesProvider !== 'auto' ? { 'X-Hermes-Provider': input.hermesProvider } : {}),
         'X-Hermes-Execution-Mode': 'agent-loop',
         ...(input.hermesUseRuns ? { 'X-Hermes-Use-Runs': '1' } : {}),
         ...(input.activeProfile ? { 'X-Hermes-Profile': input.activeProfile } : {}),
@@ -711,7 +734,8 @@ async function judgeLoopIterationOnce(input: {
   const response = await fetchHermesWithReadinessRetry(`${OPENAI_COMPATIBLE.hermes}/chat/completions`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${input.apiKey}`,
+      // Omit empty Bearer — placeholders break custom CLI demotion / key detection.
+      ...hermesBridgeAuthHeaders(input.apiKey),
       'Content-Type': 'application/json',
       // Judge is a single plain completion — bypass the bridge's agent loop so
       // `stream: false` is honored and we get a JSON body back, not SSE.
@@ -869,10 +893,9 @@ export async function proxyHermesLoopToDataStream(input: {
       const bridgeResponse = await fetchHermesWithReadinessRetry(`${OPENAI_COMPATIBLE.hermes}/chat/completions`, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${input.apiKey}`,
+          ...hermesBridgeAuthHeaders(input.apiKey, input.hermesProvider),
           'Content-Type': 'application/json',
           ...(input.hermesToolsets ? { 'X-Hermes-Toolsets': input.hermesToolsets } : {}),
-          ...(input.hermesProvider && input.hermesProvider !== 'auto' ? { 'X-Hermes-Provider': input.hermesProvider } : {}),
           'X-Hermes-Execution-Mode': 'agent-loop',
           ...(input.activeProfile ? { 'X-Hermes-Profile': input.activeProfile } : {}),
           ...(input.activeRepo?.owner && input.activeRepo?.name
@@ -1028,7 +1051,8 @@ export async function proxyHermesSwarmToDataStream(input: {
     bridgeResponse = await fetchHermesWithReadinessRetry(bridgeUrl, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${input.apiKey}`,
+        // Same empty-key hygiene as agent-loop (no placeholder Bearer).
+        ...hermesBridgeAuthHeaders(input.apiKey),
         'Content-Type': 'application/json',
         ...(input.hermesToolsets ? { 'X-Hermes-Toolsets': input.hermesToolsets } : {}),
         'X-Hermes-Execution-Mode': 'swarm',

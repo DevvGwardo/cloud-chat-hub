@@ -300,8 +300,10 @@ export HERMES_MINIMAX_KEY="..."
 
 # Option B: Use the Hermes CLI (recommended)
 # Install Hermes Agent per https://hermes-agent.nousresearch.com
-# Then:
-hermes auth login
+# Then add a provider (pick one):
+hermes auth add openrouter --api-key sk-or-v1-...
+hermes auth add anthropic --type oauth
+hermes auth status
 ```
 
 ### 3. Run

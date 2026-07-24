@@ -79,6 +79,8 @@ app.post('/functions/v1/validate-key', async (req, res) => {
           const healthData = await healthResponse.json() as {
             has_openrouter_creds?: boolean;
             has_minimax_creds?: boolean;
+            default_model_credentialed?: boolean;
+            provider_credentials?: Record<string, boolean>;
             hermes_default_model?: string;
             hermes_provider?: string;
           };
@@ -90,12 +92,23 @@ app.post('/functions/v1/validate-key', async (req, res) => {
             ? [bridgeModel, ...bridgeModels]
             : bridgeModels;
 
-          if (!healthData.has_openrouter_creds && !healthData.has_minimax_creds) {
+          // Custom CLI base_url setups only set default_model_credentialed (or a
+          // non-openrouter/minimax provider_credentials entry). Don't warn as if
+          // the bridge has no credentials at all.
+          const hasAnyProviderCred = Object.values(healthData.provider_credentials ?? {}).some(Boolean);
+          const hasUsableCreds = Boolean(
+            healthData.has_openrouter_creds
+            || healthData.has_minimax_creds
+            || healthData.default_model_credentialed
+            || hasAnyProviderCred,
+          );
+
+          if (!hasUsableCreds) {
             return sendJson(res, 200, {
               valid: true,
               defaultModel: bridgeModel || models[0],
               models,
-              warning: 'Hermes bridge has no API credentials configured. Set HERMES_OPENROUTER_KEY or HERMES_MINIMAX_KEY env var, or configure ~/.openclaw/openclaw.json.',
+              warning: 'Hermes bridge has no API credentials configured. Set a provider key in ~/.hermes/config.yaml (or HERMES_OPENROUTER_KEY / HERMES_MINIMAX_KEY), or configure ~/.openclaw/openclaw.json.',
             });
           }
 

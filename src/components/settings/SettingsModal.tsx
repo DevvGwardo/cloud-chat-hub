@@ -702,6 +702,7 @@ export const SettingsModal: React.FC = () => {
     setSwarmEnabled: setHermesSwarmEnabled,
     underlyingProvider: hermesUnderlyingProvider,
     setUnderlyingProvider: setHermesUnderlyingProvider,
+    setFollowAgentModel: setHermesFollowAgentModel,
   } = useHermesStore();
 
   const [showKey, setShowKey] = useState(false);
@@ -815,10 +816,21 @@ export const SettingsModal: React.FC = () => {
   const modelOptions = useMemo(() => {
     // For Hermes with an explicit underlying provider, show that provider's
     // catalog models so the model list matches the chosen provider.
-    if (activeProvider === 'hermes' && hermesUnderlyingProvider) {
-      const selected = hermesProviders.find((p) => p.id === hermesUnderlyingProvider);
-      if (selected?.models?.length) {
-        return getVisibleModelOptions('hermes', selected.models, config.model);
+    if (activeProvider === 'hermes') {
+      if (hermesUnderlyingProvider) {
+        const selected = hermesProviders.find((p) => p.id === hermesUnderlyingProvider);
+        if (selected?.models?.length) {
+          return getVisibleModelOptions('hermes', selected.models, config.model);
+        }
+      }
+      // Auto mode: prefer synthetic custom CLI row (or any credentialed catalog)
+      // from /v1/providers so keyless custom base_url setups aren't stuck on
+      // OpenRouter-centric HERMES_RECOMMENDED_MODELS.
+      const preferred =
+        hermesProviders.find((p) => p.id.startsWith('custom:') && p.credentialed && p.models?.length)
+        || hermesProviders.find((p) => p.credentialed && p.models?.length && p.id !== 'moa');
+      if (preferred?.models?.length) {
+        return getVisibleModelOptions('hermes', preferred.models, config.model);
       }
     }
     const baseModels = availableModels[activeProvider]?.length
@@ -873,13 +885,10 @@ export const SettingsModal: React.FC = () => {
 
     void (async () => {
       try {
-        const apiKey = activeProvider === 'hermes' ? providers.hermes.apiKey : '';
-        if (activeProvider === 'hermes' && !apiKey.trim()) {
-          if (!cancelled) {
-            setLocalRuntimeStatus(null);
-          }
-          return;
-        }
+        // Hermes can be credentialed via config.yaml / gateway without a Spark
+        // apiKey — always hit validate-key with empty key so availableModels
+        // and defaultModel refresh for keyless custom CLI setups.
+        const apiKey = activeProvider === 'hermes' ? (providers.hermes.apiKey || '') : '';
 
         const result = await validateApiKey(activeProvider, apiKey);
         if (cancelled) {
@@ -1434,6 +1443,8 @@ export const SettingsModal: React.FC = () => {
                             onChange={(e) => {
                               const next = e.target.value;
                               setHermesUnderlyingProvider(next);
+                              // Auto = let bridge/CLI route (Agent default). Explicit id pins.
+                              setHermesFollowAgentModel(!next);
                               const selected = hermesProviders.find((p) => p.id === next);
                               const firstModel = selected?.models?.[0];
                               if (firstModel && !selected?.models?.includes(providers.hermes.model)) {
@@ -1443,7 +1454,15 @@ export const SettingsModal: React.FC = () => {
                             className={selectInputClass}
                           >
                             <option value="">Auto (route by model)</option>
-                            {hermesProviders.map((p) => (
+                            {[...hermesProviders]
+                              .sort((a, b) => {
+                                const aCustom = a.id === 'custom' || a.id.startsWith('custom:') ? 0 : 1;
+                                const bCustom = b.id === 'custom' || b.id.startsWith('custom:') ? 0 : 1;
+                                if (aCustom !== bCustom) return aCustom - bCustom;
+                                if (a.credentialed !== b.credentialed) return a.credentialed ? -1 : 1;
+                                return a.name.localeCompare(b.name);
+                              })
+                              .map((p) => (
                               <option key={p.id} value={p.id}>
                                 {p.credentialed ? '● ' : '○ '}{p.name}
                               </option>

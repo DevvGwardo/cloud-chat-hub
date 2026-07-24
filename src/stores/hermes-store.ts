@@ -129,8 +129,10 @@ interface HermesState {
   sessionApprovalPolicies: ApprovalPolicy[];
   /**
    * The underlying provider the Hermes agent should route to (e.g. 'anthropic',
-   * 'deepseek', 'openrouter'). Empty string means 'auto' — let the bridge route
-   * by model-name prefix / config. Sent to the bridge as the hermes_provider field.
+   * 'deepseek', 'openrouter', or a synthetic CLI id like 'custom:api.bullinf.fun').
+   * Empty string means 'auto' — let the bridge route by model-name prefix /
+   * config.yaml (including custom base_url). Sent as hermes_provider only when
+   * followAgentModel is false.
    */
   underlyingProvider: string;
 

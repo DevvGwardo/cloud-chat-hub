@@ -354,6 +354,26 @@ class NeedsAgentLoopParityTests(unittest.TestCase):
         self.assertTrue(needs)
         self.assertIn("openrouter", reason or "")
 
+    def test_custom_cli_base_url_forces_agent_loop(self):
+        needs, reason = hermes_runs.needs_agent_loop_parity(
+            runs_parity_available=True,
+            custom_cli_base_url="https://api.bullinf.fun/v1",
+            enabled_toolsets=["web", "browser", "terminal"],
+            default_toolsets=["web", "browser", "terminal"],
+        )
+        self.assertTrue(needs)
+        self.assertIn("base_url", reason or "")
+
+    def test_custom_provider_id_forces_agent_loop(self):
+        needs, reason = hermes_runs.needs_agent_loop_parity(
+            runs_parity_available=True,
+            explicit_provider="custom:api.bullinf.fun",
+            enabled_toolsets=["web", "browser", "terminal"],
+            default_toolsets=["web", "browser", "terminal"],
+        )
+        self.assertTrue(needs)
+        self.assertIn("custom", reason or "")
+
     def test_explicit_provider_ok_with_parity(self):
         needs, reason = hermes_runs.needs_agent_loop_parity(
             runs_parity_available=True,

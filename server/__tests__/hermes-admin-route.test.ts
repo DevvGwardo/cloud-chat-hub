@@ -257,4 +257,52 @@ describe('Hermes admin route', () => {
       await server.close()
     }
   })
+
+  it('proxies a synthetic custom CLI provider row and default_provider from the bridge', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      if (url.includes('/api/hermes/providers')) {
+        return actualFetch(input, init)
+      }
+
+      expect(url).toContain('/v1/providers')
+      return new Response(JSON.stringify({
+        object: 'list',
+        default_provider: 'custom:api.bullinf.fun',
+        default_model: 'deepseek-v4-flash',
+        data: [
+          {
+            id: 'custom:api.bullinf.fun',
+            name: 'api.bullinf.fun',
+            base_url: 'https://api.bullinf.fun/v1',
+            is_aggregator: true,
+            credentialed: true,
+            models: ['deepseek-v4-flash', 'mimo-v2.5'],
+            default_model: 'deepseek-v4-flash',
+          },
+          { id: 'openrouter', name: 'OpenRouter', base_url: 'https://openrouter.ai/api/v1', is_aggregator: true, credentialed: false, models: [] },
+        ],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }))
+
+    const server = await createTestServer()
+
+    try {
+      const response = await actualFetch(`${server.url}/api/hermes/providers`)
+      const data = await response.json()
+
+      expect(response.ok).toBe(true)
+      expect(data.default_provider).toBe('custom:api.bullinf.fun')
+      expect(data.default_model).toBe('deepseek-v4-flash')
+      expect(data.data[0]?.id).toBe('custom:api.bullinf.fun')
+      expect(data.data[0]?.credentialed).toBe(true)
+      expect(data.data[0]?.models).toContain('deepseek-v4-flash')
+    } finally {
+      await server.close()
+    }
+  })
+
 })

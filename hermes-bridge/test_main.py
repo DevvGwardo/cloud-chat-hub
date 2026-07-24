@@ -14,6 +14,13 @@ sys.path.insert(0, os.path.dirname(__file__))
 if "httpx" not in sys.modules:
     httpx_stub = types.ModuleType("httpx")
 
+    class _Timeout:
+        def __init__(self, *args, **kwargs):
+            self.connect = kwargs.get("connect")
+            self.read = kwargs.get("read")
+            self.write = kwargs.get("write")
+            self.pool = kwargs.get("pool")
+
     class _AsyncClient:
         def __init__(self, *args, **kwargs):
             pass
@@ -24,20 +31,31 @@ if "httpx" not in sys.modules:
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
+    httpx_stub.Timeout = _Timeout
     httpx_stub.AsyncClient = _AsyncClient
     sys.modules["httpx"] = httpx_stub
-elif not hasattr(sys.modules["httpx"], "AsyncClient"):
-    class _AsyncClient:
-        def __init__(self, *args, **kwargs):
-            pass
+else:
+    if not hasattr(sys.modules["httpx"], "AsyncClient"):
+        class _AsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
 
-        async def __aenter__(self):
-            return self
+            async def __aenter__(self):
+                return self
 
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
 
-    sys.modules["httpx"].AsyncClient = _AsyncClient
+        sys.modules["httpx"].AsyncClient = _AsyncClient
+    if not hasattr(sys.modules["httpx"], "Timeout"):
+        class _Timeout:
+            def __init__(self, *args, **kwargs):
+                self.connect = kwargs.get("connect")
+                self.read = kwargs.get("read")
+                self.write = kwargs.get("write")
+                self.pool = kwargs.get("pool")
+
+        sys.modules["httpx"].Timeout = _Timeout
 
 if "fastapi" not in sys.modules:
     fastapi_stub = types.ModuleType("fastapi")
@@ -715,6 +733,92 @@ class MixtureOfAgentsTests(unittest.TestCase):
         self.assertNotIn("openrouter", ids)
         self.assertNotIn("anthropic", ids)
         self.assertIn("openai", ids)
+
+    def test_list_providers_exposes_cli_custom_base_url(self):
+        """config.yaml custom base_url becomes a synthetic credentialed provider row."""
+        with patch.object(main, "_load_moa_config", return_value={"presets": {}, "default_preset": "default"}), \
+             patch.object(main, "_load_cli_model_config", return_value={
+                 "default": "deepseek-v4-flash",
+                 "provider": "custom",
+                 "base_url": "https://api.bullinf.fun/v1",
+                 "api_key": "inf_test_key",
+             }), \
+             patch.object(main, "_load_provider_visibility", return_value={
+                 "excluded": set(),
+                 "disabled": set(),
+             }), \
+             patch.object(main, "_models_for_provider", return_value=["m1"]), \
+             patch.object(main, "_provider_has_credentials", return_value=False), \
+             patch.object(main, "_models_for_custom_base_url", return_value=[
+                 "e2ee-glm-4.7-flash",
+                 "deepseek-v4-flash",
+                 "mimo-v2.5",
+             ]), \
+             patch.object(main, "_get_credential_pool_key", return_value=None), \
+             patch.object(main, "_load_custom_providers_list", return_value=[]):
+            response = asyncio.run(main.list_providers(_FakeRequest({})))
+
+        custom = next(row for row in response["data"] if str(row["id"]).startswith("custom:"))
+        self.assertEqual(response["default_provider"], "custom:api.bullinf.fun")
+        self.assertEqual(custom["id"], "custom:api.bullinf.fun")
+        self.assertTrue(custom["credentialed"])
+        self.assertEqual(custom["base_url"], "https://api.bullinf.fun/v1")
+        self.assertIn("deepseek-v4-flash", custom["models"])
+        self.assertIn("mimo-v2.5", custom["models"])
+        # Default model is forced to the front even when already in the catalog.
+        self.assertEqual(custom["default_model"], "deepseek-v4-flash")
+        self.assertEqual(custom["models"][0], "deepseek-v4-flash")
+
+    def test_cli_custom_row_not_credentialed_with_only_gateway(self):
+        """Gateway token alone must not mark synthetic custom row as connected."""
+        cfg = {
+            "default": "auto",
+            "provider": "custom",
+            "base_url": "https://api.bullinf.fun/v1",
+            "api_key": "",
+        }
+        with patch.object(main, "_get_credential_pool_key", return_value=None), \
+             patch.object(main, "_load_custom_providers_list", return_value=[]), \
+             patch.object(main, "_get_local_gateway_key", return_value="gw-token"), \
+             patch.object(main, "_models_for_custom_base_url", return_value=["mimo-v2.5"]):
+            row = main._cli_custom_provider_row(cfg)
+        self.assertIsNotNone(row)
+        self.assertFalse(row["credentialed"])
+
+    def test_health_is_profile_aware_and_emits_custom_fields(self):
+        """/health honors X-Hermes-Profile and surfaces hermes_provider/base_url."""
+        profile_cfg = {
+            "default": "my-model",
+            "provider": "custom",
+            "base_url": "https://profile-host.example/v1",
+            "api_key": "profile-key",
+        }
+        global_cfg = {
+            "default": "global-model",
+            "provider": "openrouter",
+            "base_url": "",
+            "api_key": "",
+        }
+
+        def _load_cfg(home=None):
+            if home is not None and str(home).endswith("profiles/work"):
+                return profile_cfg
+            return global_cfg
+
+        with patch.object(main, "_resolve_profile_name", return_value="work"), \
+             patch.object(main, "_resolve_hermes_home", return_value=Path.home() / ".hermes" / "profiles" / "work"), \
+             patch.object(main, "_load_cli_model_config", side_effect=_load_cfg), \
+             patch.object(main, "_provider_has_credentials", return_value=False), \
+             patch.object(main, "_cursor_composer_integration_status", return_value={}), \
+             patch.object(main, "_get_local_gateway_key", return_value=None), \
+             patch.object(main, "_get_credential_pool_key", return_value=None), \
+             patch.object(main, "_load_custom_providers_list", return_value=[]):
+            response = asyncio.run(main.health(_FakeRequest({"x-hermes-profile": "work"})))
+
+        self.assertTrue(response["default_model_credentialed"])
+        self.assertEqual(response["hermes_default_model"], "my-model")
+        self.assertEqual(response["hermes_base_url"], "https://profile-host.example/v1")
+        self.assertTrue(str(response["hermes_provider"]).startswith("custom:"))
 
     def test_moa_rejects_passthrough_mode(self):
         body = main.ChatCompletionRequest.model_validate({
@@ -1468,6 +1572,174 @@ class CliProviderRoutingTests(unittest.TestCase):
 
         self.assertEqual(adapter.last_init["base_url"], "https://my-llm.internal/v1")
         self.assertEqual(adapter.last_init["api_key"], "selfhost-key")
+
+    def test_empty_bearer_openrouter_pin_demotes_to_cli_custom(self):
+        """Regression: Spark used to send Authorization: Bearer  + X-Hermes-Provider:
+        openrouter with no real key, which 401'd even when config.yaml had a
+        credentialed custom base_url (BullInf). Demote the pin and use config."""
+        adapter = self._fake_adapter()
+        fake_module = types.SimpleNamespace(HermesAgentAdapter=adapter)
+        body = main.ChatCompletionRequest.model_validate({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "test"}],
+            "stream": True,
+        })
+        request = _FakeRequest({
+            "authorization": "Bearer ",
+            "x-hermes-provider": "openrouter",
+        })
+
+        with patch.dict(sys.modules, {"hermes_adapter": fake_module}), \
+             patch.object(main, "OPENROUTER_KEY", ""), \
+             patch.object(main, "_get_openrouter_key_from_hermes_creds", return_value=None), \
+             patch.object(main, "_provider_has_native_credentials", return_value=False), \
+             patch.object(main, "_get_local_gateway_key", return_value=None), \
+             patch.object(main, "_load_cli_model_config", return_value={
+                 "default": "auto",
+                 "provider": "custom",
+                 "base_url": "https://api.bullinf.fun/v1",
+                 "api_key": "inf_test_key",
+             }), \
+             patch.object(main, "_get_active_provider", return_value=None), \
+             patch.object(main, "_models_for_custom_base_url", return_value=[
+                 "e2ee-glm-4.7-flash",
+                 "mimo-v2.5",
+                 "deepseek-v4-flash",
+             ]):
+            asyncio.run(_invoke_chat_and_read_stream(request, body))
+
+        self.assertIsNotNone(adapter.last_init)
+        self.assertEqual(adapter.last_init["base_url"], "https://api.bullinf.fun/v1")
+        self.assertEqual(adapter.last_init["api_key"], "inf_test_key")
+        # Prefer a known-good catalog id over the first (often offline) e2ee-* entry.
+        self.assertEqual(adapter.last_init["model"], "deepseek-v4-flash")
+
+    def test_openrouter_pin_demotes_even_when_openclaw_gateway_exists(self):
+        """Gateway token must not count as OpenRouter credentials and block demotion."""
+        adapter = self._fake_adapter()
+        fake_module = types.SimpleNamespace(HermesAgentAdapter=adapter)
+        body = main.ChatCompletionRequest.model_validate({
+            "model": "mimo-v2.5",
+            "messages": [{"role": "user", "content": "test"}],
+            "stream": True,
+        })
+        request = _FakeRequest({
+            "authorization": "Bearer ",
+            "x-hermes-provider": "openrouter",
+        })
+
+        # Gateway present on purpose; native OpenRouter creds absent so demotion runs.
+        with patch.dict(sys.modules, {"hermes_adapter": fake_module}), \
+             patch.object(main, "OPENROUTER_KEY", ""), \
+             patch.object(main, "_get_openrouter_key_from_hermes_creds", return_value=None), \
+             patch.object(main, "_get_local_gateway_key", return_value="gw-token"), \
+             patch.object(main, "_load_cli_model_config", return_value={
+                 "default": "mimo-v2.5",
+                 "provider": "custom",
+                 "base_url": "https://api.bullinf.fun/v1",
+                 "api_key": "inf_test_key",
+             }), \
+             patch.object(main, "_get_active_provider", return_value=None), \
+             patch.object(main, "_get_credential_pool_key", return_value=None), \
+             patch.object(main, "_models_for_custom_base_url", return_value=["mimo-v2.5"]):
+            asyncio.run(_invoke_chat_and_read_stream(request, body))
+
+        self.assertIsNotNone(adapter.last_init)
+        self.assertEqual(adapter.last_init["base_url"], "https://api.bullinf.fun/v1")
+        self.assertEqual(adapter.last_init["api_key"], "inf_test_key")
+        self.assertEqual(adapter.last_init["model"], "mimo-v2.5")
+
+    def test_custom_auto_empty_catalog_does_not_invent_deepseek(self):
+        """Empty custom_providers catalog must not invent deepseek-v4-flash."""
+        adapter = self._fake_adapter()
+        fake_module = types.SimpleNamespace(HermesAgentAdapter=adapter)
+        body = main.ChatCompletionRequest.model_validate({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "test"}],
+            "stream": True,
+        })
+        request = _FakeRequest({})
+
+        with patch.dict(sys.modules, {"hermes_adapter": fake_module}), \
+             patch.object(main, "OPENROUTER_KEY", ""), \
+             patch.object(main, "_get_openrouter_key_from_hermes_creds", return_value=None), \
+             patch.object(main, "_get_local_gateway_key", return_value=None), \
+             patch.object(main, "_load_cli_model_config", return_value={
+                 "default": "auto",
+                 "provider": "custom",
+                 "base_url": "https://my-llm.internal/v1",
+                 "api_key": "selfhost-key",
+             }), \
+             patch.object(main, "_get_active_provider", return_value=None), \
+             patch.object(main, "_models_for_custom_base_url", return_value=[]):
+            asyncio.run(_invoke_chat_and_read_stream(request, body))
+
+        self.assertEqual(adapter.last_init["base_url"], "https://my-llm.internal/v1")
+        # Leave alias as-is rather than inventing a BullInf-specific model id.
+        self.assertEqual(adapter.last_init["model"], "auto")
+
+    def test_explicit_custom_provider_pin_uses_cli_base_url(self):
+        """X-Hermes-Provider: custom:<host> must route to config.yaml base_url, not OpenRouter."""
+        adapter = self._fake_adapter()
+        fake_module = types.SimpleNamespace(HermesAgentAdapter=adapter)
+        body = main.ChatCompletionRequest.model_validate({
+            "model": "mimo-v2.5",
+            "messages": [{"role": "user", "content": "test"}],
+            "stream": True,
+        })
+        request = _FakeRequest({
+            "authorization": "Bearer ignored",
+            "x-hermes-provider": "custom:api.bullinf.fun",
+        })
+
+        with patch.dict(sys.modules, {"hermes_adapter": fake_module}), \
+             patch.object(main, "OPENROUTER_KEY", ""), \
+             patch.object(main, "_get_openrouter_key_from_hermes_creds", return_value=None), \
+             patch.object(main, "_provider_has_credentials", return_value=False), \
+             patch.object(main, "_load_cli_model_config", return_value={
+                 "default": "deepseek-v4-flash",
+                 "provider": "custom",
+                 "base_url": "https://api.bullinf.fun/v1",
+                 "api_key": "inf_test_key",
+             }), \
+             patch.object(main, "_get_active_provider", return_value=None):
+            asyncio.run(_invoke_chat_and_read_stream(request, body))
+
+        self.assertEqual(adapter.last_init["base_url"], "https://api.bullinf.fun/v1")
+        self.assertEqual(adapter.last_init["api_key"], "inf_test_key")
+        self.assertEqual(adapter.last_init["model"], "mimo-v2.5")
+
+    def test_custom_auto_prefers_known_good_over_e2ee_prefix(self):
+        """auto on a custom catalog must not lock onto dead e2ee-* lead entries."""
+        adapter = self._fake_adapter()
+        fake_module = types.SimpleNamespace(HermesAgentAdapter=adapter)
+        body = main.ChatCompletionRequest.model_validate({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "test"}],
+            "stream": True,
+        })
+        request = _FakeRequest({})
+
+        with patch.dict(sys.modules, {"hermes_adapter": fake_module}), \
+             patch.object(main, "OPENROUTER_KEY", ""), \
+             patch.object(main, "_get_openrouter_key_from_hermes_creds", return_value=None), \
+             patch.object(main, "_get_local_gateway_key", return_value=None), \
+             patch.object(main, "_load_cli_model_config", return_value={
+                 "default": "auto",
+                 "provider": "custom",
+                 "base_url": "https://api.bullinf.fun/v1",
+                 "api_key": "inf_test_key",
+             }), \
+             patch.object(main, "_get_active_provider", return_value=None), \
+             patch.object(main, "_models_for_custom_base_url", return_value=[
+                 "e2ee-glm-4.7-flash",
+                 "e2ee-venice-uncensored-24b-p",
+                 "mimo-v2.5",
+             ]):
+            asyncio.run(_invoke_chat_and_read_stream(request, body))
+
+        self.assertEqual(adapter.last_init["model"], "mimo-v2.5")
+        self.assertEqual(adapter.last_init["base_url"], "https://api.bullinf.fun/v1")
 
     def test_deepseek_v4_flash_routes_to_opencode_zen_pool_when_not_native(self):
         """Regression: config.yaml names deepseek + deepseek-v4-flash, but the

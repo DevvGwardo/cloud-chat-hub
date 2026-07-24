@@ -1225,13 +1225,12 @@ When the user asks you to make changes:
             },
           }
         : {}),
-      // Only pin a provider when the user explicitly picked one. Otherwise send
-      // no provider and let the bridge route via the agent's own config
-      // (active_provider / config.yaml) — the bridge's prefix resolver already
-      // routes catalog ids like `deepseek/…` to the right aggregator. Deriving
-      // the provider here mis-pins bare ids (e.g. `deepseek-v4-flash` → native
-      // DeepSeek, which doesn't serve it → 401).
-      ...(effectiveProvider === 'hermes' && useHermesStore.getState().underlyingProvider
+      // Only pin a provider when the user explicitly picked one (not Agent default).
+      // Agent default / Auto leave routing to the bridge so a CLI custom base_url
+      // is used instead of a stale openrouter pin with an empty API key.
+      ...(effectiveProvider === 'hermes'
+        && !useHermesStore.getState().followAgentModel
+        && useHermesStore.getState().underlyingProvider
         ? { hermes_provider: useHermesStore.getState().underlyingProvider }
         : {}),
       // Hermes MCP comes from config.yaml (bridge loads agent MCP natively) — do not dual-inject Spark zustand tools.

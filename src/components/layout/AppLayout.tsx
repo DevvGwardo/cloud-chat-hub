@@ -25,6 +25,7 @@ import { useGlobalStyles } from '@/hooks/useGlobalStyles';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { PROVIDERS } from '@/lib/providers';
 import { detectHermesBridge } from '@/lib/detect-hermes';
+import { useHermesStore } from '@/stores/hermes-store';
 import { getChatScopeId } from '@/lib/chat-scope';
 import { PanelLeft, GitPullRequest, MoreHorizontal, Circle, Pin, Pencil, Archive, Copy, PanelRight, Plus, FileCode2, MessageSquare, TerminalSquare, Globe, Sparkles, Smartphone } from 'lucide-react';
 import { MiniBrowser, MiniBrowserToggle, DockedMiniBrowser, HermesPTYPanel, type HermesPTYPanelHandle } from '@/components/browser/MiniBrowser';
@@ -223,6 +224,9 @@ export const AppLayout: React.FC = () => {
     let cancelled = false;
 
     const syncHermesModel = () => {
+      // Only mirror the CLI default while Agent default is active. An explicit
+      // in-app model pick (followAgentModel=false) must stick.
+      if (!useHermesStore.getState().followAgentModel) return;
       detectHermesBridge().then((status) => {
         if (cancelled || !status?.hermesDefaultModel) return;
         const store = useSettingsStore.getState();
@@ -271,6 +275,9 @@ export const AppLayout: React.FC = () => {
         if (status?.hasAnyCreds) {
           const store = useSettingsStore.getState();
           if (store.activeProvider !== 'hermes') store.setActiveProvider('hermes');
+          // Mark Hermes as auto-detected so Settings shows "Signed in via Hermes"
+          // instead of "No key" for keyless credentialed bridge (custom CLI / gateway).
+          store.updateProviderConfig('hermes', { autoDetected: true });
           store.completeSetup();
           console.info('[setup] auto-completed — local Hermes bridge has a credentialed provider');
           return;

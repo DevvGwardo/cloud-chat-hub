@@ -601,4 +601,128 @@ describe('Hermes chat route', () => {
       await server.close()
     }
   })
+
+  it('omits empty Authorization and uncredentialed openrouter pin when proxying to the bridge', async () => {
+    const bridgeStream = [
+      'data: {"id":"chatcmpl-hermes-empty-auth","choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n',
+      'data: {"id":"chatcmpl-hermes-empty-auth","choices":[{"index":0,"delta":{"content":"routed via CLI custom"}}]}\n\n',
+      'data: {"id":"chatcmpl-hermes-empty-auth","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n',
+      'data: [DONE]\n\n',
+    ].join('')
+
+    let capturedHeaders: Record<string, string> = {}
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as { url: string }).url
+      if (url.includes('/functions/v1/chat')) {
+        return actualFetch(input, init)
+      }
+
+      const raw = init?.headers
+      if (raw instanceof Headers) {
+        capturedHeaders = Object.fromEntries(raw.entries())
+      } else if (Array.isArray(raw)) {
+        capturedHeaders = Object.fromEntries(raw)
+      } else {
+        capturedHeaders = { ...(raw as Record<string, string> | undefined) }
+      }
+
+      return new Response(bridgeStream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    }))
+
+    const server = await createTestServer()
+
+    try {
+      const response = await actualFetch(`${server.url}/functions/v1/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          provider: 'hermes',
+          model: 'auto',
+          api_key: '',
+          hermes_provider: 'openrouter',
+          messages: [
+            { role: 'user', content: 'hello' },
+          ],
+        }),
+      })
+
+      const body = await response.text()
+      expect(response.ok).toBe(true)
+      expect(body).toContain('routed via CLI custom')
+
+      const headerKeys = Object.keys(capturedHeaders).map((k) => k.toLowerCase())
+      expect(headerKeys).not.toContain('authorization')
+      expect(headerKeys).not.toContain('x-hermes-provider')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('forwards usable Authorization and an explicit custom provider pin to the bridge', async () => {
+    const bridgeStream = [
+      'data: {"id":"chatcmpl-hermes-custom-pin","choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n',
+      'data: {"id":"chatcmpl-hermes-custom-pin","choices":[{"index":0,"delta":{"content":"custom pin ok"}}]}\n\n',
+      'data: {"id":"chatcmpl-hermes-custom-pin","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n',
+      'data: [DONE]\n\n',
+    ].join('')
+
+    let capturedHeaders: Record<string, string> = {}
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as { url: string }).url
+      if (url.includes('/functions/v1/chat')) {
+        return actualFetch(input, init)
+      }
+
+      const raw = init?.headers
+      if (raw instanceof Headers) {
+        capturedHeaders = Object.fromEntries(raw.entries())
+      } else if (Array.isArray(raw)) {
+        capturedHeaders = Object.fromEntries(raw)
+      } else {
+        capturedHeaders = { ...(raw as Record<string, string> | undefined) }
+      }
+
+      return new Response(bridgeStream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    }))
+
+    const server = await createTestServer()
+
+    try {
+      const response = await actualFetch(`${server.url}/functions/v1/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          provider: 'hermes',
+          model: 'deepseek-v4-flash',
+          api_key: 'inf_test_key',
+          hermes_provider: 'custom:api.bullinf.fun',
+          messages: [
+            { role: 'user', content: 'hello' },
+          ],
+        }),
+      })
+
+      const body = await response.text()
+      expect(response.ok).toBe(true)
+      expect(body).toContain('custom pin ok')
+
+      const auth = capturedHeaders['Authorization'] ?? capturedHeaders['authorization']
+      const pin = capturedHeaders['X-Hermes-Provider'] ?? capturedHeaders['x-hermes-provider']
+      expect(auth).toBe('Bearer inf_test_key')
+      expect(pin).toBe('custom:api.bullinf.fun')
+    } finally {
+      await server.close()
+    }
+  })
+
 })

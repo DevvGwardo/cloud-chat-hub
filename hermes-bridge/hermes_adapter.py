@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 import httpx
-from typing import Optional, Callable
+from typing import Any, Optional, Callable
 from urllib.parse import quote
 
 # ---------------------------------------------------------------------------

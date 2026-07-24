@@ -31,9 +31,16 @@ export const HermesModelPicker: React.FC = () => {
   const { providers, loading, defaultModel } = useHermesProviders();
 
   const moaProvider = providers.find((p) => p.id === MOA_PROVIDER_ID);
-  const connected = providers.filter(
-    (p) => p.id !== MOA_PROVIDER_ID && p.credentialed && p.models.length > 0,
-  );
+  // Bridge already puts the active CLI custom endpoint first; keep custom:* rows
+  // ahead of built-ins so the user's `hermes model` endpoint is easy to re-select.
+  const connected = providers
+    .filter((p) => p.id !== MOA_PROVIDER_ID && p.credentialed && p.models.length > 0)
+    .slice()
+    .sort((a, b) => {
+      const aCustom = a.id === 'custom' || a.id.startsWith('custom:') ? 0 : 1;
+      const bCustom = b.id === 'custom' || b.id.startsWith('custom:') ? 0 : 1;
+      return aCustom - bCustom;
+    });
   const disconnected = providers.filter(
     (p) => p.id !== MOA_PROVIDER_ID && !p.credentialed,
   );
