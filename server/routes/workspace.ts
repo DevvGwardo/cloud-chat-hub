@@ -1,9 +1,10 @@
 import type { Express, Request, Response } from 'express';
-import { readFile, stat } from 'fs/promises';
-import { resolve, relative } from 'path';
+import { realpath, readFile, stat } from 'fs/promises';
+import { isAbsolute, resolve, relative, sep } from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { sendJson } from '../lib/helpers';
+import { resolveAttachedLocalRepoPath } from '../lib/github-utils';
 import { workspaceIndex } from '../workspace-indexer';
 
 const execFileAsync = promisify(execFile);
@@ -15,14 +16,31 @@ const MAX_FOLDER_DEPTH = 3;
 const MAX_FOLDER_ENTRIES = 200;
 const FETCH_URL_TIMEOUT_MS = 12_000;
 
-function resolveUnderRoot(rootPath: string, targetPath: string): string | null {
-  const root = resolve(rootPath);
-  const target = resolve(root, targetPath.replace(/^\.?\//, ''));
-  const rel = relative(root, target);
-  if (rel.startsWith('..') || resolve(target) === resolve('/')) {
+function isUnderRoot(rootPath: string, targetPath: string): boolean {
+  const rel = relative(rootPath, targetPath);
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+async function resolveWorkspaceRoot(rootPath: string): Promise<string | null> {
+  const repoRoot = resolveAttachedLocalRepoPath(rootPath);
+  if (!repoRoot) {
     return null;
   }
-  return target;
+  return realpath(repoRoot);
+}
+
+async function resolveUnderRoot(rootPath: string, targetPath: string): Promise<string | null> {
+  const root = await resolveWorkspaceRoot(rootPath);
+  if (!root) {
+    return null;
+  }
+  const target = resolve(root, targetPath.replace(/^\.?\//, ''));
+  const rel = relative(root, target);
+  if (rel === '..' || rel.startsWith(`..${sep}`) || resolve(target) === resolve('/')) {
+    return null;
+  }
+  const realTarget = await realpath(target);
+  return isUnderRoot(root, realTarget) ? realTarget : null;
 }
 
 function truncateText(text: string, maxBytes: number): { text: string; truncated: boolean } {
@@ -118,9 +136,9 @@ export function registerWorkspaceRoutes(app: Express) {
         return sendJson(res, 400, { error: 'Missing required query params: root, file' });
       }
 
-      const absolute = resolveUnderRoot(rootPath, filePath);
+      const absolute = await resolveUnderRoot(rootPath, filePath);
       if (!absolute) {
-        return sendJson(res, 403, { error: 'Path escapes workspace root' });
+        return sendJson(res, 403, { error: 'Path is outside an attached git workspace' });
       }
 
       const info = await stat(absolute);
@@ -144,7 +162,10 @@ export function registerWorkspaceRoutes(app: Express) {
         return sendJson(res, 400, { error: 'Missing required query param: root' });
       }
 
-      const root = resolve(rootPath);
+      const root = await resolveWorkspaceRoot(rootPath);
+      if (!root) {
+        return sendJson(res, 403, { error: 'Path is outside an attached git workspace' });
+      }
       const diff = await runGitDiff(root);
       sendJson(res, 200, { diff });
     } catch (err: unknown) {
@@ -164,15 +185,47 @@ export function registerWorkspaceRoutes(app: Express) {
       }
 
       const normalizedFolder = folder.replace(/^\.?\//, '').replace(/\/$/, '');
-      if (normalizedFolder && !resolveUnderRoot(rootPath, normalizedFolder)) {
-        return sendJson(res, 403, { error: 'Path escapes workspace root' });
+      const root = await resolveWorkspaceRoot(rootPath);
+      if (!root) {
+        return sendJson(res, 403, { error: 'Path is outside an attached git workspace' });
+      }
+      if (normalizedFolder) {
+        const requestedFolder = resolve(root, normalizedFolder);
+        if (!isUnderRoot(root, requestedFolder)) {
+          return sendJson(res, 403, { error: 'Path escapes workspace root' });
+        }
       }
 
-      const entries = await workspaceIndex.scan(rootPath);
+      const entries = await workspaceIndex.scan(root);
       const paths = buildFolderTree(entries, normalizedFolder, depth);
       sendJson(res, 200, { paths, total: paths.length });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to list folder';
+      sendJson(res, 500, { error: message });
+    }
+  });
+
+  app.get('/functions/v1/workspace/search', async (req: Request, res: Response) => {
+    try {
+      const rootPath = req.query.path as string;
+      const query = req.query.q as string;
+      const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 200);
+
+      if (!rootPath || !query) {
+        return sendJson(res, 400, { error: 'Missing required query params: path, q' });
+      }
+
+      const root = await resolveWorkspaceRoot(rootPath);
+      if (!root) {
+        return sendJson(res, 403, { error: 'Path is outside an attached git workspace' });
+      }
+
+      const entries = await workspaceIndex.scan(root);
+      const results = workspaceIndex.search(query, entries, limit);
+
+      sendJson(res, 200, { results, total: entries.length, cached: true });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to search workspace';
       sendJson(res, 500, { error: message });
     }
   });

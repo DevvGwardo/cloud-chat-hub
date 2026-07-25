@@ -26,7 +26,6 @@ import { registerRoomRoutes } from './routes/rooms';
 import { sendJson, csrfProtection } from './lib/helpers';
 import { logger, requestIdMiddleware } from './lib/logger';
 import { MAX_BODY_SIZE } from './config';
-import { workspaceIndex } from './workspace-indexer';
 
 import { registerHermesStreamResumeRoute } from './lib/hermes';
 import { registerRemoteRevivalRoutes } from './routes/remote-revival';
@@ -242,29 +241,7 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
   registerBridgeRoutes(app);
   registerWorkspaceRoutes(app);
 
-  // ─── Workspace search ───────────────────────────────────────────────────────
-  app.get('/functions/v1/workspace/search', async (req, res) => {
-    try {
-      const rootPath = req.query.path as string;
-      const query = req.query.q as string;
-      // Clamp to [1, 200] — a negative limit would flow into slice(0, -5).
-      const rawLimit = parseInt(req.query.limit as string, 10);
-      const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 200) : 50;
-
-      if (!rootPath || !query) {
-        return sendJson(res, 400, { error: 'Missing required query params: path, q' });
-      }
-
-      const wasCached = workspaceIndex.isFresh(rootPath);
-      const entries = await workspaceIndex.scan(rootPath);
-      const results = workspaceIndex.search(query, entries, limit);
-
-      sendJson(res, 200, { results, total: entries.length, cached: wasCached });
-    } catch (err: unknown) {
-      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
-    }
-  });
-
+  // Workspace search lives in registerWorkspaceRoutes (hardened root checks).
   // ─── Health check ──────────────────────────────────────────────────────────
   app.get('/functions/v1/health', (_req, res) => {
     sendJson(res, 200, { ok: true, routes: HEALTH_ROUTES });
