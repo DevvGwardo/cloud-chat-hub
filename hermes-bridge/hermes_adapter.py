@@ -1627,7 +1627,7 @@ class HermesAgentAdapter:
         if not is_computer_use_tool(name) or not self.on_computer_use_frame:
             return
         with self._cu_poller_lock:
-            self._stop_cu_frame_poller()
+            self._stop_cu_frame_poller_locked()
             poller = ComputerUseFramePoller(
                 tool_name=name,
                 args=args,
@@ -1636,11 +1636,14 @@ class HermesAgentAdapter:
             poller.start()
             self._cu_poller = poller
 
+    def _stop_cu_frame_poller_locked(self) -> None:
+        if self._cu_poller is not None:
+            self._cu_poller.stop()
+            self._cu_poller = None
+
     def _stop_cu_frame_poller(self) -> None:
         with self._cu_poller_lock:
-            if self._cu_poller is not None:
-                self._cu_poller.stop()
-                self._cu_poller = None
+            self._stop_cu_frame_poller_locked()
 
     def _emit_computer_use_frame(self, name: str, args: Any, result: Any, status: str = "completed") -> None:
         if not self.on_computer_use_frame:

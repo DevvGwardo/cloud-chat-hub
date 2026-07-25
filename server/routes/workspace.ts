@@ -209,7 +209,9 @@ export function registerWorkspaceRoutes(app: Express) {
     try {
       const rootPath = req.query.path as string;
       const query = req.query.q as string;
-      const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 200);
+      // Clamp to [1, 200] — a negative limit would flow into slice(0, -5).
+      const rawLimit = parseInt(req.query.limit as string, 10);
+      const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 200) : 50;
 
       if (!rootPath || !query) {
         return sendJson(res, 400, { error: 'Missing required query params: path, q' });
