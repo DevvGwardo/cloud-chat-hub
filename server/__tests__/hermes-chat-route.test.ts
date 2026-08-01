@@ -106,8 +106,8 @@ describe('Hermes chat route', () => {
     return repoDir
   }
 
-  it('uses agent-loop mode for Hermes repo turns — the bridge handles tools directly', async () => {
-    // Stub fetch so the agent-loop proxy can reach a fake hermes bridge
+  it('uses ACP transport for Hermes repo turns — the bridge drives the real agent', async () => {
+    // Stub fetch so the ACP proxy can reach a fake hermes bridge
     const bridgeStream = [
       'data: {"id":"chatcmpl-hermes-repo","choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n',
       'data: {"id":"chatcmpl-hermes-repo","choices":[{"index":0,"delta":{"content":"Updating src/App.tsx via repo tools"}}]}\n\n',
@@ -126,9 +126,9 @@ describe('Hermes chat route', () => {
         return new Response(null, { status: 200 })
       }
 
-      // Verify the agent-loop proxy sends repo headers
+      // Verify the ACP proxy sends repo headers
       const headers = init?.headers as Record<string, string> ?? {}
-      expect(headers['X-Hermes-Execution-Mode']).toBe('agent-loop')
+      expect(headers['X-Hermes-Execution-Mode']).toBe('acp')
       expect(headers['X-Hermes-Profile']).toBe('agent-two')
       expect(headers['X-Hermes-Repo-Owner']).toBe('octo')
       expect(headers['X-Hermes-Repo-Name']).toBe('cloudchat')
@@ -265,7 +265,7 @@ describe('Hermes chat route', () => {
       }
 
       const headers = init?.headers as Record<string, string> ?? {}
-      expect(headers['X-Hermes-Execution-Mode']).toBe('agent-loop')
+      expect(headers['X-Hermes-Execution-Mode']).toBe('acp')
       expect(headers['X-Hermes-Profile']).toBe('agent-two')
       expect(headers['X-Hermes-Repo-Owner']).toBeUndefined()
       expect(headers['X-Hermes-Repo-Name']).toBeUndefined()

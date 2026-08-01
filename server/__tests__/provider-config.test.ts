@@ -69,16 +69,32 @@ describe('provider-config', () => {
     expect(resolveRuntimeProvider('hermes')).toBe('hermes')
   })
 
-  it('always uses agent-loop mode for Hermes regardless of repo context', () => {
+  it('defaults Hermes to ACP transport (real hermes-agent) regardless of repo context', () => {
     expect(resolveHermesExecutionMode({
       activeRepo: { owner: 'octo', name: 'repo' },
       githubPAT: 'ghp_test',
-    })).toBe('agent-loop')
+    })).toBe('acp')
     expect(resolveHermesExecutionMode({
       activeRepo: { owner: 'octo', name: 'repo' },
       githubPAT: '',
-    })).toBe('agent-loop')
-    expect(resolveHermesExecutionMode()).toBe('agent-loop')
+    })).toBe('acp')
+    expect(resolveHermesExecutionMode()).toBe('acp')
+  })
+
+  it('honors HERMES_EXECUTION_MODE=agent-loop as the legacy fallback', () => {
+    const original = process.env.HERMES_EXECUTION_MODE;
+    try {
+      process.env.HERMES_EXECUTION_MODE = 'agent-loop';
+      expect(resolveHermesExecutionMode()).toBe('agent-loop');
+      process.env.HERMES_EXECUTION_MODE = 'passthrough';
+      expect(resolveHermesExecutionMode()).toBe('passthrough');
+    } finally {
+      if (original === undefined) {
+        delete process.env.HERMES_EXECUTION_MODE;
+      } else {
+        process.env.HERMES_EXECUTION_MODE = original;
+      }
+    }
   })
 
   it('resolves Hermes runs flag from env, header, or body (default off)', () => {

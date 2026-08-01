@@ -266,6 +266,7 @@ export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProx
     server_tool_event?: unknown;
     agent_status?: unknown;
     fallback_switch?: unknown;
+    approval_request?: unknown;
     choices?: Array<{
       finish_reason?: unknown;
       delta?: {
@@ -276,6 +277,7 @@ export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProx
         agent_status?: unknown;
         fallback_switch?: unknown;
         transport_status?: unknown;
+        approval_request?: unknown;
       };
       message?: {
         content?: unknown;
@@ -312,6 +314,9 @@ export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProx
       model: switchPayload.model,
     });
   }
+  if (choice?.delta?.approval_request && typeof choice.delta.approval_request === 'object') {
+    data.push({ type: 'approval_request', ...(choice.delta.approval_request as Record<string, unknown>) });
+  }
   if (parsed.transport_status && typeof parsed.transport_status === 'object') {
     data.push({ type: 'transport_status', ...(parsed.transport_status as Record<string, unknown>) });
   }
@@ -331,6 +336,9 @@ export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProx
       provider: switchPayload.provider,
       model: switchPayload.model,
     });
+  }
+  if (parsed.approval_request && typeof parsed.approval_request === 'object') {
+    data.push({ type: 'approval_request', ...(parsed.approval_request as Record<string, unknown>) });
   }
 
   const reasoning = typeof choice?.delta?.reasoning === 'string' ? choice.delta.reasoning : undefined;
@@ -499,6 +507,8 @@ export async function proxyHermesAgentLoopToDataStream(input: {
   reasoningEffort?: string;
   /** Phase 7: opt-in gateway /v1/runs transport via bridge translate layer. */
   hermesUseRuns?: boolean;
+  /** Bridge execution mode: agent-loop (legacy in-process loop) or acp (real hermes-agent). */
+  executionMode?: 'agent-loop' | 'acp';
 }) {
   const bridgeUrl = `${OPENAI_COMPATIBLE.hermes}/chat/completions`;
   const abortController = new AbortController();
@@ -556,7 +566,7 @@ export async function proxyHermesAgentLoopToDataStream(input: {
         ...hermesBridgeAuthHeaders(input.apiKey, input.hermesProvider),
         'Content-Type': 'application/json',
         ...(input.hermesToolsets ? { 'X-Hermes-Toolsets': input.hermesToolsets } : {}),
-        'X-Hermes-Execution-Mode': 'agent-loop',
+        'X-Hermes-Execution-Mode': input.executionMode ?? 'agent-loop',
         ...(input.hermesUseRuns ? { 'X-Hermes-Use-Runs': '1' } : {}),
         ...(input.activeProfile ? { 'X-Hermes-Profile': input.activeProfile } : {}),
         ...(input.activeRepo?.owner && input.activeRepo?.name

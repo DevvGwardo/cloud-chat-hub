@@ -767,8 +767,12 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
       return;
     }
 
-    if (provider === 'hermes' && runtimeProvider === 'hermes' && hermesExecutionMode === 'agent-loop') {
-      logger.info(`[chat] Proxying Hermes agent-loop directly to AI SDK data stream. model=${model}`);
+    if (
+      provider === 'hermes'
+      && runtimeProvider === 'hermes'
+      && (hermesExecutionMode === 'agent-loop' || hermesExecutionMode === 'acp')
+    ) {
+      logger.info(`[chat] Proxying Hermes ${hermesExecutionMode} directly to AI SDK data stream. model=${model}`);
       await proxyHermesAgentLoopToDataStream({
         req,
         res,
@@ -790,6 +794,7 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
         conversationId: typeof conversation_id === 'string' ? conversation_id : undefined,
         reasoningEffort: typeof reasoning_effort === 'string' ? reasoning_effort : undefined,
         hermesUseRuns,
+        executionMode: hermesExecutionMode,
       });
       return;
     }

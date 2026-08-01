@@ -40,7 +40,7 @@ import { getErrorMessage } from '@/lib/errors';
 import { toast } from '@/lib/toast';
 import { handleServerToolEvent, SERVER_EXECUTED_REPO_TOOLS, type ServerToolEvent } from '@/lib/server-tool-events';
 import { getChatScopeId } from '@/lib/chat-scope';
-import { resolveHermesSessionForResume, hermesSessionTitle, type HermesSessionMessage } from '@/lib/hermes-api';
+import { resolveHermesSessionForResume, hermesSessionTitle, type HermesSessionMessage, type AcpApprovalRequest } from '@/lib/hermes-api';
 import { expandContextRefs, hasContextRefs } from '@/lib/context-refs';
 import { extractPseudoToolInvocations, extractTextFileEdits, getPseudoToolSourceText } from '@/lib/pseudo-tool-calls';
 import { getLocalAbsolutePath, LOCAL_IMAGE_TOKEN_RE } from '@/lib/local-images';
@@ -69,6 +69,7 @@ import {
   getServerToolEventKey,
   hasRecoverablePseudoRepoWrites,
   isAgentStatusData,
+  isApprovalRequestData,
   isFallbackSwitchData,
   isHermesTransportStatusData,
   isHermesLoopStatusData,
@@ -1046,6 +1047,12 @@ When the user asks you to make changes:
               if (fallbackSwitch) {
                 notifyFallbackSwitch(fallbackSwitch);
               }
+              if (delta?.approval_request && typeof delta.approval_request === 'object') {
+                const approval = delta.approval_request as AcpApprovalRequest;
+                if (typeof approval.approval_id === 'string') {
+                  useHermesStore.getState().setPendingAcpApproval(approval);
+                }
+              }
               if (delta?.server_tool_event && isServerToolEvent(delta.server_tool_event)) {
                 applyServerToolEvent(delta.server_tool_event as ServerToolEvent);
               }
@@ -1085,6 +1092,10 @@ When the user asks you to make changes:
                 }
                 if (isAgentStatusData(item)) {
                   updateAgentStatus(item.status);
+                  continue;
+                }
+                if (isApprovalRequestData(item)) {
+                  useHermesStore.getState().setPendingAcpApproval(item);
                   continue;
                 }
                 if (isFallbackSwitchData(item)) {

@@ -12,6 +12,7 @@ import type { AgentStatusEvent } from '@/hooks/useChat';
 import { WelcomeScreen } from './WelcomeScreen';
 import { ApiKeyModal } from './ApiKeyModal';
 import { ChangeApprovalModal } from './ChangeApprovalModal';
+import { AcpApprovalBanner } from './AcpApprovalBanner';
 import { ChatErrorBanner } from './ChatErrorBanner';
 import { ChatSurfaceBackground } from './ChatSurfaceBackground';
 import { BuddyComparisonPanel, type BuddyResponse } from './BuddyComparisonPanel';
@@ -413,6 +414,10 @@ const ChatVirtuosoFooter = React.memo(function ChatVirtuosoFooter({
           />
         </div>
       )}
+
+      <div className="mx-auto max-w-[720px] px-4 md:px-20">
+        <AcpApprovalBanner />
+      </div>
       {showIssueNextStepCallout && issueContext && (
         <div className="mx-auto max-w-[720px] px-4 md:px-20 pb-6">
           <IssueNextStepCallout
