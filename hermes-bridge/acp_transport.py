@@ -332,6 +332,11 @@ async def ensure_session(
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=stderr_file,
+            # hermes-acp emits large JSON-RPC lines (initialize/new_session
+            # payloads can carry the full provider catalog + MCP tool lists).
+            # The default 64KB StreamReader limit makes the acp SDK's readline
+            # receive loop raise "Separator is not found" on them.
+            limit=4 * 1024 * 1024,
         )
         conn = acp.connect_to_agent(client, proc.stdin, proc.stdout, use_unstable_protocol=True)
 
@@ -406,7 +411,20 @@ def run_prompt_blocking(
         handle.client.emit = emit
         handle.touch()
         blocks = [acp.text_block(user_message)]
-        await handle.conn.prompt(handle.session_id, blocks)
+        # The `prompt` arg order changed between SDK versions: 0.9.0 is
+        # `prompt(prompt, session_id)`, 0.11+ is `prompt(session_id, prompt)`.
+        # Inspect the bound method so the transport works on whichever venv
+        # the bridge is running under (bridge .venv vs hermes-agent venv).
+        import inspect
+
+        first_param = next(
+            (n for n, p in inspect.signature(handle.conn.prompt).parameters.items() if n not in ("self", "kwargs")),
+            "session_id",
+        )
+        if first_param == "session_id":
+            await handle.conn.prompt(handle.session_id, blocks)
+        else:
+            await handle.conn.prompt(blocks, handle.session_id)
 
     future = asyncio.run_coroutine_threadsafe(_impl(), loop)
     future.result(timeout=timeout or PROMPT_TIMEOUT_SECONDS)
