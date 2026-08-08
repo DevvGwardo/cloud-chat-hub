@@ -1104,6 +1104,180 @@ class RepoToolProvider:
 
 
 # ---------------------------------------------------------------------------
+# Custom MCP tools (CloudChat → real agent registry)
+# ---------------------------------------------------------------------------
+
+# Toolset name for CloudChat custom MCP tools (registered dynamically per request)
+_CUSTOM_MCP_TOOLSET = "cloudchat_mcp"
+# Cap custom MCP tool output to protect the model context window.
+_CUSTOM_MCP_MAX_RESULT_CHARS = int(
+    os.environ.get("HERMES_CUSTOM_MCP_MAX_RESULT_CHARS", "100000")
+)
+# Per-tool-call timeout for remote MCP execution (Streamable HTTP).
+_CUSTOM_MCP_TIMEOUT_SECONDS = int(
+    os.environ.get("HERMES_CUSTOM_MCP_TIMEOUT_SECONDS", "30")
+)
+
+
+def _execute_remote_mcp_tool(
+    server_url: str,
+    tool_name: str,
+    arguments: dict,
+    api_key: Optional[str] = None,
+) -> str:
+    """Execute a tool on a remote MCP server via Streamable HTTP transport.
+
+    Mirrors ``run_agent._execute_mcp_tool`` so the real-agent path behaves
+    identically to the custom fallback agent. Sends a JSON-RPC ``tools/call``
+    request and returns the text content from the response.
+    """
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments,
+        },
+    }
+
+    try:
+        with httpx.Client(timeout=_CUSTOM_MCP_TIMEOUT_SECONDS) as client:
+            resp = client.post(server_url, json=payload, headers=headers)
+            resp.raise_for_status()
+        data = resp.json()
+
+        # JSON-RPC error
+        if "error" in data:
+            err = data["error"]
+            return f"MCP error ({err.get('code', '?')}): {err.get('message', str(err))}"
+
+        # Extract result content — MCP returns {content: [{type, text}]}
+        result = data.get("result", {})
+        if isinstance(result, dict):
+            content_parts = result.get("content", [])
+            if isinstance(content_parts, list):
+                texts = [
+                    p.get("text", "")
+                    for p in content_parts
+                    if isinstance(p, dict) and p.get("type") == "text"
+                ]
+                if texts:
+                    return "\n".join(texts)
+            # Fallback: if result has a plain text field
+            if isinstance(result.get("text"), str):
+                return result["text"]
+        # Fallback: return raw JSON
+        return json.dumps(result) if result else "(empty MCP result)"
+    except httpx.TimeoutException:
+        return f"Error: MCP server at {server_url} timed out after {_CUSTOM_MCP_TIMEOUT_SECONDS}s"
+    except httpx.HTTPStatusError as exc:
+        return f"Error: MCP server returned HTTP {exc.response.status_code}: {exc.response.text[:300]}"
+    except Exception as e:
+        return f"Error calling MCP tool '{tool_name}': {e}"
+
+
+class CustomMCPServerProvider:
+    """Registers CloudChat custom MCP tools into the real agent's tool registry.
+
+    The frontend sends custom tool definitions (OpenAI function-calling
+    format) with the owning MCP server's URL/API key. The custom fallback
+    agent (``run_agent.AIAgent``) executes these directly, but the real
+    hermes-agent never saw them — they were silently dropped. Register them
+    here under a dedicated toolset with a handler that proxies ``tools/call``
+    to the server, so the real agent can call them like any built-in tool.
+
+    IMPORTANT: registration must happen BEFORE the real agent is constructed
+    (``get_tool_definitions()`` runs in ``__init__``); deregister after the
+    run. Same contract as ``RepoToolProvider``.
+    """
+
+    def __init__(
+        self,
+        custom_tools: list[dict],
+        on_server_tool_event: Optional[Callable] = None,
+    ):
+        self._custom_tools = list(custom_tools or [])
+        self._on_server_tool_event = on_server_tool_event
+        self._registered_tools: list[str] = []
+        # tool_name -> {"url", "api_key"} routing table for execution
+        self._routes: dict[str, dict] = {}
+
+    def _register_tools(self) -> None:
+        """Convert OpenAI-format definitions and register handlers."""
+        seen: set[str] = set()
+        for ct in self._custom_tools:
+            fn = ct.get("function", {}) if isinstance(ct, dict) else {}
+            if not isinstance(fn, dict):
+                continue
+            name = str(fn.get("name", "") or "").strip()
+            if not name:
+                continue
+            if name in seen:
+                print(
+                    f"[hermes-adapter] Custom MCP tool '{name}' defined by "
+                    "multiple servers — keeping the first definition",
+                    flush=True,
+                )
+                continue
+            seen.add(name)
+
+            description = str(fn.get("description", "") or "")
+            parameters = fn.get("parameters") or {"type": "object", "properties": {}}
+            schema = {
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+            }
+            server_url = str(ct.get("mcp_server_url", "") or "").strip()
+            api_key = ct.get("mcp_server_api_key")
+            self._routes[name] = {"url": server_url, "api_key": api_key}
+
+            def _handler(args, _name=name, **_kw):
+                route = self._routes.get(_name) or {}
+                return _execute_remote_mcp_tool(
+                    route.get("url", ""),
+                    _name,
+                    args or {},
+                    route.get("api_key"),
+                )
+
+            registry.register(
+                name=name,
+                toolset=_CUSTOM_MCP_TOOLSET,
+                schema=schema,
+                handler=_handler,
+                # A user-configured MCP tool intentionally shadows any
+                # built-in with the same name.
+                override=True,
+                max_result_size_chars=_CUSTOM_MCP_MAX_RESULT_CHARS,
+            )
+            self._registered_tools.append(name)
+
+        if self._registered_tools:
+            print(
+                f"[hermes-adapter] Registered {len(self._registered_tools)} custom MCP tool(s) "
+                f"with the real agent: {', '.join(self._registered_tools)}",
+                flush=True,
+            )
+
+    def _deregister_tools(self) -> None:
+        """Remove custom MCP tools from the registry after the request."""
+        for tool_name in self._registered_tools:
+            registry.deregister(tool_name)
+        if self._registered_tools:
+            print(
+                f"[hermes-adapter] Deregistered {len(self._registered_tools)} custom MCP tool(s)",
+                flush=True,
+            )
+        self._registered_tools.clear()
+
+
+# ---------------------------------------------------------------------------
 # Fallback provider switch detection (Hermes status_callback)
 # ---------------------------------------------------------------------------
 
@@ -1233,6 +1407,19 @@ class HermesAgentAdapter:
             real_toolsets.append(_REPO_TOOLSET)
             # Pre-register tools so the agent discovers them during __init__
             self._repo_provider._register_tools()
+
+        # Register CloudChat custom MCP tools (from user-configured MCP
+        # servers) into the real agent's registry BEFORE agent creation.
+        # Without this the real hermes-agent silently drops custom_tools
+        # and the agent never sees the user's MCP servers.
+        self._custom_mcp_provider: Optional[CustomMCPServerProvider] = None
+        if custom_tools:
+            self._custom_mcp_provider = CustomMCPServerProvider(
+                custom_tools,
+                on_server_tool_event=on_server_tool_event,
+            )
+            self._custom_mcp_provider._register_tools()
+            real_toolsets.append(_CUSTOM_MCP_TOOLSET)
 
         # Build ephemeral system prompt for repo context.
         # Always include today's date so web_search / news-style queries
@@ -1607,6 +1794,9 @@ class HermesAgentAdapter:
             # Deregister repo tools after the conversation to clean up the registry
             if self._repo_provider:
                 self._repo_provider._deregister_tools()
+            # Deregister custom MCP tools after the conversation too
+            if self._custom_mcp_provider:
+                self._custom_mcp_provider._deregister_tools()
 
         streamed_text = "".join(chunk for chunk in self._streamed_text_chunks if isinstance(chunk, str))
         streamed_visible_text = bool(streamed_text.strip())
