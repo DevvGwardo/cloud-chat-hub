@@ -4540,11 +4540,30 @@ def _resolve_workspace_id(request: Request, body) -> str:
     return text or f"sess-{uuid.uuid4().hex[:12]}"
 
 
+def _set_session_title_if_empty(session_id: str, title: str) -> None:
+    """Fill the state.db sessions.title when empty (hermes-desktop way: titled sessions)."""
+    if not title or not session_id:
+        return
+    try:
+        profile_name = _read_active_profile_name()
+        state_db_path = _state_db_path(_resolve_hermes_home(profile_name))
+        if not state_db_path.exists():
+            return
+        clean = " ".join(title.split())[:80]
+        with sqlite3.connect(str(state_db_path)) as conn:
+            row = conn.execute("SELECT title FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if row and not (row[0] or "").strip():
+                conn.execute("UPDATE sessions SET title = ? WHERE id = ?", (clean, session_id))
+    except Exception:
+        pass  # Best-effort; don't break request handling
+
+
 def _finalize_tracked_session(
     session_id: str,
     *,
     success: bool,
     error_message: Optional[str] = None,
+    persist_stub: bool = True,
 ) -> None:
     """Mark a chat session completed/error without requiring the nested finalize closure."""
     with _sessions_lock:
@@ -4555,7 +4574,13 @@ def _finalize_tracked_session(
         session["messages"] = len(session.get("chat", []))
         session["updated_at"] = _now_iso()
         session["error"] = error_message if error_message else None
-        _save_session_to_db(session)
+        # The real hermes agent owns the state.db row (source=cloudchat, full
+        # transcript). Writing the bridge stub here would INSERT OR REPLACE the
+        # same id and clobber the real row (and cascade-delete its messages).
+        if persist_stub:
+            _save_session_to_db(session)
+        elif success:
+            _set_session_title_if_empty(session_id, session.get("firstUserMessage") or "")
 
 
 async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
@@ -4580,6 +4605,11 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
 
     # Resolve workspace_id from conversation_id (header or body) for per-conversation isolation
     workspace_id = _resolve_workspace_id(request, body)
+
+    # Resolve the agent class early: whether we run the real hermes agent
+    # (hermes_adapter) decides if the bridge writes its own stub session row.
+    # The real agent creates and owns the state.db session itself.
+    AIAgent, _using_real_agent = _resolve_chat_agent_class()
 
     # Session tracking for Hermes Chats view
     session_id = workspace_id
@@ -4614,7 +4644,12 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             "chat": initial_chat[-_MAX_SESSION_CHAT_MESSAGES:],
             "error": None,
         }
-    _save_session_to_db(_sessions[session_id])
+    # Only the legacy fallback agent needs a bridge-owned stub row: the real
+    # hermes agent creates its own state.db session (source=cloudchat, full
+    # transcript) keyed on the same session_id. Writing a stub here would
+    # INSERT OR REPLACE over it.
+    if not _using_real_agent:
+        _save_session_to_db(_sessions[session_id])
 
     # If the latest user message is a hermes-agent skill command (/skill ...),
     # expand it in place into the skill's invocation prompt so the agent loop
@@ -4625,7 +4660,11 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
     if moa_shortcut:
         shortcut_index, shortcut_prompt = moa_shortcut
         if not shortcut_prompt:
-            _finalize_tracked_session(session_id, success=True)
+            _finalize_tracked_session(
+                session_id,
+                success=True,
+                persist_stub=not _using_real_agent,
+            )
             return _single_message_sse(
                 body.model,
                 "Usage: /moa <prompt>\n\nRun one prompt through the default Mixture of Agents preset.",
@@ -4633,7 +4672,12 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
         request_messages[shortcut_index]["content"] = shortcut_prompt
 
     def _finalize_session(success: bool, error_message: Optional[str] = None):
-        _finalize_tracked_session(session_id, success=success, error_message=error_message)
+        _finalize_tracked_session(
+            session_id,
+            success=success,
+            error_message=error_message,
+            persist_stub=not _using_real_agent,
+        )
 
     # Detect repo mode from either the request body tools OR the repo headers.
     # In agent-loop mode the server sends repo info via headers (not body tools),
@@ -5116,7 +5160,8 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
         # Protocol (hermes-acp) instead of the reimplemented agent loop.
         return await _acp_chat_completions_impl(request, body)
 
-    AIAgent, _using_real_agent = _resolve_chat_agent_class()
+    # AIAgent/_using_real_agent already resolved at the top of
+    # _chat_completions_impl (right after workspace_id).
     if resolved_provider == MOA_PROVIDER_ID and not _using_real_agent:
         return _moa_native_adapter_required_error(
             model=body.model,
@@ -5923,10 +5968,16 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
             "chat": [{"role": "user", "content": user_message[:400]}],
             "error": None,
         }
-    _save_session_to_db(_sessions[session_id])
+    # ACP drives the REAL hermes-agent, which owns the state.db session row.
+    # No bridge stub here — writing one would create a phantom duplicate.
 
     def _finalize_session(success: bool, error_message: Optional[str] = None):
-        _finalize_tracked_session(session_id, success=success, error_message=error_message)
+        _finalize_tracked_session(
+            session_id,
+            success=success,
+            error_message=error_message,
+            persist_stub=False,  # ACP is always the real agent
+        )
 
     chunk_id = f"chatcmpl-acp-{os.urandom(8).hex()}"
     started_at = time.monotonic()
