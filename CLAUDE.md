@@ -25,7 +25,6 @@ Professional software engineers using Spark as a daily AI coding assistant and G
 ### Accessibility
 WCAG AA compliance — good contrast ratios, full keyboard navigation, proper ARIA labels, focus indicators. Respect `prefers-reduced-motion`.
 <!-- hatch:end v1 -->
-
 ---
 
 ## Repo Workflows
