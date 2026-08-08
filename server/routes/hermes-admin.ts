@@ -235,6 +235,21 @@ export function registerHermesAdminRoute(app: Express) {
     await proxyTo(req, res, '/bridges/cursor-composer');
   });
 
+  // ACP approval decisions: forward the UI's choice (once/session/always/deny)
+  // to the bridge, which resolves the hermes-agent's pending permission
+  // request. Body: {"option_id": "allow_once" | "allow_session" | "allow_always" | "deny"}.
+  app.post('/api/hermes/approvals/:approvalId', async (req: Request, res: Response) => {
+    const { approvalId } = req.params;
+    if (!approvalId) {
+      sendJson(res, 400, { error: { message: 'approvalId is required' } });
+      return;
+    }
+    await proxyTo(req, res, `/v1/approvals/${encodeURIComponent(approvalId)}`, {
+      method: 'POST',
+      body: JSON.stringify(req.body ?? {}),
+    });
+  });
+
   // ─── Providers ────────────────────────────────────────────────────────────
 
   app.get('/api/hermes/providers', async (req: Request, res: Response) => {

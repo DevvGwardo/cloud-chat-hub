@@ -28,6 +28,14 @@ function makeServer(overrides: Partial<MCPServer> = {}): MCPServer {
   };
 }
 
+/**
+ * Normalize recorded status calls for assertion: drop `error` when it was
+ * undefined, so expectations don't carry brittle `error: undefined` entries.
+ */
+function normalizeStatusCalls(calls: Array<{ id: string; status: string; error?: string }>) {
+  return calls.map(({ error, ...rest }) => (error === undefined ? rest : { ...rest, error }));
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -43,12 +51,12 @@ describe('discoverMCPTools', () => {
     // Spy on store actions so we can verify status transitions
     const store = useHermesStore.getState();
     vi.spyOn(store, 'setMCPServerConnectionStatus').mockImplementation(
-      (id: string, status: any, error?: string) => {
+      (id: string, status: unknown, error?: string) => {
         statusCalls.push({ id, status, error });
       },
     );
     vi.spyOn(store, 'setMCPServerTools').mockImplementation(
-      (id: string, tools: any) => {
+      (id: string, tools: unknown) => {
         toolsCalls.push({ id, tools });
       },
     );
@@ -80,15 +88,22 @@ describe('discoverMCPTools', () => {
     expect(tools![0].description).toBe('Read a file');
     expect(tools![1].name).toBe('write_file');
 
+    // inputSchema from the server response must pass through untouched
+    expect(tools![0].inputSchema).toEqual({
+      type: 'object',
+      properties: { path: { type: 'string' } },
+    });
+    expect(tools![1].inputSchema).toEqual({ type: 'object', properties: {} });
+
     // Store was updated
     expect(toolsCalls).toHaveLength(1);
     expect(toolsCalls[0].id).toBe('srv-1');
     expect(toolsCalls[0].tools).toHaveLength(2);
 
     // Status transitions: connecting → connected
-    expect(statusCalls).toEqual([
-      { id: 'srv-1', status: 'connecting', error: undefined },
-      { id: 'srv-1', status: 'connected', error: undefined },
+    expect(normalizeStatusCalls(statusCalls)).toEqual([
+      { id: 'srv-1', status: 'connecting' },
+      { id: 'srv-1', status: 'connected' },
     ]);
   });
 
@@ -190,8 +205,8 @@ describe('discoverMCPTools', () => {
     const tools = await discoverMCPTools({ serverId: 'srv-http-err', url: 'http://localhost:9999/mcp' });
 
     expect(tools).toBeNull();
-    expect(statusCalls).toEqual([
-      { id: 'srv-http-err', status: 'connecting', error: undefined },
+    expect(normalizeStatusCalls(statusCalls)).toEqual([
+      { id: 'srv-http-err', status: 'connecting' },
       { id: 'srv-http-err', status: 'error', error: 'Failed to connect: HTTP 403' },
     ]);
     // Tools should NOT have been set
@@ -204,10 +219,35 @@ describe('discoverMCPTools', () => {
     const tools = await discoverMCPTools({ serverId: 'srv-net-err', url: 'http://localhost:9999/mcp' });
 
     expect(tools).toBeNull();
-    expect(statusCalls).toEqual([
-      { id: 'srv-net-err', status: 'connecting', error: undefined },
+    expect(normalizeStatusCalls(statusCalls)).toEqual([
+      { id: 'srv-net-err', status: 'connecting' },
       { id: 'srv-net-err', status: 'error', error: 'Failed to connect: ECONNREFUSED' },
     ]);
+  });
+
+  it('returns null and sets error status when the response body is not JSON', async () => {
+    // 200 OK with a non-JSON body: resp.json() throws, which must land on the
+    // error path (not crash / not silently return tools).
+    const resp = {
+      ok: true,
+      status: 200,
+      json: vi.fn().mockRejectedValue(new SyntaxError('Unexpected token < in JSON at position 0')),
+    } as unknown as Response;
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(resp));
+
+    const tools = await discoverMCPTools({ serverId: 'srv-bad-json', url: 'http://localhost:9999/mcp' });
+
+    expect(tools).toBeNull();
+    expect(normalizeStatusCalls(statusCalls)).toEqual([
+      { id: 'srv-bad-json', status: 'connecting' },
+      {
+        id: 'srv-bad-json',
+        status: 'error',
+        error: expect.stringContaining('Failed to connect:'),
+      },
+    ]);
+    // Tools should NOT have been set from a body we couldn't parse
+    expect(toolsCalls).toHaveLength(0);
   });
 
   it('handles non-Error thrown values gracefully', async () => {

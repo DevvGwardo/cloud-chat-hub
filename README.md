@@ -9,7 +9,7 @@
 **The AI desktop with an autonomous agent brain.**
 
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0--beta.4-orange?style=flat-square)](package.json)
+[![Version](https://img.shields.io/badge/version-1.0.0--beta.8-orange?style=flat-square)](package.json)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%2B%20Windows%20%2B%20Linux-lightgrey?style=flat-square)](electron-builder.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-green?style=flat-square)](package.json)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.10-green?style=flat-square)](hermes-bridge/requirements.txt)
@@ -18,7 +18,7 @@
   <img src="docs/spark-repo-banner.png" alt="Spark banner" width="100%">
 </p>
 
-[Screenshots](#screenshots) · [Quick Start](#-quick-start) · [Features](#-features) · [Architecture](#-architecture) · [Contributing](CONTRIBUTING.md)
+[Screenshots](#screenshots) · [Quick Start](#quick-start) · [Features](#features) · [Architecture](#architecture) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -28,7 +28,7 @@
 
 Spark is an AI desktop client that ships with **[Hermes](https://hermes-agent.nousresearch.com)** — Nous Research's autonomous agent that can read your code, browse the web, run terminals, manage GitHub repos, and actually get things done instead of just talking about them.
 
-It also supports **15 other LLM providers** as regular chat clients, an **orchestrator** for parallel sub-tasks, and ships as a **desktop Electron app for macOS, Windows, and Linux** with auto-updates.
+It also supports **16 other LLM providers** as regular chat clients, an **orchestrator** for parallel sub-tasks, and ships as a **desktop Electron app for macOS, Windows, and Linux** with auto-updates.
 
 **Hermes is optional.** Spark works perfectly as a chat client with any provider without it. Hermes just makes it way more useful.
 
@@ -66,7 +66,7 @@ It also supports **15 other LLM providers** as regular chat clients, an **orches
   <tr>
     <td width="33%" valign="top">
       <img src="docs/screenshots/03-settings.png" alt="Provider settings">
-      <br><sub><b>15 providers, one place</b> — drop in a key or sign in, switch models instantly.</sub>
+      <br><sub><b>18 providers, one place</b> — drop in a key or sign in, switch models instantly.</sub>
     </td>
     <td width="33%" valign="top">
       <img src="docs/screenshots/07-conversation-tree.png" alt="Conversation tree overlay">
@@ -86,7 +86,7 @@ It also supports **15 other LLM providers** as regular chat clients, an **orches
 ### Download the desktop app
 
 - **Install guide:** [docs/BETA-TESTING.md](docs/BETA-TESTING.md)
-- **Releases:** <https://github.com/DevvGwardo/cloud-chat-hub/releases>
+- **Releases:** <https://github.com/DevvGwardo/spark/releases>
 
 Current desktop support:
 - **macOS Apple Silicon (arm64):** supported via DMG
@@ -99,8 +99,8 @@ If this repo is private, users must have access to the repository to download re
 ### Run from source
 
 ```bash
-git clone https://github.com/DevvGwardo/cloud-chat-hub.git
-cd cloud-chat-hub
+git clone https://github.com/DevvGwardo/spark.git
+cd spark
 npm install
 ```
 
@@ -141,9 +141,10 @@ To stop everything: `./start-all.sh stop`
 npm run electron:dev    # dev mode with hot reload
 npm run electron:build  # build macOS DMG
 npm run electron:build:win  # build Windows installer
+npm run electron:publish:linux  # build + publish Linux AppImage and .deb
 ```
 
-Use GitHub Actions to publish both platforms together from a tagged release. See [docs/BETA-TESTING.md](docs/BETA-TESTING.md) for the release flow.
+Use GitHub Actions to publish all platforms together from a tagged release. See [docs/BETA-TESTING.md](docs/BETA-TESTING.md) for the release flow.
 
 ---
 
@@ -173,11 +174,11 @@ Hermes shows its work — you see every tool call, its result, and how it's reas
 
 ### Multi-Provider Chat
 
-15 providers out of the box. Enter your API key in Settings (or sign in to OpenRouter via OAuth) and go.
+18 providers out of the box. Enter your API key in Settings (or sign in to OpenRouter via OAuth) and go.
 
-OpenAI · Anthropic · Google Gemini · xAI · Groq · DeepSeek · Mistral · Together · MiniMax · Kimi · Cerebras · OpenRouter · SambaNova · z.ai · OpenClaw
+Hermes Agent · OpenAI · Anthropic · Google Gemini · xAI (Grok) · Groq · Cerebras · OpenRouter · SambaNova · DeepSeek · Mistral · Together AI · MiniMax (Coding Plan) · MiniMax (Pay-as-you-go) · Kimi · Kimi (Coding Plan) · z.ai (Zhipu) · OpenClaw
 
-Hermes agent mode is a separate feature — it uses any of the above providers as the underlying LLM, plus adds the autonomous tool loop. In **Settings → Hermes Agent** you can switch the agent's **underlying provider and model** on the fly: a live catalog (pulled from the bridge) lists every supported provider — Anthropic, OpenAI, Google, DeepSeek, xAI, Kimi, Z.AI, Alibaba, Groq, Mistral, Cerebras, Together, MiniMax, Nous, OpenRouter, and more — with credential indicators and the full model list for each. Pick "Auto" to route by model name, or name a provider explicitly and it wins over config defaults.
+Hermes agent mode is a separate feature — it uses any of the above providers as the underlying LLM, plus adds the autonomous tool loop. In **Settings → Hermes Agent** you can switch the agent's **underlying provider and model** on the fly: a live catalog (pulled from the bridge) lists every supported provider — Anthropic, OpenAI, Google, DeepSeek, xAI, Kimi, z.ai (Zhipu), Alibaba, Groq, Mistral, Cerebras, Together, MiniMax, Nous, OpenRouter, and more — with credential indicators and the full model list for each. Pick "Auto" to route by model name, or name a provider explicitly and it wins over config defaults.
 
 ### Live Code Preview
 
@@ -225,7 +226,7 @@ For complex tasks that benefit from parallel work. The orchestrator decomposes r
 
 ### Desktop App
 
-Native desktop app for macOS and Windows with global hotkey, tray menu, and auto-updates via `electron-updater`.
+Native desktop app for macOS, Windows, and Linux with global hotkey, tray menu, and auto-updates via `electron-updater`.
 
 ### Themes
 
@@ -260,8 +261,8 @@ Three execution modes:
 macOS / Linux:
 
 ```bash
-git clone https://github.com/DevvGwardo/cloud-chat-hub.git
-cd cloud-chat-hub
+git clone https://github.com/DevvGwardo/spark.git
+cd spark
 npm install
 
 # Set up the Hermes bridge (required for agent mode, optional for basic chat)
@@ -274,8 +275,8 @@ cd ..
 Windows (PowerShell):
 
 ```powershell
-git clone https://github.com/DevvGwardo/cloud-chat-hub.git
-cd cloud-chat-hub
+git clone https://github.com/DevvGwardo/spark.git
+cd spark
 npm install
 
 cd hermes-bridge
@@ -353,46 +354,88 @@ npm run dev
 ```
 src/                    # React + TypeScript frontend
 ├── components/
+│   ├── browser/        # Mini browser panel (Electron BrowserView)
 │   ├── chat/           # Messages, markdown, mermaid, tool accordions, approval modal
+│   ├── feedback/       # In-app feedback button
 │   ├── github/         # Repo/issue browser, changeset, PR creation
+│   ├── kanban/         # Kanban agent orchestrator
 │   ├── layout/         # App shell, panel tiling
+│   ├── mcp/            # MCP server dashboard and tool index
+│   ├── onboarding/     # Onboarding animations
 │   ├── overlay/        # Command palette
 │   ├── preview/        # Changeset diffs, live code preview
+│   ├── remote/         # Remote access modal (QR / tunnel)
+│   ├── rooms/          # Room chat dialogs and settings
 │   ├── settings/       # Settings modal, setup wizard
+│   ├── setup/          # First-run setup
 │   ├── sidebar/        # Chats, profiles, skills, memories, usage, images, cron, tasks
 │   ├── terminal/       # xterm-based terminal panel
-│   ├── workflow/       # Conversation tree overlay (xyflow + dagre)
-│   ├── feedback/       # In-app feedback button
-│   └── setup/          # First-run setup
+│   ├── tour/           # Interactive app tour
+│   ├── ui/             # Shared UI primitives
+│   └── workflow/       # Conversation tree overlay (xyflow + dagre)
+├── contexts/           # Panel and command-callback contexts
 ├── hooks/              # useChat, useOrchestrator, useTheme, …
 ├── lib/                # API client, providers, themes, approval-policy, toast
+├── mobile/             # Mobile Hermes control UI (/m)
+├── pages/              # Route-level pages
 └── stores/             # Zustand stores
 
 server/                 # Express API (:3001)
 ├── index.ts            # Bootstrap, model discovery, preview wiring
+├── agent-loop.ts       # Server-side tool definitions
+├── chat-store.ts       # Conversation persistence
+├── config.ts           # Server configuration (body limits, streaming)
+├── cron-archive-store.ts  # Scheduled-deployment archive
+├── direct-sse-proxy.ts # Streaming pass-through
+├── http-disconnect.ts  # SSE disconnect detection
+├── local-tools.ts      # File/terminal tool handlers
+├── mesh-bridge.ts      # Agentic-mesh integration for team context
+├── message-normalization.ts  # Bridge message normalization
+├── openclaw.ts         # OpenClaw gateway integration
+├── preview-manager.ts  # Live preview orchestration
+├── provider-config.ts  # Provider routing
+├── repo-clone-manager.ts  # Local repo clones for the agent
+├── repo-verifier.ts    # Repo integrity checks
+├── room-coordinator.ts # Multi-user room session coordination
+├── room-store.ts       # Room persistence
+├── task-orchestrator.ts  # Parallel sub-task orchestration
+├── team-context-store.ts  # Team context persistence
+├── team-coordinator.ts # Team dispatch
+├── team-formation.ts   # Formation strategies (pair, swarm, pipeline)
+├── team-formation-routing.ts  # Formation backend routing
+├── workspace-indexer.ts  # Workspace indexing
 ├── routes/             # chat, github, hermes-admin, hermes-runtimes,
 │                       # hermes-update, profiles, proxy, transcribe,
 │                       # translate, validate
 ├── lib/                # github-utils, hermes, hermes-profiles, helpers
-├── agent-loop.ts       # Server-side tool definitions
-├── chat-store.ts       # Conversation persistence
-├── direct-sse-proxy.ts # Streaming pass-through
-├── local-tools.ts      # File/terminal tool handlers
-├── openclaw.ts         # OpenClaw gateway integration
-├── preview-manager.ts  # Live preview orchestration
-├── provider-config.ts  # Provider routing
-├── repo-clone-manager.ts
-├── repo-verifier.ts
-└── workspace-indexer.ts
+└── scripts/            # Server-side utility scripts
 
 hermes-bridge/          # Python FastAPI server (:3002)
 ├── main.py             # Credential routing, SSE streaming
-├── hermes_adapter.py   # Wraps real Hermes AIAgent
-├── run_agent.py        # Fallback (no hermes-agent needed)
+├── acp_transport.py    # ACP transport for the real Hermes agent
 ├── anthropic_proxy.py  # Anthropic-shape proxy
 ├── brain_cache.py      # Cross-agent shared cache
-├── messaging_platforms.py
-└── swarm_pattern.py    # Architect → Implementor → Reviewer
+├── computer_use_frames.py  # Computer-use frame capture
+├── cursor_composer_bridge.py  # Cursor composer bridge
+├── hermes_adapter.py   # Wraps real Hermes AIAgent
+├── hermes_ops.py       # Ops surfaces: checkpoints, memory, usage, goals
+├── hermes_runs.py      # Agent run tracking
+├── kanban_tools.py     # Kanban agent tools
+├── mcp_telemetry.py    # MCP telemetry for the dashboard
+├── messaging_platforms.py  # Messaging platform adapters
+├── pricing.py          # Per-provider token pricing for cost estimates
+├── run_agent.py        # Fallback (no hermes-agent needed)
+├── swarm_pattern.py    # Architect → Implementor → Reviewer
+├── team_tools.py       # Multi-agent team tools
+└── worktree_support.py # Git worktree isolation
+
+e2e/                    # Playwright end-to-end tests (Electron)
+├── electron-app.ts     # Electron test harness
+├── app-basics.spec.ts  # Core app flows
+├── app-renderer.spec.ts
+├── cron-deployments.spec.ts
+├── mini-browser.spec.ts
+└── screenshots.spec.ts
 
 electron/               # Desktop app shell
 ├── index.ts            # Window, tray, hotkey
@@ -400,6 +443,7 @@ electron/               # Desktop app shell
 ├── bridge.ts           # Bridge process supervisor
 ├── updater.ts          # auto-update flow
 ├── oauth-openrouter.ts # OpenRouter OAuth handler
+├── server.test.ts      # Server unit tests
 └── preload.ts          # Preload bridge
 ```
 

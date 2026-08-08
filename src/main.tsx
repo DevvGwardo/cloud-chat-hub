@@ -11,19 +11,24 @@ import App from './App.tsx';
 import './index.css';
 import { useActivityStore } from './stores/activity-store';
 import { ToastProvider } from './components/ui/toast';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
-// Shoelace assets base path (icons, etc.)
-setBasePath('https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/');
+// Shoelace assets (icons) are bundled by the shoelace-assets vite plugin into
+// <outDir>/shoelace/ and fetched relative to index.html — no CDN dependency,
+// so the desktop/offline build renders icons without network access.
+setBasePath('./shoelace');
 
 // Expose a global check for the Electron updater to query whether any
 // conversation is actively streaming (prevents data loss on restart).
-(window as any).__updateHasActiveStreams = (): boolean => {
+(window as typeof window & { __updateHasActiveStreams?: () => boolean }).__updateHasActiveStreams = (): boolean => {
   const activities = useActivityStore.getState().activities;
   return Object.values(activities).some((a) => a.streaming);
 };
 
 createRoot(document.getElementById("root")!).render(
   <ToastProvider>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </ToastProvider>
 );

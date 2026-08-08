@@ -1,11 +1,35 @@
 {
   "name": "spark",
-  "private": true,
+  "description": "The AI desktop with an autonomous agent brain — Hermes agent mode, multi-provider chat, and a native Electron app for macOS, Windows, and Linux.",
   "version": "1.0.0-beta.8",
+  "private": true,
   "license": "MIT",
   "author": {
-    "name": "Spark",
-    "email": "noreply@spark.app"
+    "name": "DevGwardo",
+    "email": "25094504+DevGwardo@users.noreply.github.com"
+  },
+  "homepage": "https://github.com/DevvGwardo/spark",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DevvGwardo/spark.git"
+  },
+  "bugs": {
+    "url": "https://github.com/DevvGwardo/spark/issues"
+  },
+  "keywords": [
+    "ai",
+    "chat",
+    "llm",
+    "agent",
+    "hermes",
+    "autonomous-agent",
+    "electron",
+    "desktop",
+    "react",
+    "typescript"
+  ],
+  "engines": {
+    "node": ">=20"
   },
   "main": "out/main/index.js",
   "type": "module",

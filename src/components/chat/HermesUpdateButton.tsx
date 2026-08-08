@@ -1,7 +1,12 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Download, Check, Loader2, AlertTriangle, X } from 'lucide-react';
+import { Download, Check, Loader2, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { getApiBaseUrl } from '@/lib/api';
+import {
+  Dialog,
+  DialogContent,
+  DialogTitle,
+} from '@/components/ui/dialog';
 
 interface UpdateStatus {
   commitsBehind: number;
@@ -36,14 +41,23 @@ const UpdateProgressModal: React.FC<{
   const failed = progress?.done && progress.success === false;
   const succeeded = progress?.done && progress.success === true;
   const canClose = !updating || !!progress?.done;
+  const statusText = failed
+    ? progress?.error || 'Update failed'
+    : succeeded
+      ? `Updated to ${progress?.newVersion || 'latest version'}`
+      : progress?.label || 'Starting update...';
 
+  // Radix Dialog provides focus trap, focus restore, Escape handling and
+  // dialog ARIA for free. Close (Escape / X / backdrop) is guarded while an
+  // update is in flight so the progress overlay can't be dismissed mid-run.
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div
-        className="absolute inset-0 bg-black/70 backdrop-blur-md"
-        onClick={canClose ? onClose : undefined}
-      />
-      <div className="relative mx-4 w-full max-w-[420px] overflow-hidden rounded-[20px] border border-[#1E1E22] bg-background shadow-2xl">
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open && canClose) onClose();
+      }}
+    >
+      <DialogContent className="sm:max-w-[420px] gap-0 overflow-hidden rounded-[20px] border-[#1E1E22] p-0 shadow-2xl">
         {/* Header */}
         <div className="flex items-center gap-3 border-b border-[#1E1E22] px-5 py-4">
           <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#16161A]">
@@ -55,19 +69,9 @@ const UpdateProgressModal: React.FC<{
               <Download className="h-4 w-4 text-violet-400" />
             )}
           </div>
-          <h2 className="text-sm font-semibold text-[#FAFAF9]">
+          <DialogTitle className="text-sm font-semibold text-[#FAFAF9]">
             {succeeded ? 'Hermes Updated' : failed ? 'Update Failed' : 'Updating Hermes'}
-          </h2>
-          <div className="flex-1" />
-          {canClose && (
-            <button
-              onClick={onClose}
-              aria-label="Close"
-              className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#16161A] text-[#6B6B70] transition-colors hover:bg-[#1E1E22] hover:text-[#FAFAF9]"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          )}
+          </DialogTitle>
         </div>
 
         {/* Body */}
@@ -79,6 +83,7 @@ const UpdateProgressModal: React.FC<{
             aria-valuenow={pct}
             aria-valuemin={0}
             aria-valuemax={100}
+            aria-valuetext={statusText}
           >
             <div
               className={cn(
@@ -89,15 +94,14 @@ const UpdateProgressModal: React.FC<{
             />
           </div>
 
-          {/* Status line */}
-          <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+          {/* Status line — role="status" announces progress updates to AT */}
+          <div
+            className="mt-3 flex items-center gap-2 text-xs text-muted-foreground"
+            role="status"
+          >
             {!progress?.done && <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-400" />}
             <span className={cn(failed && 'text-destructive', succeeded && 'text-emerald-400')}>
-              {failed
-                ? progress?.error || 'Update failed'
-                : succeeded
-                  ? `Updated to ${progress?.newVersion || 'latest version'}`
-                  : progress?.label || 'Starting update...'}
+              {statusText}
             </span>
             <div className="flex-1" />
             {!progress?.done && (
@@ -107,8 +111,8 @@ const UpdateProgressModal: React.FC<{
             )}
           </div>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 };
 
@@ -121,24 +125,43 @@ export const HermesUpdateButton: React.FC = () => {
   const [progress, setProgress] = useState<UpdateProgress | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const checkStatus = useCallback(async () => {
+  const checkStatus = useCallback(async (): Promise<boolean> => {
     try {
       const baseUrl = getApiBaseUrl();
       const res = await fetch(`${baseUrl}/api/hermes/update/status`);
       if (res.ok) {
         const data = await res.json() as UpdateStatus;
         setStatus(data);
+        return true;
       }
     } catch {
       // silently fail — hermes might not be installed
     }
+    return false;
   }, []);
 
-  // Check on mount and every 5 minutes
+  // Check on mount and every 5 minutes. If the initial check fails (e.g. the
+  // Hermes server is still starting), retry every 30s until the first success
+  // so the button appears as soon as the endpoint is reachable instead of
+  // waiting for the next 5-minute poll.
   useEffect(() => {
-    checkStatus();
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const poll = async () => {
+      const ok = await checkStatus();
+      if (!cancelled && !ok) {
+        retryTimer = setTimeout(poll, 30_000);
+      }
+    };
+
+    poll();
     const interval = setInterval(checkStatus, 5 * 60 * 1000);
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      clearInterval(interval);
+    };
   }, [checkStatus]);
 
   const stopPolling = useCallback(() => {
@@ -219,8 +242,8 @@ export const HermesUpdateButton: React.FC = () => {
           newVersion: null,
         }));
       }
-    } catch (err: any) {
-      setError(err.message || 'Update failed');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Update failed');
       // POST itself failed — surface it in the modal since progress polling won't
       setProgress((prev) => ({
         step: prev?.step ?? 0,
@@ -228,7 +251,7 @@ export const HermesUpdateButton: React.FC = () => {
         label: prev?.label ?? '',
         done: true,
         success: false,
-        error: err.message || 'Update failed',
+        error: err instanceof Error ? err.message : 'Update failed',
         newVersion: null,
       }));
     } finally {

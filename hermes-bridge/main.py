@@ -1559,6 +1559,15 @@ try:
                 pass
         _brain_initialized = False
 
+        # Shut down ACP sessions so spawned hermes-acp children don't outlive
+        # the bridge on restart. Safe no-op when the SDK/transport is absent.
+        try:
+            import acp_transport
+
+            await acp_transport.shutdown_all()
+        except Exception:
+            pass
+
     async def _brain_call_async(tool: str, args: dict):
         """Make a brain tool call, returns result dict or None."""
         return await _brain_rpc("tools/call", {"name": tool, "arguments": args})
@@ -4531,11 +4540,30 @@ def _resolve_workspace_id(request: Request, body) -> str:
     return text or f"sess-{uuid.uuid4().hex[:12]}"
 
 
+def _set_session_title_if_empty(session_id: str, title: str) -> None:
+    """Fill the state.db sessions.title when empty (hermes-desktop way: titled sessions)."""
+    if not title or not session_id:
+        return
+    try:
+        profile_name = _read_active_profile_name()
+        state_db_path = _state_db_path(_resolve_hermes_home(profile_name))
+        if not state_db_path.exists():
+            return
+        clean = " ".join(title.split())[:80]
+        with sqlite3.connect(str(state_db_path)) as conn:
+            row = conn.execute("SELECT title FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if row and not (row[0] or "").strip():
+                conn.execute("UPDATE sessions SET title = ? WHERE id = ?", (clean, session_id))
+    except Exception:
+        pass  # Best-effort; don't break request handling
+
+
 def _finalize_tracked_session(
     session_id: str,
     *,
     success: bool,
     error_message: Optional[str] = None,
+    persist_stub: bool = True,
 ) -> None:
     """Mark a chat session completed/error without requiring the nested finalize closure."""
     with _sessions_lock:
@@ -4546,7 +4574,13 @@ def _finalize_tracked_session(
         session["messages"] = len(session.get("chat", []))
         session["updated_at"] = _now_iso()
         session["error"] = error_message if error_message else None
-        _save_session_to_db(session)
+        # The real hermes agent owns the state.db row (source=cloudchat, full
+        # transcript). Writing the bridge stub here would INSERT OR REPLACE the
+        # same id and clobber the real row (and cascade-delete its messages).
+        if persist_stub:
+            _save_session_to_db(session)
+        elif success:
+            _set_session_title_if_empty(session_id, session.get("firstUserMessage") or "")
 
 
 async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
@@ -4571,6 +4605,11 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
 
     # Resolve workspace_id from conversation_id (header or body) for per-conversation isolation
     workspace_id = _resolve_workspace_id(request, body)
+
+    # Resolve the agent class early: whether we run the real hermes agent
+    # (hermes_adapter) decides if the bridge writes its own stub session row.
+    # The real agent creates and owns the state.db session itself.
+    AIAgent, _using_real_agent = _resolve_chat_agent_class()
 
     # Session tracking for Hermes Chats view
     session_id = workspace_id
@@ -4605,7 +4644,12 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             "chat": initial_chat[-_MAX_SESSION_CHAT_MESSAGES:],
             "error": None,
         }
-    _save_session_to_db(_sessions[session_id])
+    # Only the legacy fallback agent needs a bridge-owned stub row: the real
+    # hermes agent creates its own state.db session (source=cloudchat, full
+    # transcript) keyed on the same session_id. Writing a stub here would
+    # INSERT OR REPLACE over it.
+    if not _using_real_agent:
+        _save_session_to_db(_sessions[session_id])
 
     # If the latest user message is a hermes-agent skill command (/skill ...),
     # expand it in place into the skill's invocation prompt so the agent loop
@@ -4616,7 +4660,11 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
     if moa_shortcut:
         shortcut_index, shortcut_prompt = moa_shortcut
         if not shortcut_prompt:
-            _finalize_tracked_session(session_id, success=True)
+            _finalize_tracked_session(
+                session_id,
+                success=True,
+                persist_stub=not _using_real_agent,
+            )
             return _single_message_sse(
                 body.model,
                 "Usage: /moa <prompt>\n\nRun one prompt through the default Mixture of Agents preset.",
@@ -4624,7 +4672,12 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
         request_messages[shortcut_index]["content"] = shortcut_prompt
 
     def _finalize_session(success: bool, error_message: Optional[str] = None):
-        _finalize_tracked_session(session_id, success=success, error_message=error_message)
+        _finalize_tracked_session(
+            session_id,
+            success=success,
+            error_message=error_message,
+            persist_stub=not _using_real_agent,
+        )
 
     # Detect repo mode from either the request body tools OR the repo headers.
     # In agent-loop mode the server sends repo info via headers (not body tools),
@@ -5102,7 +5155,13 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             ),
         )
 
-    AIAgent, _using_real_agent = _resolve_chat_agent_class()
+    if execution_mode == "acp":
+        # ACP transport — drive the REAL hermes-agent via Agent Client
+        # Protocol (hermes-acp) instead of the reimplemented agent loop.
+        return await _acp_chat_completions_impl(request, body)
+
+    # AIAgent/_using_real_agent already resolved at the top of
+    # _chat_completions_impl (right after workspace_id).
     if resolved_provider == MOA_PROVIDER_ID and not _using_real_agent:
         return _moa_native_adapter_required_error(
             model=body.model,
@@ -5771,6 +5830,331 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
         yield sse_chunk(make_delta_chunk(chunk_id, body.model, {}, finish_reason="stop"))
         yield "data: [DONE]\n\n"
 
+        await agent_task
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ------------------------------------------------------------------
+# ACP transport — drive the REAL hermes-agent via Agent Client Protocol
+# ------------------------------------------------------------------
+# ``x-hermes-execution-mode: acp`` spawns ``hermes-acp`` (hermes-agent's ACP
+# stdio server) per conversation and relays its ``task/update`` notifications
+# into the same SSE shapes the agent-loop transport emits, so the UI renders
+# real hermes tools without any UI changes. The reimplemented loop in
+# run_agent.py is not used on this path.
+
+_acp_reaper_task = None
+
+
+def _ensure_acp_reaper() -> None:
+    """Start the idle-session reaper once (called from the first ACP request)."""
+    global _acp_reaper_task
+    if _acp_reaper_task is None or _acp_reaper_task.done():
+        _acp_reaper_task = asyncio.create_task(_acp_reaper_loop())
+
+
+async def _acp_reaper_loop() -> None:
+    while True:
+        try:
+            await asyncio.sleep(60)
+            import acp_transport
+
+            closed = await acp_transport.reap_idle_sessions()
+            if closed:
+                print(f"[hermes-bridge] ACP idle reaper closed {closed} session(s)", flush=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+
+@app.post("/v1/approvals/{approval_id}")
+async def acp_approval_route(approval_id: str, body: dict = None):
+    """Resolve a pending ACP permission request with the user's decision.
+
+    Body: ``{"option_id": "allow_once" | "allow_session" | "allow_always" | "deny"}``
+    Mirrors the UI's once/session/always scopes; the hermes ACP adapter maps
+    these onto its own approval semantics.
+    """
+    try:
+        import acp_transport
+
+        option_id = ""
+        if isinstance(body, dict):
+            option_id = str(body.get("option_id") or "").strip()
+        if not option_id:
+            return JSONResponse(status_code=400, content={"error": {"message": "option_id is required"}})
+        delivered = await acp_transport.resolve_approval(approval_id, option_id)
+        if not delivered:
+            return JSONResponse(status_code=404, content={"error": {"message": f"Unknown or expired approval: {approval_id}"}})
+        return {"ok": True, "approval_id": approval_id, "option_id": option_id}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": {"message": str(e)}})
+
+
+def _content_to_text(content) -> str:
+    """Coerce a normalized message content (str or multimodal list) to text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text" and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+                elif isinstance(block.get("content"), str):
+                    parts.append(block["content"])
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts)
+    return str(content or "")
+
+
+def _format_plan_text(entries) -> str:
+    """Render ACP ``plan_update`` entries as markdown text for the chat stream.
+
+    The SSE protocol has no dedicated plan event (frontend HermesEvent types
+    are text / tool_activity / agent_status / reasoning / server_tool_event),
+    so the plan is forwarded as visible content — the same way the swarm path
+    streams its plan summary.
+    """
+    if not entries:
+        return ""
+    lines = ["\n### Plan"]
+    for entry in entries:
+        text = str(getattr(entry, "content", "") or "").strip()
+        if not text:
+            continue
+        status = str(getattr(entry, "status", "") or "")
+        marker = {"completed": "- [x]", "in_progress": "- [ ]", "pending": "- [ ]"}.get(status, "-")
+        lines.append(f"{marker} {text}")
+    return "\n".join(lines) + "\n" if len(lines) > 1 else ""
+
+
+async def _acp_chat_completions_impl(request: Request, body: ChatCompletionRequest):
+    """Chat completions via the ACP transport (real hermes-agent)."""
+    import acp_transport
+
+    available, reason = acp_transport.acp_available()
+    if not available:
+        print(f"[hermes-bridge] ACP mode requested but unavailable: {reason}", flush=True)
+        # `_mark_request_started` already ran (before the mode branch) — close
+        # the accounting here or the active-request metric leaks.
+        _mark_request_finished(
+            model=body.model,
+            success=False,
+            summary=f"model={body.model} mode=acp error=acp-unavailable",
+        )
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": f"ACP transport unavailable: {reason}"}},
+        )
+    _ensure_acp_reaper()
+
+    request_profile = _resolve_profile_name(request)
+    repo_owner = request.headers.get("x-hermes-repo-owner", "")
+    repo_name = request.headers.get("x-hermes-repo-name", "")
+    repo_root_header = request.headers.get("x-hermes-repo-root", "").strip()
+    provider = request.headers.get("x-hermes-provider", "").strip().lower()
+    if provider in ("", "auto", "default"):
+        provider = None
+
+    workspace_id = _resolve_workspace_id(request, body)
+    session_id = workspace_id
+    cwd = repo_root_header or os.getcwd()
+
+    request_messages = _normalize_chat_messages(body.messages, model=body.model, strip_images=True)
+    last_user_idx = None
+    for i in range(len(request_messages) - 1, -1, -1):
+        if request_messages[i]["role"] == "user":
+            last_user_idx = i
+            break
+    user_message = (
+        _content_to_text(request_messages[last_user_idx]["content"])
+        if last_user_idx is not None
+        else ""
+    )
+    if not user_message.strip():
+        _mark_request_finished(model=body.model, success=False, summary=f"model={body.model} mode=acp error=empty-prompt")
+        return _single_message_sse(body.model, "Nothing to run — the latest user message is empty.")
+
+    # Session tracking for Hermes Chats view (same shape as the agent-loop path)
+    created_at = _now_iso()
+    with _sessions_lock:
+        _sessions[session_id] = {
+            "id": session_id,
+            "profile": request_profile,
+            "model": body.model,
+            "status": "active",
+            "created_at": created_at,
+            "updated_at": created_at,
+            "messages": len(request_messages),
+            "toolsets": [],
+            "repo": f"{repo_owner}/{repo_name}" if repo_owner and repo_name else None,
+            "firstUserMessage": user_message[:100],
+            "chat": [{"role": "user", "content": user_message[:400]}],
+            "error": None,
+        }
+    # ACP drives the REAL hermes-agent, which owns the state.db session row.
+    # No bridge stub here — writing one would create a phantom duplicate.
+
+    def _finalize_session(success: bool, error_message: Optional[str] = None):
+        _finalize_tracked_session(
+            session_id,
+            success=success,
+            error_message=error_message,
+            persist_stub=False,  # ACP is always the real agent
+        )
+
+    chunk_id = f"chatcmpl-acp-{os.urandom(8).hex()}"
+    started_at = time.monotonic()
+    event_queue: asyncio.Queue = asyncio.Queue()
+    done_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _qput(item):
+        loop.call_soon_threadsafe(event_queue.put_nowait, item)
+
+    def on_text(text: str):
+        _append_session_chat_chunk(session_id, "assistant", text)
+        chunk_size = _get_stream_chunk_size(text)
+        for i in range(0, len(text), chunk_size):
+            _qput(("text", text[i:i + chunk_size]))
+
+    def on_tool_start(tool_name: str, tool_input: str):
+        _qput(("tool_start", tool_name, tool_input))
+        _append_session_chat_chunk(session_id, "assistant", _format_tool_start_text(tool_name, tool_input))
+
+    def on_tool_end(tool_name: str, tool_input: str, tool_output: str):
+        _qput(("tool_end", tool_name, tool_input, tool_output))
+        _append_session_chat_chunk(session_id, "assistant", _format_tool_end_text(tool_name, tool_output))
+
+    def on_reasoning(text: str):
+        chunk_size = _get_stream_chunk_size(text)
+        for i in range(0, len(text), chunk_size):
+            _qput(("reasoning", text[i:i + chunk_size]))
+
+    def on_approval_request(event: dict):
+        _qput(("approval_request", event))
+
+    def _acp_emit(kind: str, *payload):
+        if kind == "text":
+            on_text(payload[0])
+        elif kind == "reasoning":
+            on_reasoning(payload[0])
+        elif kind == "tool_start":
+            on_tool_start(payload[0], payload[1])
+        elif kind == "tool_end":
+            on_tool_end(payload[0], payload[1], payload[2])
+        elif kind == "approval_request":
+            on_approval_request(payload[0])
+        elif kind == "plan":
+            _qput(("plan", payload[0]))
+
+    request_outcome = {"success": True, "error": None}
+
+    def _run_acp_sync():
+        try:
+            acp_transport.run_prompt_blocking(
+                loop=loop,
+                conversation_id=workspace_id,
+                cwd=cwd,
+                user_message=user_message,
+                emit=_acp_emit,
+                provider=provider,
+                model=body.model,
+            )
+            print(f"[hermes-bridge] ACP conversation completed. conversation={workspace_id}", flush=True)
+            _finalize_session(True)
+        except Exception as e:
+            error_message = str(e)
+            request_outcome["success"] = False
+            request_outcome["error"] = error_message
+            print(f"[hermes-bridge] ACP error: {error_message}", flush=True)
+            _append_session_chat_chunk(session_id, "assistant", f"\n\n[Error: {error_message}]")
+            _qput(("text", f"\n\n[Error: {error_message}]"))
+            _finalize_session(False, error_message=error_message)
+        finally:
+            loop.call_soon_threadsafe(done_event.set)
+
+    async def event_stream():
+        yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"role": "assistant"}))
+        yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
+            "agent_status": _build_agent_status(
+                phase="starting",
+                label="Starting Hermes agent (ACP)...",
+                started_at=started_at,
+            ),
+        }))
+
+        agent_task = asyncio.ensure_future(asyncio.to_thread(_run_acp_sync))
+        event_count = 0
+        # Wall-clock keepalive: heartbeat after HEARTBEAT_INTERVAL seconds of
+        # silence, not after N idle poll iterations (~50ms each).
+        last_heartbeat = time.monotonic()
+        HEARTBEAT_INTERVAL = 60  # seconds
+        while not done_event.is_set() or not event_queue.empty():
+            drained = False
+            while not event_queue.empty():
+                drained = True
+                last_heartbeat = time.monotonic()
+                try:
+                    event = event_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                event_count += 1
+                if event[0] == "text":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"content": event[1]}))
+                elif event[0] == "tool_start":
+                    tool_name, tool_input = event[1], event[2]
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"content": _format_tool_start_text(tool_name, tool_input)}))
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
+                        "tool_activity": {"tool": tool_name, "status": "running", "input": tool_input, "output": None}
+                    }))
+                elif event[0] == "tool_end":
+                    tool_name, tool_input, tool_output = event[1], event[2], event[3]
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"content": _format_tool_end_text(tool_name, tool_output)}))
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
+                        "tool_activity": {"tool": tool_name, "status": "completed", "input": tool_input, "output": tool_output}
+                    }))
+                elif event[0] == "reasoning":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"reasoning": event[1]}))
+                elif event[0] == "thinking":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
+                        "agent_status": _build_agent_status(
+                            phase="thinking",
+                            label="Planning...",
+                            started_at=started_at,
+                            iteration=1,
+                        ),
+                    }))
+                elif event[0] == "approval_request":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"approval_request": event[1]}))
+                elif event[0] == "plan":
+                    plan_text = _format_plan_text(event[1])
+                    if plan_text:
+                        yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"content": plan_text}))
+
+            if not done_event.is_set():
+                now = time.monotonic()
+                if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                    last_heartbeat = now
+                    yield ": heartbeat\n\n"
+                await asyncio.sleep(0.05)
+
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        _mark_request_finished(
+            model=body.model,
+            success=request_outcome["success"],
+            summary=(
+                f"model={body.model} mode=acp success={str(request_outcome['success']).lower()} "
+                f"events={event_count} elapsed_ms={elapsed_ms}"
+                + (f" error={request_outcome['error'][:80]}" if request_outcome["error"] else "")
+            ),
+        )
+        yield sse_chunk(make_delta_chunk(chunk_id, body.model, {}, finish_reason="stop"))
+        yield "data: [DONE]\n\n"
         await agent_task
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

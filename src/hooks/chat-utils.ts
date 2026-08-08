@@ -330,6 +330,26 @@ export function isHermesLoopStatusData(
     && typeof ((value as { status: { phase?: unknown } }).status.phase) === 'string';
 }
 
+export interface AcpApprovalEvent {
+  approval_id: string;
+  session_id: string;
+  tool: string;
+  kind?: string;
+  summary?: string;
+  excerpt?: string;
+  options?: Array<{ option_id: string; name: string }>;
+}
+
+export function isApprovalRequestData(value: unknown): value is { type: 'approval_request' } & AcpApprovalEvent {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const record = value as { type?: unknown; approval_id?: unknown };
+  return record.type === 'approval_request'
+    && typeof record.approval_id === 'string'
+    && record.approval_id.length > 0;
+}
+
 export async function upsertStoredMessage(message: StoredMessage): Promise<void> {
   try {
     await db.messages.add(message);

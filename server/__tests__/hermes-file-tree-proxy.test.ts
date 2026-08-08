@@ -325,7 +325,7 @@ describe('Hermes file tree proxy', () => {
       expect(capturedHeaders['X-Hermes-Repo-Name']).toBe('project')
       expect(capturedHeaders['X-Hermes-Github-PAT']).toBe('ghp_validtokenformat1234567890abcdef12345')
       expect(capturedHeaders['X-Hermes-Repo-Edit-Intent']).toBe('1')
-      expect(capturedHeaders['X-Hermes-Execution-Mode']).toBe('agent-loop')
+      expect(capturedHeaders['X-Hermes-Execution-Mode']).toBe('acp')
     } finally {
       await server.close()
     }

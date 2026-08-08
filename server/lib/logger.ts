@@ -35,7 +35,8 @@ import { randomUUID } from 'crypto';
 
 export function requestIdMiddleware(req: Request, _res: Response, next: NextFunction) {
   const requestId = randomUUID();
-  (req as any).requestId = requestId;
-  (req as any).log = logger.child({ requestId });
+  const typedReq = req as Request & { requestId: string; log: pino.Logger };
+  typedReq.requestId = requestId;
+  typedReq.log = logger.child({ requestId });
   next();
 }

@@ -2,7 +2,7 @@
 ## Design Context
 
 ### Users
-Professional software engineers using CloudChat as a daily AI coding assistant and GitHub workflow tool. They're in flow state — writing code, reviewing diffs, managing PRs — and expect the interface to keep up without friction. Speed and information density matter more than hand-holding.
+Professional software engineers using Spark as a daily AI coding assistant and GitHub workflow tool. They're in flow state — writing code, reviewing diffs, managing PRs — and expect the interface to keep up without friction. Speed and information density matter more than hand-holding.
 
 ### Brand Personality
 **Bold, technical, fast.** Power-user energy. The interface should feel like a precision instrument — responsive, dense with useful information, and visually sharp. Think Warp terminal meets Linear's polish.
@@ -25,3 +25,38 @@ Professional software engineers using CloudChat as a daily AI coding assistant a
 ### Accessibility
 WCAG AA compliance — good contrast ratios, full keyboard navigation, proper ARIA labels, focus indicators. Respect `prefers-reduced-motion`.
 <!-- hatch:end v1 -->
+---
+
+## Repo Workflows
+
+### Dev commands
+
+| Command | What it does |
+|---------|--------------|
+| `npm run dev` | Vite dev server (http://localhost:8080) |
+| `npm run server` | Express API server (:3001) |
+| `npm run build` | Production build (frontend + server bundle) |
+| `npm test` | Unit tests (Vitest) |
+| `npm run test:e2e` | Playwright end-to-end tests against the Electron app |
+| `npm run typecheck` | TypeScript checks (app + electron configs) |
+| `npm run lint` | ESLint across the repo |
+
+### Ports
+
+- `3001` — Express API server
+- `3002` — Hermes bridge (Python FastAPI)
+- `8080` — Vite dev server / frontend
+
+### Key directories
+
+- `src/` — React + TypeScript frontend (`components/`, `hooks/`, `lib/`, `stores/`, `mobile/`)
+- `server/` — Express API (`routes/`, `lib/`, team/room/orchestrator modules)
+- `electron/` — Desktop app shell (tray, updater, OAuth, embedded server)
+- `hermes-bridge/` — Python bridge to the Hermes agent (`main.py`, `acp_transport.py`)
+- `e2e/` — Playwright end-to-end tests
+
+### Branch & PR conventions
+
+- Feature work lives on `feat/*` branches (e.g. `feat/hermes-acp-transport`)
+- `main` is the PR target; keep PRs focused on a single concern
+- Run `npm run typecheck && npm run lint && npm test` before opening a PR

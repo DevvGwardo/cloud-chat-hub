@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 
 import { teamCoordinator } from './team-coordinator';
 import { analyzeTask } from './team-formation';
@@ -63,6 +63,18 @@ interface CardRecord {
 
 const API_BASE = process.env.CLOUDCHAT_API_BASE || 'http://localhost:3001';
 
+// ─── Agent lifecycle limits ────────────────────────────────────────────────
+
+// Hard cap on how long a single kanban agent subprocess may run before it is
+// killed (crashed or hung agents must not occupy a maxConcurrent slot forever).
+const MAX_AGENT_RUNTIME_MS = Number(process.env.KANBAN_AGENT_MAX_RUNTIME_MS) || 2 * 60 * 60 * 1000;
+// Stale activeTasks entries (no live child, card stuck in 'running') are reaped
+// after this TTL and reconciled against the kanban board.
+const ACTIVE_TASK_TTL_MS = Number(process.env.KANBAN_ACTIVE_TASK_TTL_MS) || 6 * 60 * 60 * 1000;
+// Cap buffered agent stdout/stderr (head/tail window) so a chatty agent can't
+// accumulate unbounded strings in memory.
+const MAX_AGENT_LOG_BYTES = 64 * 1024;
+
 const state = {
   activeTasks: new Map<string, ActiveTask>(),
   enabled: false,
@@ -71,7 +83,47 @@ const state = {
   isProcessing: false,
   intervalId: null as ReturnType<typeof setInterval> | null,
   stats: { completed: 0, failed: 0, startedAt: null as number | null },
+  // cardId → spawned agent subprocess, tracked so cancelTask/timeouts can kill it.
+  children: new Map<string, ChildProcess>(),
 };
+
+// Cards whose agent was intentionally terminated (cancel/timeout kill) — their
+// close handler must not treat the kill as a crash and mark the card failed.
+const cancelledChildren = new Set<string>();
+
+/** SIGTERM a child, escalating to SIGKILL if it ignores the signal. */
+function terminateChild(child: ChildProcess): void {
+  if (child.exitCode !== null || child.signalCode !== null) return; // already exited
+  try {
+    child.kill('SIGTERM');
+  } catch {
+    return; // process already gone
+  }
+  const grace = setTimeout(() => {
+    try {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    } catch {
+      // already gone
+    }
+  }, 5000);
+  grace.unref?.();
+}
+
+/**
+ * Append to a capped log buffer keeping a head/tail window. Once truncated,
+ * the head window is dropped and the tail stays fresh so the end of the
+ * agent's output (usually the most useful part) remains readable.
+ */
+function appendCappedLog(current: string, chunk: string, maxBytes: number): string {
+  if (current.length >= maxBytes) {
+    return current.slice(-(maxBytes / 2)) + chunk;
+  }
+  const next = current + chunk;
+  if (next.length <= maxBytes) return next;
+  const head = Math.floor(maxBytes / 2);
+  const tail = maxBytes - head - 64;
+  return `${next.slice(0, head)}\n...[truncated ${next.length - maxBytes} bytes]...\n${next.slice(-tail)}`;
+}
 
 // ─── Card fetcher ──────────────────────────────────────────────────────────
 
@@ -191,6 +243,56 @@ async function detectCompletions(): Promise<void> {
   }
 }
 
+// ─── Stale task reaper ─────────────────────────────────────────────────────
+
+/**
+ * Reap activeTasks entries that have outlived ACTIVE_TASK_TTL_MS — crashed,
+ * hung, or orphaned agents leave cards 'running' forever and leak a
+ * maxConcurrent slot. Entries are reconciled against the kanban board:
+ * a card that already left 'running' is freed and its final transition counted
+ * once; a card still 'running' with no live agent is killed/marked failed.
+ */
+async function reapStaleTasks(): Promise<void> {
+  if (state.activeTasks.size === 0) return;
+
+  const now = Date.now();
+  const stale = Array.from(state.activeTasks.entries()).filter(
+    ([, task]) => now - task.startedAt > ACTIVE_TASK_TTL_MS,
+  );
+  if (stale.length === 0) return;
+
+  const cardById = new Map((await fetchCards('')).map((c) => [c.id, c]));
+
+  for (const [cardId, _task] of stale) {
+    const status = cardById.get(cardId)?.status;
+
+    if (status && status !== 'running') {
+      // Agent finished but the slot was never released — count the transition now.
+      state.activeTasks.delete(cardId);
+      if (status === 'done') {
+        state.stats.completed++;
+      } else if (status === 'blocked' || status === 'failed') {
+        state.stats.failed++;
+      }
+      logger.warn(
+        `[orchestrator] Reaped stale task ${cardId.slice(0, 12)}... (final status ${status})`,
+      );
+      continue;
+    }
+
+    // Still running (or unknown): the agent is gone or hung — kill any leftover
+    // child and mark the card failed so the slot frees and the card surfaces.
+    const child = state.children.get(cardId);
+    if (child) terminateChild(child);
+    state.activeTasks.delete(cardId);
+    state.stats.failed++;
+    updateCardStatus(cardId, 'failed').catch(() => {});
+    logger.warn(
+      `[orchestrator] Reaped stale task ${cardId.slice(0, 12)}... (running > ${ACTIVE_TASK_TTL_MS}ms) — marked failed`,
+    );
+  }
+}
+
 // ─── Poll tick ──────────────────────────────────────────────────────────────
 
 async function tick(): Promise<void> {
@@ -200,6 +302,8 @@ async function tick(): Promise<void> {
   try {
     // Check if any tracked cards have been moved out of 'running' by the agent
     await detectCompletions();
+    // Free slots held by crashed/hung/orphaned agents
+    await reapStaleTasks();
 
     const readyCards = await fetchCards('ready');
     const available = state.maxConcurrent - state.activeTasks.size;
@@ -226,16 +330,32 @@ async function tick(): Promise<void> {
           continue;
         }
 
-        // Track the task
+        // Re-check after the await — dispatchCard or a concurrent tick may have
+        // claimed this card while createConversation was in flight.
+        if (state.activeTasks.has(card.id)) continue;
+
+        // Claim the slot synchronously so concurrent paths skip this card.
         state.activeTasks.set(card.id, {
           cardId: card.id,
           conversationId,
           startedAt: Date.now(),
         });
 
-        // Mark card as running BEFORE dispatch to prevent TOCTOU races
-        // (another tick picking up the same card while dispatch is in flight)
-        await updateCardStatus(card.id, 'running');
+        // Mark card as running. Only spawn if the PATCH actually succeeded —
+        // a failed PATCH means the claim didn't stick (e.g. another process
+        // moved the card) and spawning would risk a duplicate agent.
+        const claimed = await updateCardStatus(card.id, 'running');
+        if (!claimed) {
+          state.activeTasks.delete(card.id);
+          logger.warn(
+            `[orchestrator] Failed to mark card "${card.title}" (${card.id}) running — leaving for retry`,
+          );
+          continue;
+        }
+
+        // Re-check after the await — a cancel may have freed the claim while
+        // the PATCH was in flight; don't spawn an agent for a cancelled card.
+        if (!state.activeTasks.has(card.id)) continue;
 
         logger.info(
           `[orchestrator] Dispatched card "${card.title}" (${card.id}) → conversation ${conversationId}`,
@@ -322,30 +442,76 @@ async function spawnKanbanAgent(cardId: string, options: SpawnKanbanAgentOptions
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
   });
+  state.children.set(cardId, child);
 
   let stdout = '';
   let stderr = '';
 
   child.stdout.on('data', (data: Buffer) => {
-    stdout += data.toString();
+    stdout = appendCappedLog(stdout, data.toString(), MAX_AGENT_LOG_BYTES);
   });
 
   child.stderr.on('data', (data: Buffer) => {
-    stderr += data.toString();
+    stderr = appendCappedLog(stderr, data.toString(), MAX_AGENT_LOG_BYTES);
   });
 
+  // Watchdog: kill agents that exceed the runtime limit so a hung agent can't
+  // occupy a maxConcurrent slot (or re-complete a card) forever.
+  let timedOut = false;
+  const runtimeTimer = setTimeout(() => {
+    timedOut = true;
+    logger.error(
+      `[orchestrator] Kanban agent for card ${cardId.slice(0, 12)}... exceeded ${MAX_AGENT_RUNTIME_MS}ms runtime limit — terminating`,
+    );
+    terminateChild(child);
+  }, MAX_AGENT_RUNTIME_MS);
+  runtimeTimer.unref?.();
+
   child.on('close', (code: number | null) => {
+    clearTimeout(runtimeTimer);
+    state.children.delete(cardId);
+
+    const wasCancelled = cancelledChildren.has(cardId);
+    cancelledChildren.delete(cardId);
+
     const exitCode = code ?? -1;
-    if (exitCode !== 0) {
+
+    if (timedOut) {
+      logger.error(`[orchestrator] Kanban agent for card ${cardId.slice(0, 12)}... killed after exceeding runtime limit`);
+    } else if (exitCode !== 0 && !wasCancelled) {
       logger.error(`[orchestrator] Kanban agent for card ${cardId.slice(0, 12)}... exited with code ${exitCode}`);
       if (stderr) logger.error(`[orchestrator] stderr: ${stderr.slice(0, 500)}`);
-    } else {
+    } else if (exitCode === 0) {
       logger.info(`[orchestrator] Kanban agent for card ${cardId.slice(0, 12)}... completed successfully`);
     }
+
     // Log brief stdout summary
     const stdoutLines = stdout.trim().split('\n').filter(l => l.includes('[kanban-runner]'));
     for (const line of stdoutLines) {
       logger.info(line);
+    }
+
+    // Abrupt termination (timeout kill or crash) that wasn't a user cancel:
+    // reconcile with the board before touching the card. If it's still
+    // 'running' with no live agent, free the slot and mark it failed so it
+    // doesn't leak a maxConcurrent slot forever; if it already left 'running'
+    // (e.g. the agent completed the card right before dying), leave the board
+    // alone and let detectCompletions free the slot and count the transition.
+    if ((timedOut || (exitCode !== 0 && !wasCancelled)) && state.activeTasks.has(cardId)) {
+      void (async () => {
+        try {
+          const cards = await fetchCards('');
+          const card = cards.find((c) => c.id === cardId);
+          if (!card || card.status === 'running') {
+            state.activeTasks.delete(cardId);
+            state.stats.failed++;
+            updateCardStatus(cardId, 'failed').catch(() => {});
+          }
+        } catch {
+          state.activeTasks.delete(cardId);
+          state.stats.failed++;
+        }
+      })();
     }
   });
 
@@ -508,13 +674,10 @@ export const taskOrchestrator = {
         return { ok: false, error: 'Card not found' };
       }
 
-      // Card is already running (dispatched by another process) — ack without spawning
+      // Card is already running (dispatched by another process) — ack without
+      // spawning and without tracking: we didn't dispatch it, so claiming a
+      // maxConcurrent slot for it could leak the slot forever.
       if (card.status === 'running') {
-        state.activeTasks.set(cardId, {
-          cardId,
-          conversationId: '',
-          startedAt: Date.now(),
-        });
         return { ok: true };
       }
 
@@ -531,15 +694,32 @@ export const taskOrchestrator = {
         return { ok: false, error: 'Failed to create conversation' };
       }
 
-      // Track the task
+      // Re-check after the await — a tick or another dispatch may have claimed
+      // this card while createConversation was in flight.
+      if (state.activeTasks.has(cardId)) {
+        return { ok: true };
+      }
+
+      // Claim the slot synchronously so concurrent paths skip this card.
       state.activeTasks.set(cardId, {
         cardId,
         conversationId,
         startedAt: Date.now(),
       });
 
-      // Mark card as running
-      await updateCardStatus(cardId, 'running');
+      // Mark card as running. Only spawn if the PATCH actually succeeded.
+      const claimed = await updateCardStatus(cardId, 'running');
+      if (!claimed) {
+        state.activeTasks.delete(cardId);
+        logger.warn(`[orchestrator] Failed to mark card ${cardId.slice(0, 12)}... running — skipping dispatch`);
+        return { ok: false, error: 'Failed to mark card as running' };
+      }
+
+      // Re-check after the await — a cancel may have freed the claim while the
+      // PATCH was in flight; don't spawn an agent for a cancelled card.
+      if (!state.activeTasks.has(cardId)) {
+        return { ok: true };
+      }
 
       // Route by formation strategy → execution backend
       const taskText = `${card.title} ${card.spec ?? ''}`;
@@ -584,7 +764,7 @@ export const taskOrchestrator = {
    */
   async getQueueState(): Promise<QueueState> {
     // Fetch all kanban cards
-    let allCards: any[] = [];
+    let allCards: unknown[] = [];
     try {
       const res = await fetch(`${API_BASE}/api/hermes/kanban`);
       if (res.ok) {
@@ -596,29 +776,36 @@ export const taskOrchestrator = {
     }
 
     // Build lookup map
-    const cardMap = new Map<string, any>();
+    const cardMap = new Map<string, unknown>();
     for (const card of allCards) {
-      cardMap.set(card.id, card);
+      const c = card as Record<string, unknown>;
+      cardMap.set(c.id as string, card);
     }
 
     const queuedCards: QueueCard[] = [];
     const runningCards: QueueCard[] = [];
     const completedCards: QueueCard[] = [];
     const now = Date.now();
+    // Stats are derived from the kanban board itself — this is a read endpoint
+    // and must not mutate global state (counting every poll inflated the
+    // counters unboundedly).
+    let completed = 0;
+    let failed = 0;
 
     for (const card of allCards) {
-      const status = card.status;
-      const activeTask = state.activeTasks.get(card.id);
+      const c = card as Record<string, unknown>;
+      const status = c.status as string;
+      const activeTask = state.activeTasks.get(c.id as string);
       const isRunning = status === 'running' || activeTask !== undefined;
 
       const queueCard: QueueCard = {
-        id: card.id,
-        title: card.title || 'Untitled',
-        spec: card.spec || '',
-        acceptanceCriteria: Array.isArray(card.acceptanceCriteria) ? card.acceptanceCriteria : [],
-        assignedWorker: card.assignedWorker || null,
+        id: c.id as string,
+        title: (c.title as string) || 'Untitled',
+        spec: (c.spec as string) || '',
+        acceptanceCriteria: Array.isArray(c.acceptanceCriteria) ? c.acceptanceCriteria : [],
+        assignedWorker: (c.assignedWorker as string) || null,
         status: 'queued',
-        reportSummary: card.reportPath || undefined,
+        reportSummary: (c.reportPath as string) || undefined,
       };
 
       if (status === 'ready') {
@@ -629,15 +816,15 @@ export const taskOrchestrator = {
         queueCard.startedAt = activeTask?.startedAt ?? now;
         runningCards.push(queueCard);
       } else if (status === 'done' || status === 'review') {
-        queueCard.status = status;
-        queueCard.completedAt = card.updatedAt || now;
+        queueCard.status = status as QueueCardStatus;
+        queueCard.completedAt = (c.updatedAt as number) || now;
         completedCards.push(queueCard);
-        if (status === 'done') state.stats.completed++;
-      } else if (status === 'blocked') {
-        queueCard.status = 'blocked';
-        queueCard.completedAt = card.updatedAt || now;
+        if (status === 'done') completed++;
+      } else if (status === 'blocked' || status === 'failed') {
+        queueCard.status = status as QueueCardStatus;
+        queueCard.completedAt = (c.updatedAt as number) || now;
         completedCards.push(queueCard);
-        state.stats.failed++;
+        failed++;
       }
     }
 
@@ -654,7 +841,7 @@ export const taskOrchestrator = {
       queued: sortBy(queuedCards, undefined, true),
       running: sortBy(runningCards, 'startedAt', true),
       completed: sortBy(completedCards, 'completedAt', false).slice(0, 20), // keep last 20
-      stats: { completed: state.stats.completed, failed: state.stats.failed },
+      stats: { completed, failed },
       enabled: state.enabled,
     };
   },
@@ -664,6 +851,16 @@ async cancelTask(cardId: string): Promise<boolean> {
     if (!task) return false;
 
     state.activeTasks.delete(cardId);
+
+    // Terminate the spawned agent (if any) so a "cancelled" agent can't keep
+    // running commands or re-complete the card. The child's close handler
+    // removes it from the children map.
+    const child = state.children.get(cardId);
+    if (child) {
+      cancelledChildren.add(cardId);
+      terminateChild(child);
+    }
+
     await updateCardStatus(cardId, 'ready');
     return true;
   },

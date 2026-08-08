@@ -4,6 +4,10 @@ import type { Provider } from '@/stores/settings-store';
 
 type TranscribeProvider = 'groq' | 'openai';
 
+// Fallback that guarantees stopRecording() settles even if the recorder's stop
+// event never fires (e.g. unmount raced us or a transcription request hangs).
+const STOP_TIMEOUT_MS = 30_000;
+
 export interface VoiceInputState {
   isRecording: boolean;
   isTranscribing: boolean;
@@ -36,19 +40,30 @@ function resolveTranscriptionConfig(
   return { provider: 'groq', apiKey: '' };
 }
 
+/**
+ * Converts a blob to base64 asynchronously. FileReader.readAsDataURL runs off
+ * the main thread — building the string char-by-char with btoa would block the
+ * UI for multi-MB recordings.
+ */
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      const comma = dataUrl.indexOf(',');
+      resolve(comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl);
+    };
+    reader.onerror = () => reject(new Error('Failed to read audio recording.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
 async function transcribeAudio(
   audioBlob: Blob,
   provider: TranscribeProvider,
   apiKey: string,
 ): Promise<string> {
-  // Convert blob to base64
-  const arrayBuffer = await audioBlob.arrayBuffer();
-  const uint8 = new Uint8Array(arrayBuffer);
-  let binary = '';
-  for (let i = 0; i < uint8.length; i++) {
-    binary += String.fromCharCode(uint8[i]);
-  }
-  const base64Audio = btoa(binary);
+  const base64Audio = await blobToBase64(audioBlob);
 
   const mimeType = audioBlob.type || 'audio/webm';
   // Extract extension from mime type (e.g. audio/webm → webm, audio/mp4 → mp4)
@@ -91,6 +106,17 @@ export function useVoiceInput(
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
+  // True while startRecording is awaiting getUserMedia — guards re-entry so a
+  // double invocation can't open a second (leaked) mic stream.
+  const startPendingRef = useRef(false);
+  // The in-flight stopRecording() promise and its resolver — a second call
+  // returns the same promise instead of overwriting recorder.onstop.
+  const stopPromiseRef = useRef<{
+    promise: Promise<string | null>;
+    resolve: (value: string | null) => void;
+  } | null>(null);
+  // Set on unmount so a late recorder.onstop settles without transcribing.
+  const unmountedRef = useRef(false);
 
   // Keep a ref to providers so callbacks don't recreate on every provider change
   const providersRef = useRef(providers);
@@ -109,14 +135,15 @@ export function useVoiceInput(
   // Cleanup on unmount — stop any active recording/stream so the OS mic indicator goes away
   useEffect(() => {
     return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
+      unmountedRef.current = true;
+      const recorder = mediaRecorderRef.current;
+      if (recorder && recorder.state !== 'inactive') {
+        // Never null `onstop` here: a pending stopRecording() promise must
+        // settle. The handler skips transcription once unmounted, and the
+        // timeout in stopRecording() is the last-resort resolver.
+        recorder.stop();
       }
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-        mediaRecorderRef.current.onstop = null; // prevent transcription attempt after unmount
-        mediaRecorderRef.current.stop();
-      }
+      cleanupStream();
       mediaRecorderRef.current = null;
       chunksRef.current = [];
     };
@@ -124,6 +151,12 @@ export function useVoiceInput(
 
   // ── Start recording ───────────────────────────────────────────────────────
   const startRecording = useCallback(async () => {
+    // Re-entry guard: a start is already in flight or a recorder is active.
+    // Without this, a double invocation opens a second (never-stopped) mic
+    // stream and discards the first recorder's chunks.
+    if (startPendingRef.current) return;
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') return;
+    startPendingRef.current = true;
     setError(null);
     chunksRef.current = [];
 
@@ -136,6 +169,12 @@ export function useVoiceInput(
           noiseSuppression: true,
         },
       });
+
+      // Unmounted while the permission prompt was up — don't keep the mic open
+      if (unmountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       streamRef.current = stream;
 
       // Determine supported MIME type
@@ -166,19 +205,27 @@ export function useVoiceInput(
       mediaRecorderRef.current = recorder;
       recorder.start(1000); // Collect chunks every second
       setIsRecording(true);
-    } catch (err: any) {
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+    } catch (err: unknown) {
+      const error = err as DOMException;
+      if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
         setError('Microphone permission denied. Allow microphone access in your system settings.');
-      } else if (err.name === 'NotFoundError') {
+      } else if (error.name === 'NotFoundError') {
         setError('No microphone found. Connect a microphone and try again.');
       } else {
-        setError(err.message || 'Failed to start recording.');
+        setError(error.message || 'Failed to start recording.');
       }
+    } finally {
+      startPendingRef.current = false;
     }
   }, [cleanupStream]);
 
   // ── Stop recording and transcribe ────────────────────────────────────────
   const stopRecording = useCallback(async (): Promise<string | null> => {
+    // Re-entry guard: a stop is already in flight — return the same promise.
+    // Otherwise a second call would overwrite recorder.onstop and orphan the
+    // first caller's promise.
+    if (stopPromiseRef.current) return stopPromiseRef.current.promise;
+
     const recorder = mediaRecorderRef.current;
     if (!recorder || recorder.state === 'inactive') {
       cleanupStream();
@@ -188,15 +235,46 @@ export function useVoiceInput(
 
     const config = resolveTranscriptionConfig(providersRef.current);
 
+    // Assigned by the promise executor below (which runs synchronously) so
+    // cancelRecording() can settle a pending stop from outside.
+    let settleStop: (value: string | null) => void = () => {};
+
     // Return a promise that resolves when the recorder stops and data is collected
-    return new Promise<string | null>((resolve) => {
+    const promise = new Promise<string | null>((resolve) => {
+      // Last-resort fallback: if the stop event never fires (or a transcription
+      // request hangs), settle so awaiting callers don't hang forever.
+      const timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+        if (recorder.state !== 'inactive') {
+          try {
+            recorder.stop();
+          } catch {
+            // already stopped
+          }
+        }
+        cleanupStream();
+        setIsRecording(false);
+        settleStop(null);
+      }, STOP_TIMEOUT_MS);
+
+      settleStop = (value: string | null) => {
+        if (timer) clearTimeout(timer);
+        stopPromiseRef.current = null;
+        resolve(value);
+      };
+
       recorder.onstop = async () => {
         cleanupStream();
         setIsRecording(false);
 
+        // Component unmounted while stopping — settle without transcribing
+        if (unmountedRef.current) {
+          settleStop(null);
+          return;
+        }
+
         if (chunksRef.current.length === 0) {
           setError('No audio recorded.');
-          resolve(null);
+          settleStop(null);
           return;
         }
 
@@ -211,13 +289,14 @@ export function useVoiceInput(
           const text = await transcribeAudio(blob, config.provider, config.apiKey);
           if (!text.trim()) {
             setError('No speech detected. Try again.');
-            resolve(null);
+            settleStop(null);
           } else {
-            resolve(text.trim());
+            settleStop(text.trim());
           }
-        } catch (err: any) {
-          setError(err.message || 'Transcription failed.');
-          resolve(null);
+        } catch (err: unknown) {
+          const error = err as Error;
+          setError(error.message || 'Transcription failed.');
+          settleStop(null);
         } finally {
           setIsTranscribing(false);
         }
@@ -225,15 +304,26 @@ export function useVoiceInput(
 
       recorder.stop();
     });
+
+    stopPromiseRef.current = { promise, resolve: settleStop };
+    return promise;
   }, [cleanupStream]);
 
   // ── Cancel recording (no transcription) ──────────────────────────────────
   const cancelRecording = useCallback(() => {
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state !== 'inactive') {
-      // Remove onstop handler so it doesn't try to transcribe
+      // Settle any pending stopRecording() promise first, then remove onstop
+      // so the late handler can't transcribe.
+      stopPromiseRef.current?.resolve(null);
+      stopPromiseRef.current = null;
       recorder.onstop = null;
       recorder.stop();
+    } else if (stopPromiseRef.current) {
+      // A stop/transcription is already in flight — settle it as cancelled so
+      // awaiting callers don't hang.
+      stopPromiseRef.current.resolve(null);
+      stopPromiseRef.current = null;
     }
     cleanupStream();
     setIsRecording(false);

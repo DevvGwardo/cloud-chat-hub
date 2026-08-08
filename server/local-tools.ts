@@ -1,8 +1,8 @@
 import { tool, type CoreTool } from 'ai';
 import { z } from 'zod';
 import { exec, execFile } from 'child_process';
-import { readFile, writeFile, mkdir } from 'fs/promises';
-import { dirname, resolve } from 'path';
+import { readFile, writeFile, mkdir, realpath } from 'fs/promises';
+import { dirname, resolve, join, basename } from 'path';
 import { existsSync, readdirSync } from 'fs';
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -29,10 +29,37 @@ function isBlockedPath(normalizedPath: string): boolean {
   return BLOCKED_PATH_PATTERNS.some((pattern) => pattern.test(normalizedPath));
 }
 
-function resolveSafePath(path: string): { resolved: string; error?: string } {
+/**
+ * Canonicalize a path, resolving symlinks even when the final component(s)
+ * don't exist yet: realpath the deepest existing ancestor and re-append the
+ * missing tail. Returns the original path if nothing can be resolved.
+ */
+async function canonicalize(p: string): Promise<string> {
+  let current = p;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return join(await realpath(current), ...tail.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return p; // reached the root — give up
+      tail.push(basename(current));
+      current = parent;
+    }
+  }
+}
+
+async function resolveSafePath(path: string): Promise<{ resolved: string; error?: string }> {
   const resolved = resolve(path);
   if (isBlockedPath(resolved)) {
     return { resolved, error: `Access denied: '${path}' is a restricted path.` };
+  }
+  // readFile/writeFile follow symlinks, so a workspace symlink could point
+  // at a restricted target (~/.ssh/id_rsa, /etc/shadow, …) that the regex
+  // above misses. Canonicalize and re-run the blocklist before any IO.
+  const canonical = await canonicalize(resolved);
+  if (canonical !== resolved && isBlockedPath(canonical)) {
+    return { resolved, error: `Access denied: '${path}' resolves to a restricted path.` };
   }
   return { resolved };
 }
@@ -94,10 +121,21 @@ function execWithTimeout(
 
     if (args !== null) {
       // Use execFile (no shell) — safer for passing untrusted arguments
-      (execFile as any)(command, args, execOptions, callback);
+      const ef = execFile as (
+        command: string,
+        args: readonly string[] | null,
+        options: Record<string, unknown>,
+        callback: (error: Error & { killed?: boolean; code?: number } | null, stdout: string, stderr: string) => void,
+      ) => ReturnType<typeof execFile>;
+      ef(command, args, execOptions, callback);
     } else {
       // Use exec (with shell) — needed for pipes, redirects, chained commands
-      (exec as any)(command, { ...execOptions, shell: options.shell || '/bin/sh' }, callback);
+      const ex = exec as (
+        command: string,
+        options: Record<string, unknown>,
+        callback: (error: Error & { killed?: boolean; code?: number } | null, stdout: string, stderr: string) => void,
+      ) => ReturnType<typeof exec>;
+      ex(command, { ...execOptions, shell: options.shell || '/bin/sh' }, callback);
     }
   });
 }
@@ -162,7 +200,7 @@ export function buildLocalExecutionTools(toolsets: LocalToolsets) {
         path: z.string().describe('The absolute or relative path to the file to read'),
       }),
       execute: async ({ path }) => {
-        const { resolved, error: pathError } = resolveSafePath(path);
+        const { resolved, error: pathError } = await resolveSafePath(path);
         if (pathError) return pathError;
 
         if (!existsSync(resolved)) {
@@ -207,7 +245,7 @@ export function buildLocalExecutionTools(toolsets: LocalToolsets) {
         content: z.string().describe('The content to write to the file'),
       }),
       execute: async ({ path, content }) => {
-        const { resolved, error: pathError } = resolveSafePath(path);
+        const { resolved, error: pathError } = await resolveSafePath(path);
         if (pathError) return pathError;
 
         const dir = dirname(resolved);

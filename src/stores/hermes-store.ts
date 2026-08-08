@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { ApprovalPolicy } from '@/lib/approval-policy';
+import type { AcpApprovalRequest } from '@/lib/hermes-api';
 
 export interface HermesToolsets {
   web: boolean;
@@ -128,6 +129,13 @@ interface HermesState {
   loops: Record<string, LoopState>;
   sessionApprovalPolicies: ApprovalPolicy[];
   /**
+   * A pending ACP permission request from the real hermes-agent (approval mode
+   * 'acp'). The UI shows a banner and POSTs the decision to the bridge, which
+   * resolves the agent's parked permission request. Cleared on decision.
+   */
+  pendingAcpApproval: AcpApprovalRequest | null;
+  setPendingAcpApproval: (approval: AcpApprovalRequest | null) => void;
+  /**
    * The underlying provider the Hermes agent should route to (e.g. 'anthropic',
    * 'deepseek', 'openrouter', or a synthetic CLI id like 'custom:api.bullinf.fun').
    * Empty string means 'auto' — let the bridge route by model-name prefix /
@@ -238,6 +246,7 @@ export const useHermesStore = create<HermesState>()(
       swarm: { ...defaultSwarm },
       loops: {},
       sessionApprovalPolicies: [],
+      pendingAcpApproval: null,
       underlyingProvider: '',
       followAgentModel: true,
       reasoningEffort: 'medium',
@@ -456,6 +465,9 @@ export const useHermesStore = create<HermesState>()(
 
       clearSessionApprovalPolicies: () =>
         set(() => ({ sessionApprovalPolicies: [] })),
+
+      setPendingAcpApproval: (approval) =>
+        set(() => ({ pendingAcpApproval: approval })),
     }),
     {
       name: 'cloudchat-hermes',

@@ -61,7 +61,7 @@ const streamingFetch: typeof globalThis.fetch = (input, init) =>
   fetch(input, {
     ...init,
     dispatcher: streamingDispatcher,
-  } as any);
+  } as RequestInit & { dispatcher?: unknown });
 
 function shouldSanitizeCompatibleStream(provider: string): boolean {
   return provider === 'minimax' || provider === 'minimax-payg';
@@ -302,18 +302,23 @@ export const VALIDATION_MODELS: Record<string, string> = {
   hermes: HERMES_TOOL_CAPABLE_MODELS[0],
 };
 
-export type HermesExecutionMode = 'passthrough' | 'agent-loop';
+export type HermesExecutionMode = 'passthrough' | 'agent-loop' | 'acp';
 
 export function resolveHermesExecutionMode(_options?: {
   activeRepo?: unknown;
   githubPAT?: string;
 }): HermesExecutionMode {
-  // Always use agent-loop: the Hermes bridge handles its own tool execution,
-  // stall recovery, and repo system prompts. Passthrough mode bypassed all of
-  // that, causing the agent to stop without doing anything when a repo was
-  // active (finish_reason mapped to 'unknown', no tool activity to trigger
-  // auto-continue on the client side).
-  return 'agent-loop';
+  // ACP transport: drive the REAL hermes-agent via Agent Client Protocol
+  // instead of the reimplemented agent loop. The bridge spawns hermes-acp per
+  // conversation and streams its tools/approvals through the existing SSE
+  // pipeline. This is now the DEFAULT; set HERMES_EXECUTION_MODE=agent-loop
+  // to fall back to the legacy in-process loop (or =passthrough for a plain
+  // proxy with no tool loop).
+  const mode = (process.env.HERMES_EXECUTION_MODE || '').trim().toLowerCase();
+  if (mode === 'agent-loop' || mode === 'passthrough') {
+    return mode;
+  }
+  return 'acp';
 }
 
 const HERMES_RUNS_TRUTHY = new Set(['1', 'true', 'yes', 'on']);

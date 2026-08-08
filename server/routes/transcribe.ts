@@ -13,6 +13,11 @@ type TranscribeProvider = 'groq' | 'openai';
 
 const MAX_AUDIO_BASE64_SIZE = 10 * 1024 * 1024; // 10 MB decoded
 
+// A stalled upstream or hung ffmpeg/whisper-cli must not leave the HTTP
+// request pending forever (cleanup would never run).
+const CLOUD_TRANSCRIBE_TIMEOUT_MS = 5 * 60 * 1000; // 5 min upstream
+const LOCAL_PROCESS_TIMEOUT_MS = 5 * 60 * 1000; // 5 min per local step
+
 function isTranscribeProvider(value: unknown): value is TranscribeProvider {
   return value === 'groq' || value === 'openai';
 }
@@ -169,15 +174,41 @@ function resolveLocalWhisper(): LocalWhisper | null {
   return cli && ffmpeg && model ? { cli, ffmpeg, model } : null;
 }
 
-function runProcess(cmd: string, args: string[]): Promise<{ code: number; stderr: string }> {
+function runProcess(cmd: string, args: string[], timeoutMs = LOCAL_PROCESS_TIMEOUT_MS): Promise<{ code: number; stderr: string }> {
   return new Promise((resolve) => {
     const proc = spawn(cmd, args);
     let stderr = '';
+    let settled = false;
+    const done = (code: number, err: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ code, stderr: err });
+    };
+    // Kill timer: a hung ffmpeg/whisper-cli should not hold the request open
+    // forever. SIGTERM first, escalate to SIGKILL if the process ignores it.
+    const timer = setTimeout(() => {
+      done(-1, `${stderr || 'Process'} timed out after ${Math.round(timeoutMs / 1000)}s — killed`);
+      try {
+        proc.kill('SIGTERM');
+      } catch {
+        // already gone
+      }
+      const killGrace = setTimeout(() => {
+        try {
+          proc.kill('SIGKILL');
+        } catch {
+          // already gone
+        }
+      }, 5000);
+      killGrace.unref?.();
+    }, timeoutMs);
+    timer.unref?.();
     proc.stderr.on('data', (d) => {
       stderr += String(d);
     });
-    proc.on('close', (code) => resolve({ code: code ?? -1, stderr }));
-    proc.on('error', (err) => resolve({ code: -1, stderr: String(err) }));
+    proc.on('close', (code) => done(code ?? -1, stderr));
+    proc.on('error', (err) => done(-1, String(err)));
   });
 }
 
@@ -240,10 +271,10 @@ router.post('/', async (req, res) => {
     return sendJson(res, 400, { error: 'Missing audio (base64-encoded).' });
   }
 
-  // Validate base64 size
+  // Validate base64 size (413 — payload too large, not a client format error)
   const estimatedBytes = Math.ceil(audio.length * 0.75);
   if (estimatedBytes > MAX_AUDIO_BASE64_SIZE) {
-    return sendJson(res, 400, {
+    return sendJson(res, 413, {
       error: `Audio too large (${(estimatedBytes / 1024 / 1024).toFixed(1)} MB). Maximum is 10 MB.`,
     });
   }
@@ -254,6 +285,11 @@ router.post('/', async (req, res) => {
     audioBuffer = Buffer.from(audio, 'base64');
   } catch {
     return sendJson(res, 400, { error: 'Invalid base64 audio data.' });
+  }
+  if (audioBuffer.length === 0) {
+    // e.g. whitespace/padding-only input decodes to nothing — reject up front
+    // instead of sending an empty body upstream and getting a pointless 502.
+    return sendJson(res, 400, { error: 'Audio data is empty after decoding.' });
   }
 
   const fname = typeof filename === 'string' && filename.trim() ? filename.trim() : 'recording.webm';
@@ -267,8 +303,9 @@ router.post('/', async (req, res) => {
       const text = await transcribeLocally(audioBuffer, ext, local, lang);
       logger.info(`[transcribe] local whisper.cpp ok (${text.length} chars)`);
       return sendJson(res, 200, { text, provider: 'whisper.cpp' });
-    } catch (err: any) {
-      logger.warn(`[transcribe] local whisper.cpp failed; falling back to cloud: ${err?.message ?? err}`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`[transcribe] local whisper.cpp failed; falling back to cloud: ${msg}`);
     }
   }
 
@@ -316,6 +353,7 @@ router.post('/', async (req, res) => {
         Authorization: `Bearer ${resolvedKey}`,
       },
       body: form,
+      signal: AbortSignal.timeout(CLOUD_TRANSCRIBE_TIMEOUT_MS),
     });
 
     if (!upstreamRes.ok) {
@@ -332,9 +370,10 @@ router.post('/', async (req, res) => {
 
     const data = (await upstreamRes.json()) as { text?: string };
     return sendJson(res, 200, { text: data.text ?? '' });
-  } catch (err: any) {
-    logger.error(`[transcribe] Error: ${err.message ?? err}`);
-    return sendJson(res, 500, { error: err.message ?? 'Transcription failed.' });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[transcribe] Error: ${msg}`);
+    return sendJson(res, 500, { error: msg || 'Transcription failed.' });
   }
 });
 

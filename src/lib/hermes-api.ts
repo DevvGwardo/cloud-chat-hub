@@ -293,6 +293,33 @@ export interface MoaConfig {
   preset_names: string[];
 }
 
+export interface AcpApprovalRequest {
+  approval_id: string;
+  session_id: string;
+  tool: string;
+  kind?: string;
+  summary?: string;
+  excerpt?: string;
+  options?: Array<{ option_id: string; name: string }>;
+}
+
+/** The user's decision on an ACP permission request (once/session/always/deny). */
+export type AcpApprovalDecision = 'allow_once' | 'allow_session' | 'allow_always' | 'deny';
+
+/**
+ * POST an ACP approval decision to the bridge. The bridge resolves the
+ * hermes-agent's parked permission request and the agent resumes.
+ */
+export async function postAcpApproval(
+  approvalId: string,
+  optionId: AcpApprovalDecision,
+): Promise<{ ok: boolean }> {
+  return hermesFetch<{ ok: boolean }>(`/approvals/${encodeURIComponent(approvalId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ option_id: optionId }),
+  });
+}
+
 export async function fetchMoaConfig(): Promise<MoaConfig> {
   const data = await hermesFetch<{
     default_preset?: string;

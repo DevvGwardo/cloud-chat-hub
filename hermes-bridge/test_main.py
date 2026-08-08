@@ -31,8 +31,25 @@ if "httpx" not in sys.modules:
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
+    class _Client:
+        # Sync httpx.Client — used by hermes_runs.submit_run. Exists so
+        # `patch("hermes_runs.httpx.Client")` in test_hermes_runs resolves
+        # even when this stub wins the sys.modules["httpx"] import race.
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, *args, **kwargs):
+            raise NotImplementedError("httpx.Client is stubbed in tests")
+
     httpx_stub.Timeout = _Timeout
     httpx_stub.AsyncClient = _AsyncClient
+    httpx_stub.Client = _Client
     sys.modules["httpx"] = httpx_stub
 else:
     if not hasattr(sys.modules["httpx"], "AsyncClient"):
@@ -56,6 +73,22 @@ else:
                 self.pool = kwargs.get("pool")
 
         sys.modules["httpx"].Timeout = _Timeout
+    if not hasattr(sys.modules["httpx"], "Client"):
+        class _Client:
+            # Sync httpx.Client — see the stub-creation branch above.
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def post(self, *args, **kwargs):
+                raise NotImplementedError("httpx.Client is stubbed in tests")
+
+        sys.modules["httpx"].Client = _Client
 
 if "fastapi" not in sys.modules:
     fastapi_stub = types.ModuleType("fastapi")

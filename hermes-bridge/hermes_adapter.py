@@ -1183,6 +1183,7 @@ class HermesAgentAdapter:
         self.on_server_tool_event = on_server_tool_event
         self.on_fallback_switch = on_fallback_switch
         self.on_computer_use_frame = on_computer_use_frame
+        self.workspace_id = workspace_id or None
         self.on_thinking: Optional[Callable] = None
         self.on_reasoning: Optional[Callable] = None
         self._streamed_text_chunks: list[str] = []
@@ -1351,6 +1352,13 @@ class HermesAgentAdapter:
             "max_iterations": max_iterations,
             "enabled_toolsets": real_toolsets,
             "reasoning_config": reasoning_config,
+            # hermes-desktop way of sessions: the conversation identity IS the
+            # session identity. Passing the conversation's workspace_id as the
+            # real agent's session_id gives ONE stable state.db session per
+            # conversation (same id across turns, full transcript, searchable,
+            # resumable). Without it the agent auto-generates a fresh id every
+            # turn, fragmenting the conversation across session rows.
+            "session_id": self.workspace_id or None,
             "platform": "cloudchat",
             "quiet_mode": True,
             # Callbacks — translated to CloudChat's format

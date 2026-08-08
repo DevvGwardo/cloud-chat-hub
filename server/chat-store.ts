@@ -354,11 +354,40 @@ function isStatementFinalized(error: unknown): boolean {
   return error instanceof Error && /finalized/i.test(error.message);
 }
 
+/**
+ * Parse an integer query parameter with a clamped fallback. `Number("abc")`
+ * yields NaN which survives Math.max/min and gets bound into SQLite as a
+ * broken LIMIT — parseInt + Number.isFinite avoids that.
+ */
+function parseBoundedInt(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = typeof value === 'string' ? Number.parseInt(value, 10) : Number.NaN;
+  return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
+}
+
 function createChatStore(dbPath = resolveDbPath()) {
   ensureParentDirectory(dbPath);
 
   let db: DatabaseSync;
   let stmts: StmtCache;
+  // Tracks whether a transaction is currently open on this connection so the
+  // auto-reconnect path doesn't re-open the DB (and re-run the schema) inside
+  // an open transaction.
+  let inTransaction = false;
+
+  function beginTransaction() {
+    db.exec('BEGIN');
+    inTransaction = true;
+  }
+
+  function commitTransaction() {
+    db.exec('COMMIT');
+    inTransaction = false;
+  }
+
+  function rollbackTransaction() {
+    db.exec('ROLLBACK');
+    inTransaction = false;
+  }
 
   function migrateColumns() {
     // Add lines_added/lines_removed columns if they don't exist (for existing databases)
@@ -420,6 +449,18 @@ function createChatStore(dbPath = resolveDbPath()) {
       return fn();
     } catch (error) {
       if (isStatementFinalized(error)) {
+        if (inTransaction) {
+          // A statement was finalized mid-transaction: the retried fn would
+          // re-run BEGIN while the transaction is still open ("cannot start a
+          // transaction within a transaction"). Roll back the dangling
+          // transaction first so the reconnect can proceed safely.
+          try {
+            rollbackTransaction();
+          } catch {
+            // connection may be unusable — proceed to reconnect anyway
+          }
+          inTransaction = false;
+        }
         logger.warn('[chat-store] Prepared statement finalized — reconnecting to database');
         openDb();
         return fn();
@@ -476,7 +517,7 @@ function createChatStore(dbPath = resolveDbPath()) {
 
     importConversation(conversation: Conversation, messages: Message[]): Conversation {
       return run(() => {
-        db.exec('BEGIN');
+        beginTransaction();
         try {
           stmt('insertConversation').run({
             id: conversation.id,
@@ -508,10 +549,10 @@ function createChatStore(dbPath = resolveDbPath()) {
             });
           }
 
-          db.exec('COMMIT');
+          commitTransaction();
           return conversation;
         } catch (error) {
-          db.exec('ROLLBACK');
+          rollbackTransaction();
           throw error;
         }
       });
@@ -519,11 +560,11 @@ function createChatStore(dbPath = resolveDbPath()) {
 
     updateConversation(id: string, fields: Partial<Conversation>): boolean {
       return run(() => {
-        db.exec('BEGIN');
+        beginTransaction();
         try {
           const existing = stmt('getConversation').get({ id }) as unknown as ConversationRow | undefined;
           if (!existing) {
-            db.exec('COMMIT');
+            commitTransaction();
             return false;
           }
 
@@ -547,10 +588,10 @@ function createChatStore(dbPath = resolveDbPath()) {
             archivedAt: next.archivedAt ?? null,
             tags: JSON.stringify(next.tags ?? []),
           });
-          db.exec('COMMIT');
+          commitTransaction();
           return true;
         } catch (error) {
-          db.exec('ROLLBACK');
+          rollbackTransaction();
           throw error;
         }
       });
@@ -566,7 +607,7 @@ function createChatStore(dbPath = resolveDbPath()) {
 
     addMessage(message: Message) {
       run(() => {
-        db.exec('BEGIN');
+        beginTransaction();
         try {
           const existingConversation = stmt('getConversation').get({ id: message.conversationId }) as unknown as ConversationRow | undefined;
           if (!existingConversation) {
@@ -584,9 +625,9 @@ function createChatStore(dbPath = resolveDbPath()) {
             partsJson: message.parts ? JSON.stringify(message.parts) : null,
             toolInvocationsJson: message.toolInvocations ? JSON.stringify(message.toolInvocations) : null,
           });
-          db.exec('COMMIT');
+          commitTransaction();
         } catch (error) {
-          db.exec('ROLLBACK');
+          rollbackTransaction();
           throw error;
         }
       });
@@ -594,11 +635,11 @@ function createChatStore(dbPath = resolveDbPath()) {
 
     updateMessage(id: string, fields: Partial<Message>): boolean {
       return run(() => {
-        db.exec('BEGIN');
+        beginTransaction();
         try {
           const existing = stmt('getMessage').get({ id }) as unknown as MessageRow | undefined;
           if (!existing) {
-            db.exec('COMMIT');
+            commitTransaction();
             return false;
           }
 
@@ -618,10 +659,10 @@ function createChatStore(dbPath = resolveDbPath()) {
             partsJson: next.parts ? JSON.stringify(next.parts) : null,
             toolInvocationsJson: next.toolInvocations ? JSON.stringify(next.toolInvocations) : null,
           });
-          db.exec('COMMIT');
+          commitTransaction();
           return true;
         } catch (error) {
-          db.exec('ROLLBACK');
+          rollbackTransaction();
           throw error;
         }
       });
@@ -644,7 +685,7 @@ function createChatStore(dbPath = resolveDbPath()) {
 
     saveConversationFiles(data: ConversationFiles) {
       run(() => {
-        db.exec('BEGIN');
+        beginTransaction();
         try {
           const existing = stmt('getConversation').get({ id: data.conversationId }) as unknown as ConversationRow | undefined;
           if (!existing) {
@@ -655,9 +696,9 @@ function createChatStore(dbPath = resolveDbPath()) {
             conversationId: data.conversationId,
             dataJson: JSON.stringify(data),
           });
-          db.exec('COMMIT');
+          commitTransaction();
         } catch (error) {
-          db.exec('ROLLBACK');
+          rollbackTransaction();
           throw error;
         }
       });
@@ -713,7 +754,6 @@ export function registerChatStoreRoutes(app: express.Express) {
     // Avoid logger here: on Electron quit pino's transport worker may already
     // be ending, and thread-stream emits an uncaught "the worker is ending".
     try {
-      // eslint-disable-next-line no-console
       console.log('[chat-store] Closing database connection');
     } catch {
       /* ignore */
@@ -729,8 +769,8 @@ export function registerChatStoreRoutes(app: express.Express) {
 
   app.get('/functions/v1/chat-store/conversations', (req, res) => {
     try {
-      const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 50));
-      const offset = Math.max(0, Number(req.query.offset) || 0);
+      const limit = parseBoundedInt(req.query.limit, 50, 1, 200);
+      const offset = parseBoundedInt(req.query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
       const includeArchived = req.query.includeArchived === '1' || req.query.includeArchived === 'true';
       const archivedOnly = req.query.archivedOnly === '1' || req.query.archivedOnly === 'true';
       const result = chatStore.listConversations(limit, offset, { includeArchived, archivedOnly });

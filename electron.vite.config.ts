@@ -1,6 +1,7 @@
 import { resolve } from 'path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react-swc'
+import { shoelaceAssetsPlugin } from './vite-plugin-shoelace-assets'
 
 // Bake build-time secrets into the main process bundle.
 // CLOUDCHAT_UPDATE_TOKEN is a fine-grained read-only PAT with `contents: read`
@@ -30,9 +31,13 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       lib: {
-        entry: resolve(__dirname, 'electron/preload.ts')
-      }
-    }
+        entry: resolve(__dirname, 'electron/preload.ts'),
+        // Sandboxed preload scripts can't run ESM — always emit CommonJS.
+        // With "type": "module" in package.json, Vite names the output
+        // preload.cjs (unambiguous CJS regardless of package type).
+        formats: ['cjs'],
+      },
+    },
   },
   renderer: {
     root: '.',
@@ -41,7 +46,7 @@ export default defineConfig({
         input: resolve(__dirname, 'index.html')
       }
     },
-    plugins: [react()],
+    plugins: [react(), shoelaceAssetsPlugin()],
     resolve: {
       alias: {
         '@': resolve(__dirname, './src')

@@ -1,7 +1,7 @@
 ## Design Context
 
 ### Users
-Professional software engineers using CloudChat as a daily AI coding assistant and GitHub workflow tool. They're in flow state — writing code, reviewing diffs, managing PRs — and expect the interface to keep up without friction. Speed and information density matter more than hand-holding.
+Professional software engineers using Spark as a daily AI coding assistant and GitHub workflow tool. They're in flow state — writing code, reviewing diffs, managing PRs — and expect the interface to keep up without friction. Speed and information density matter more than hand-holding.
 
 ### Brand Personality
 **Bold, technical, fast.** Power-user energy. The interface should feel like a precision instrument — responsive, dense with useful information, and visually sharp. Think Warp terminal meets Linear's polish.

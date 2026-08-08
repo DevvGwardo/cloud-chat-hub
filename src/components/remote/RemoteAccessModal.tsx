@@ -6,7 +6,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { getApiBaseUrl } from '@/lib/api';
-import { Smartphone, Wifi, ExternalLink, Copy, Check, Globe, Loader2, XCircle, Cloud, Terminal } from 'lucide-react';
+import { Smartphone, Wifi, ExternalLink, Copy, Check, Globe, Loader2, RefreshCw, XCircle, Cloud, Terminal } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface RemoteInfo {
@@ -25,8 +25,6 @@ interface TunnelStatus {
   brewAvailable: boolean;
 }
 
-const BASE = () => getApiBaseUrl();
-
 export const RemoteAccessModal: React.FC<{ open: boolean; onOpenChange: (v: boolean) => void }> = ({
   open,
   onOpenChange,
@@ -38,12 +36,16 @@ export const RemoteAccessModal: React.FC<{ open: boolean; onOpenChange: (v: bool
   const [tunnel, setTunnel] = useState<TunnelStatus | null>(null);
   const [tunnelLoading, setTunnelLoading] = useState(false);
   const [tunnelError, setTunnelError] = useState<string | null>(null);
+  // Distinct from tunnelError (action failures): set when the status endpoint
+  // itself is unreachable, so "tunnel not running" ≠ "can't check status".
+  const [tunnelStatusError, setTunnelStatusError] = useState<string | null>(null);
+  const [tunnelStatusLoading, setTunnelStatusLoading] = useState(false);
   const [installing, setInstalling] = useState(false);
 
   const fetchInfo = () => {
     setLoading(true);
     setError(null);
-    fetch(`${BASE()}/api/remote/info`)
+    fetch(`${getApiBaseUrl()}/api/remote/info`)
       .then((r) => r.json())
       .then((data) => {
         if (data.error) throw new Error(data.error);
@@ -52,7 +54,11 @@ export const RemoteAccessModal: React.FC<{ open: boolean; onOpenChange: (v: bool
       .catch((e) => {
         setError(e.message || 'Could not fetch remote access info');
         const origin = window.location.origin;
-        if (origin && origin !== 'http://localhost:3001') {
+        // In dev the API runs on its own port (getApiBaseUrl) and doesn't serve
+        // the frontend — never fall back to that origin. In production the app
+        // is served same-origin, so the page origin is a valid fallback URL.
+        const apiBase = getApiBaseUrl();
+        if (origin && origin !== apiBase) {
           setInfo({ url: origin, lanUrl: origin, localUrl: origin, qrSvg: '' });
         }
       })
@@ -60,10 +66,18 @@ export const RemoteAccessModal: React.FC<{ open: boolean; onOpenChange: (v: bool
   };
 
   const fetchTunnelStatus = () => {
-    fetch(`${BASE()}/api/remote/tunnel/status`)
-      .then((r) => r.json())
+    setTunnelStatusLoading(true);
+    setTunnelStatusError(null);
+    fetch(`${getApiBaseUrl()}/api/remote/tunnel/status`)
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`Status check failed (${r.status})`);
+        return r.json() as Promise<TunnelStatus>;
+      })
       .then(setTunnel)
-      .catch(() => {});
+      .catch(() => {
+        setTunnelStatusError('Could not check tunnel status.');
+      })
+      .finally(() => setTunnelStatusLoading(false));
   };
 
   useEffect(() => {
@@ -77,7 +91,7 @@ export const RemoteAccessModal: React.FC<{ open: boolean; onOpenChange: (v: bool
     setTunnelLoading(true);
     setTunnelError(null);
     try {
-      const res = await fetch(`${BASE()}/api/remote/tunnel/start`, { method: 'POST' });
+      const res = await fetch(`${getApiBaseUrl()}/api/remote/tunnel/start`, { method: 'POST' });
       const data = await res.json();
       if (data.running) {
         setTunnel(data);
@@ -87,24 +101,32 @@ export const RemoteAccessModal: React.FC<{ open: boolean; onOpenChange: (v: bool
         setTunnelError(data.error || 'Tunnel failed to start');
         setTunnel(data);
       }
-    } catch (e: any) {
-      setTunnelError(e.message || 'Failed to start tunnel');
+    } catch (e: unknown) {
+      setTunnelError(e instanceof Error ? e.message : 'Failed to start tunnel');
     } finally {
       setTunnelLoading(false);
     }
   };
 
   const handleStopTunnel = async () => {
+    // Pending state (same tunnelLoading as start) so double-clicks can't fire
+    // duplicate stop requests and the user gets spinner feedback.
+    setTunnelLoading(true);
+    setTunnelError(null);
     try {
-      await fetch(`${BASE()}/api/remote/tunnel/stop`, { method: 'POST' });
+      await fetch(`${getApiBaseUrl()}/api/remote/tunnel/stop`, { method: 'POST' });
       setTunnel({ running: false, url: null, provider: null, error: null, cloudflaredAvailable: false, brewAvailable: false });
-    } catch {}
+    } catch {
+      // stop may fail if tunnel already stopped
+    } finally {
+      setTunnelLoading(false);
+    }
   };
 
   const handleInstallCloudflared = async () => {
     setInstalling(true);
     try {
-      const res = await fetch(`${BASE()}/api/remote/tunnel/install`, { method: 'POST' });
+      const res = await fetch(`${getApiBaseUrl()}/api/remote/tunnel/install`, { method: 'POST' });
       const data = await res.json();
       if (data.ok) {
         fetchTunnelStatus();
@@ -123,7 +145,9 @@ export const RemoteAccessModal: React.FC<{ open: boolean; onOpenChange: (v: bool
       await navigator.clipboard.writeText(url);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch {}
+    } catch {
+      // clipboard write may fail in some browsers
+    }
   };
 
   const activeUrl = tunnel?.running && tunnel.url ? tunnel.url : info?.url || '';
@@ -230,15 +254,34 @@ export const RemoteAccessModal: React.FC<{ open: boolean; onOpenChange: (v: bool
                     <Globe className="h-3.5 w-3.5" />
                     Public Access
                   </div>
-                  {tunnel?.running ? (
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-500 font-medium">
-                      Active
-                    </span>
-                  ) : (
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-muted-foreground/10 text-muted-foreground font-medium">
-                      Offline
-                    </span>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {tunnelStatusError ? (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-destructive/10 text-destructive font-medium">
+                        Unavailable
+                      </span>
+                    ) : tunnel?.running ? (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-500 font-medium">
+                        Active
+                      </span>
+                    ) : (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-muted-foreground/10 text-muted-foreground font-medium">
+                        Offline
+                      </span>
+                    )}
+                    <button
+                      onClick={fetchTunnelStatus}
+                      disabled={tunnelStatusLoading}
+                      title="Refresh tunnel status"
+                      aria-label="Refresh tunnel status"
+                      className="shrink-0 text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {tunnelStatusLoading ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-3 w-3" />
+                      )}
+                    </button>
+                  </div>
                 </div>
 
                 <p className="text-[11px] text-muted-foreground leading-relaxed break-words">
@@ -255,6 +298,13 @@ export const RemoteAccessModal: React.FC<{ open: boolean; onOpenChange: (v: bool
                   <div className="text-[11px] text-destructive flex items-start gap-1.5">
                     <XCircle className="h-3 w-3 shrink-0 mt-0.5" />
                     {tunnelError}
+                  </div>
+                )}
+
+                {tunnelStatusError && (
+                  <div className="text-[11px] text-destructive flex items-start gap-1.5">
+                    <XCircle className="h-3 w-3 shrink-0 mt-0.5" />
+                    {tunnelStatusError}
                   </div>
                 )}
 
@@ -306,10 +356,20 @@ export const RemoteAccessModal: React.FC<{ open: boolean; onOpenChange: (v: bool
                   ) : (
                     <button
                       onClick={handleStopTunnel}
-                      className="flex-1 inline-flex items-center justify-center gap-1.5 h-8 rounded-lg border border-destructive/30 text-[11px] font-medium text-destructive hover:bg-destructive/10 transition-colors duration-100"
+                      disabled={tunnelLoading}
+                      className={cn(
+                        'flex-1 inline-flex items-center justify-center gap-1.5 h-8 rounded-lg border border-destructive/30 text-[11px] font-medium text-destructive transition-colors duration-100',
+                        tunnelLoading
+                          ? 'opacity-50 cursor-not-allowed'
+                          : 'hover:bg-destructive/10'
+                      )}
                     >
-                      <XCircle className="h-3 w-3" />
-                      Stop Tunnel
+                      {tunnelLoading ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <XCircle className="h-3 w-3" />
+                      )}
+                      {tunnelLoading ? 'Stopping...' : 'Stop Tunnel'}
                     </button>
                   )}
                 </div>
