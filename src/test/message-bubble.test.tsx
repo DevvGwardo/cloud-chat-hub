@@ -888,4 +888,214 @@ The optimized code for \`KanbanBoard.tsx\`, \`cards.ts\`, and \`gateway-client.t
     expect(rendered.textContent).toContain('All done.');
     expect(rendered.textContent).not.toMatch(/terminal/i);
   });
+
+  it('adds the streaming caret anchor to the last text run while streaming', () => {
+    const { container, rerender } = render(
+      <PanelProvider value="panel-1">
+        <MessageBubble
+          message={{
+            id: 'assistant-stream-1',
+            conversationId: 'conv-1',
+            role: 'assistant',
+            content: '',
+            timestamp: new Date().toISOString(),
+          }}
+          parts={[{ type: 'text', text: 'Working on it' }]}
+          isStreaming
+          streamingContent="Working on it"
+        />
+      </PanelProvider>,
+    );
+
+    // The wrapper of the final text part gets the caret anchor class.
+    expect(container.querySelector('.streaming-caret-anchor')).not.toBeNull();
+
+    // Once streaming finishes, the anchor disappears.
+    rerender(
+      <PanelProvider value="panel-1">
+        <MessageBubble
+          message={{
+            id: 'assistant-stream-1',
+            conversationId: 'conv-1',
+            role: 'assistant',
+            content: 'Working on it',
+            timestamp: new Date().toISOString(),
+          }}
+          parts={[{ type: 'text', text: 'Working on it' }]}
+        />
+      </PanelProvider>,
+    );
+    expect(container.querySelector('.streaming-caret-anchor')).toBeNull();
+  });
+
+  it('extracts <think> blocks into the collapsible thinking UI', () => {
+    const { container } = render(
+      <PanelProvider value="panel-1">
+        <MessageBubble
+          message={{
+            id: 'assistant-think',
+            conversationId: 'conv-1',
+            role: 'assistant',
+            content: '<think>Let me reason carefully.</think>The answer is 42.',
+            timestamp: new Date().toISOString(),
+          }}
+        />
+      </PanelProvider>,
+    );
+
+    // Thinking summary + reasoning content are rendered…
+    expect(screen.getByText('Thinking')).toBeInTheDocument();
+    expect(screen.getByText('Let me reason carefully.')).toBeInTheDocument();
+    // …the answer text is still shown…
+    expect(screen.getByText('The answer is 42.')).toBeInTheDocument();
+    // …and the raw <think> tags are stripped from the DOM.
+    expect(container.textContent).not.toContain('<think>');
+    expect(container.textContent).not.toContain('</think>');
+
+    // Collapsed by default (not streaming) — the open attribute is unset.
+    // Note: React 18 renders `className` on custom elements (<sl-details>) as
+    // a literal `classname` attribute, so target the element tag directly.
+    const details = container.querySelector('sl-details');
+    expect(details).not.toBeNull();
+    expect(details).not.toHaveAttribute('open');
+  });
+
+  it('auto-opens thinking while reasoning streams and auto-closes when it stops', () => {
+    const { container, rerender } = render(
+      <PanelProvider value="panel-1">
+        <MessageBubble
+          message={{
+            id: 'assistant-think-stream',
+            conversationId: 'conv-1',
+            role: 'assistant',
+            content: '',
+            timestamp: new Date().toISOString(),
+          }}
+          isStreaming
+          streamingContent="<think>working through it"
+        />
+      </PanelProvider>,
+    );
+
+    // Unclosed <think> tag while streaming ⇒ thinking is in progress:
+    // the details element auto-opens and shows the streaming label.
+    const details = () => container.querySelector('sl-details');
+    expect(details()).not.toBeNull();
+    expect(details()).toHaveAttribute('open');
+    expect(screen.getByText('Thinking...')).toBeInTheDocument();
+    expect(screen.getByText('working through it')).toBeInTheDocument();
+
+    // Once streaming ends, the reasoning auto-closes (open attribute removed).
+    rerender(
+      <PanelProvider value="panel-1">
+        <MessageBubble
+          message={{
+            id: 'assistant-think-stream',
+            conversationId: 'conv-1',
+            role: 'assistant',
+            content: '',
+            timestamp: new Date().toISOString(),
+          }}
+          parts={[{ type: 'reasoning', reasoning: 'working through it' }]}
+        />
+      </PanelProvider>,
+    );
+
+    expect(details()).not.toBeNull();
+    expect(details()).not.toHaveAttribute('open');
+    expect(screen.getByText('Thinking')).toBeInTheDocument();
+  });
+
+  it('copies the visible content when the copy action is pressed', () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const originalClipboard = navigator.clipboard;
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+
+    try {
+      render(
+        <PanelProvider value="panel-1">
+          <MessageBubble
+            message={{
+              id: 'assistant-copy',
+              conversationId: 'conv-1',
+              role: 'assistant',
+              content: 'Copy me please',
+              timestamp: new Date().toISOString(),
+            }}
+          />
+        </PanelProvider>,
+      );
+
+      fireEvent.click(screen.getByTitle('Copy'));
+      // handleCopy writes the *displayed* content (think tags stripped) to the clipboard
+      expect(writeText).toHaveBeenCalledWith('Copy me please');
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: originalClipboard,
+      });
+    }
+  });
+
+  it('renders user messages with copy/edit actions and no regenerate/rewind', () => {
+    render(
+      <PanelProvider value="panel-1">
+        <MessageBubble
+          message={{
+            id: 'user-1',
+            conversationId: 'conv-1',
+            role: 'user',
+            content: 'My question',
+            timestamp: new Date().toISOString(),
+          }}
+          onEdit={vi.fn()}
+          onRegenerate={vi.fn()}
+          onRewind={vi.fn()}
+        />
+      </PanelProvider>,
+    );
+
+    // User bubble renders its content plainly…
+    expect(screen.getByText('My question')).toBeInTheDocument();
+    // …with copy + edit actions…
+    expect(screen.getByTitle('Copy')).toBeInTheDocument();
+    expect(screen.getByTitle('Edit')).toBeInTheDocument();
+    // …but regenerate/rewind are assistant-only.
+    expect(screen.queryByTitle('Regenerate')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Rewind to here')).not.toBeInTheDocument();
+
+    // Edit switches into the editing textarea.
+    fireEvent.click(screen.getByTitle('Edit'));
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('My question');
+  });
+
+  it('fires onRegenerate and onRewind from the assistant action bar', () => {
+    const onRegenerate = vi.fn();
+    const onRewind = vi.fn();
+    render(
+      <PanelProvider value="panel-1">
+        <MessageBubble
+          message={{
+            id: 'assistant-actions',
+            conversationId: 'conv-1',
+            role: 'assistant',
+            content: 'Here is the answer',
+            timestamp: new Date().toISOString(),
+          }}
+          onRegenerate={onRegenerate}
+          onRewind={onRewind}
+        />
+      </PanelProvider>,
+    );
+
+    fireEvent.click(screen.getByTitle('Regenerate'));
+    expect(onRegenerate).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTitle('Rewind to here'));
+    expect(onRewind).toHaveBeenCalledTimes(1);
+  });
 });

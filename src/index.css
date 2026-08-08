@@ -6,6 +6,8 @@
 
 @layer base {
   :root {
+    color-scheme: light;
+
     --background: 0 0% 100%;
     --foreground: 0 0% 4%;
 
@@ -55,6 +57,8 @@
   }
 
   .dark {
+    color-scheme: dark;
+
     --background: 0 0% 10.2%;
     --foreground: 0 0% 100%;
 
@@ -344,14 +348,18 @@ code, pre, .font-mono {
 }
 
 /* Touch devices have no hover, so hover-gated affordances would be unreachable.
-   Reveal the code-block copy button and message action bars on coarse pointers
-   (phones/tablets) so copy/regenerate/rewind stay tappable. */
+   Reveal the code-block copy button, message action bars, and message timestamps
+   on coarse pointers (phones/tablets) so copy/regenerate/rewind stay tappable. */
 @media (hover: none) {
   .chat-code-block__copy {
     opacity: 1;
   }
 
   .chat-hover-actions {
+    opacity: 1 !important;
+  }
+
+  .chat-hover-timestamp {
     opacity: 1 !important;
   }
 }
@@ -679,6 +687,11 @@ code, pre, .font-mono {
     animation: none !important;
   }
 
+  /* Tailwind's animate-spin (Loader2 spinners) — disable under reduced motion */
+  [class*="animate-spin"] {
+    animation: none;
+  }
+
   #sidebar-rainbow animate {
     display: none;
   }
@@ -769,5 +782,23 @@ sl-details.tool-details::part(content) {
 @media (pointer: coarse) {
   .chat-composer-textarea {
     font-size: 16px;
+  }
+}
+
+/* Blinking caret on the in-progress assistant message while streaming —
+   the live-text affordance T3/Cursor/Claude use. Rendered via ::after on the
+   last markdown block so it stays inline with the final text run. */
+@keyframes streaming-caret-blink {
+  0%, 45% { opacity: 1; }
+  55%, 100% { opacity: 0; }
+}
+.streaming-caret-anchor > *:last-child::after {
+  content: '▍';
+  margin-left: 2px;
+  animation: streaming-caret-blink 1s steps(1) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .streaming-caret-anchor > *:last-child::after {
+    animation: none;
   }
 }

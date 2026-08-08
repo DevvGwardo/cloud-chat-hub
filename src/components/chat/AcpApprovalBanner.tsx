@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from 'react';
 import { ShieldAlert } from 'lucide-react';
 import { useHermesStore } from '@/stores/hermes-store';
-import { postAcpApproval, type AcpApprovalRequest } from '@/lib/hermes-api';
+import { postAcpApproval } from '@/lib/hermes-api';
 import { cn } from '@/lib/utils';
 
 /**

@@ -66,7 +66,7 @@ function SlDetails({
 interface ToolInvocation {
   toolCallId: string;
   toolName: string;
-  args: Record<string, any>;
+  args: Record<string, unknown>;
   state: 'partial-call' | 'call' | 'result';
   result?: unknown;
   /** Content-stream offset where this tool was emitted (persisted for interleaving). */
@@ -657,6 +657,7 @@ function FileEditPreview({ filePath }: { filePath: string }) {
   const change = useChangesetStore((s) => s.getChangeset(scopeId).changes[filePath]);
   const [expanded, setExpanded] = useState(false);
   const [isOverflowing, setIsOverflowing] = useState(false);
+  const [contentHeight, setContentHeight] = useState<number | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
 
   const COLLAPSED_HEIGHT = 140; // px
@@ -691,9 +692,14 @@ function FileEditPreview({ filePath }: { filePath: string }) {
     .join('\n');
 
   useLayoutEffect(() => {
-    if (contentRef.current) {
-      setIsOverflowing(contentRef.current.scrollHeight > COLLAPSED_HEIGHT);
-    }
+    // Measure the full content height once per render cycle (scrollHeight is
+    // unaffected by the collapsed max-height clip) and store it in state so
+    // the expanded maxHeight never reads the DOM during render.
+    const el = contentRef.current;
+    if (!el) return;
+    const height = el.scrollHeight;
+    setContentHeight(height);
+    setIsOverflowing(height > COLLAPSED_HEIGHT);
   }, [diffLines]);
 
   if (!change || diffLines.length === 0) return null;
@@ -736,7 +742,7 @@ function FileEditPreview({ filePath }: { filePath: string }) {
         <div
           ref={contentRef}
           className="overflow-hidden transition-[max-height] duration-300 ease-in-out"
-          style={{ maxHeight: expanded ? `${contentRef.current?.scrollHeight || 2000}px` : `${COLLAPSED_HEIGHT}px` }}
+          style={{ maxHeight: expanded ? `${contentHeight ?? 2000}px` : `${COLLAPSED_HEIGHT}px` }}
         >
           <div className="chat-code-block__editor">
             <pre aria-hidden="true" className="chat-code-block__gutter text-[12px] leading-[1.65] text-right pr-3 pl-2 font-mono text-gray-600">
@@ -822,9 +828,22 @@ function ToolInvocationDisplay({ invocation, isLatest }: { invocation: ToolInvoc
   const isInProgress = invocation.state === 'call' || invocation.state === 'partial-call';
   const errorMessage = getToolErrorMessage(invocation.result);
   const hasError = !!errorMessage;
-  const outputMessage = getToolOutputMessage(invocation.result);
+  const outputMessage: string | null = getToolOutputMessage(invocation.result);
   const hasOutput = isComplete && !hasError && !!outputMessage && outputMessage !== '(no output)';
   const renderOutputAsMarkdown = !!outputMessage && shouldRenderToolOutputAsMarkdown(outputMessage);
+  const writtenContent: string | null = typeof invocation.args?.content === 'string' ? invocation.args.content : null;
+  const oldString: string | undefined = typeof invocation.args?.old_string === 'string' ? invocation.args.old_string : undefined;
+  const newString: string | undefined = typeof invocation.args?.new_string === 'string' ? invocation.args.new_string : undefined;
+  const writtenContentPreview = isComplete && !hasError && !hasOutput && (invocation.toolName === 'write_file' || invocation.toolName === 'create_repo_file') && writtenContent
+    ? React.createElement('div', null,
+        React.createElement('div', { className: 'text-[10px] text-muted-foreground/60 mb-1' }, 'Content written:'),
+        React.createElement('pre', { className: 'text-[11px] font-mono text-foreground/80 bg-muted/30 rounded-md px-2.5 py-2 max-h-[200px] overflow-auto whitespace-pre-wrap break-all' },
+          writtenContent.length > 3000
+            ? writtenContent.slice(0, 3000) + '\n\n[... truncated]'
+            : writtenContent
+        )
+      )
+    : null;
   const progressLabel = invocation.toolName === 'read_repo_file' || invocation.toolName === 'read_file' ? 'Reading...'
     : invocation.toolName === 'run_command' || invocation.toolName === 'terminal' ? 'Running...'
     : invocation.toolName === 'execute_python' ? 'Executing...'
@@ -1010,14 +1029,16 @@ function ToolInvocationDisplay({ invocation, isLatest }: { invocation: ToolInvoc
         )}
       </button>
 
-      {/* Accordion body — slides open */}
+      {/* Accordion body — slides open. grid-rows 0fr/1fr keeps the animation
+          without a fixed max-height, so long batch diffs are never clipped. */}
       <div
         className={cn(
-          'overflow-hidden transition-all duration-200 ease-in-out',
-          expanded ? 'max-h-[2000px] opacity-100' : 'max-h-0 opacity-0'
+          'grid transition-[grid-template-rows,opacity] duration-200 ease-in-out',
+          expanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
         )}
       >
-        <div className="px-3 pb-2 pt-0.5 space-y-1">
+        <div className="overflow-hidden min-h-0">
+          <div className="px-3 pb-2 pt-0.5 space-y-1">
           {(isInProgress || isLatest) && (
             <div className="mt-1">
               <div className="chat-tool-glimmer__track">
@@ -1049,29 +1070,18 @@ function ToolInvocationDisplay({ invocation, isLatest }: { invocation: ToolInvoc
           )}
 
           {/* Written content preview — shows what was written/created */}
-          {isComplete && !hasError && !hasOutput && (invocation.toolName === 'write_file' || invocation.toolName === 'create_repo_file') && invocation.args?.content && (
-            <div>
-              <div className="text-[10px] text-muted-foreground/60 mb-1">Content written:</div>
-              <pre className="text-[11px] font-mono text-foreground/80 bg-muted/30 rounded-md px-2.5 py-2 max-h-[200px] overflow-auto whitespace-pre-wrap break-all">
-                {typeof invocation.args.content === 'string'
-                  ? invocation.args.content.length > 3000
-                    ? invocation.args.content.slice(0, 3000) + '\n\n[... truncated]'
-                    : invocation.args.content
-                  : JSON.stringify(invocation.args.content, null, 2) ?? ''}
-              </pre>
-            </div>
-          )}
+          {writtenContentPreview}
 
           {/* Edit diff preview — shows old → new strings */}
-          {isComplete && !hasError && invocation.toolName === 'edit_repo_file' && invocation.args?.old_string && invocation.args?.new_string && (
+          {isComplete && !hasError && invocation.toolName === 'edit_repo_file' && oldString && newString && (
             <div className="space-y-1">
               <div className="text-[10px] text-muted-foreground/60">Diff:</div>
               <div className="text-[11px] font-mono bg-muted/30 rounded-md px-2.5 py-2 max-h-[200px] overflow-auto">
                 <div className="text-red-400/80 whitespace-pre-wrap break-all">
-                  {`- ${String(invocation.args.old_string).slice(0, 1500)}${String(invocation.args.old_string).length > 1500 ? '\n  [... truncated]' : ''}`}
+                  {`- ${oldString.slice(0, 1500)}${oldString.length > 1500 ? '\n  [... truncated]' : ''}`}
                 </div>
                 <div className="text-green-400/80 whitespace-pre-wrap break-all mt-1">
-                  {`+ ${String(invocation.args.new_string).slice(0, 1500)}${String(invocation.args.new_string).length > 1500 ? '\n  [... truncated]' : ''}`}
+                  {`+ ${newString.slice(0, 1500)}${newString.length > 1500 ? '\n  [... truncated]' : ''}`}
                 </div>
               </div>
             </div>
@@ -1106,6 +1116,7 @@ function ToolInvocationDisplay({ invocation, isLatest }: { invocation: ToolInvoc
               ))}
             </div>
           )}
+          </div>
         </div>
       </div>
     </div>
@@ -1179,7 +1190,17 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
   const [editContent, setEditContent] = useState(message.content);
   const [thinkingOpen, setThinkingOpen] = useState(false);
   const prevReasoningStreamingRef = useRef(false);
+  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isUser = message.role === 'user';
+
+  // Keep the edit draft in sync with the underlying message: re-draft whenever
+  // edit mode is (re)entered or the message content changes mid-edit, so a
+  // stale copy is never submitted.
+  useEffect(() => {
+    if (editing) {
+      setEditContent(message.content);
+    }
+  }, [editing, message.content]);
 
   const rawContent = isStreaming ? (streamingContent || '') : message.content;
   const hasStructuredRepoToolInvocations = Boolean(
@@ -1224,8 +1245,13 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
     return sanitizeAssistantTextContent(rawContent, !!isStreaming);
   }, [isUser, rawContent, isStreaming]);
 
-  // Parse out inline <think> blocks from content (some models embed these directly)
-  const parsed = !isUser ? parseThinkingBlocks(normalizedRawContent, !!isStreaming) : null;
+  // Parse out inline <think> blocks from content (some models embed these
+  // directly). Memoized on the (already memoized) normalized content so the
+  // full-content regex scan doesn't re-run on every streaming re-render.
+  const parsed = React.useMemo(
+    () => (!isUser ? parseThinkingBlocks(normalizedRawContent, !!isStreaming) : null),
+    [isUser, normalizedRawContent, isStreaming],
+  );
   const displayContent = parsed ? parsed.cleanContent : normalizedRawContent;
 
   // Also extract <think> blocks from text parts (models may embed them in streamed text parts)
@@ -1409,12 +1435,26 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
     try {
       await navigator.clipboard.writeText(displayContent);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      // Clear any pending reset timer so rapid re-clicks don't race and flip
+      // the check mark back early.
+      if (copyResetTimerRef.current) {
+        clearTimeout(copyResetTimerRef.current);
+      }
+      copyResetTimerRef.current = setTimeout(() => setCopied(false), 2000);
     } catch {
       // Clipboard API unavailable (e.g. non-secure context like /m/chat over
       // http) — fail silently rather than throwing an unhandled rejection.
     }
   };
+
+  // Clean up the pending copy-feedback timer on unmount.
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current) {
+        clearTimeout(copyResetTimerRef.current);
+      }
+    };
+  }, []);
 
   const handleEditSubmit = () => {
     onEdit?.(editContent);
@@ -1434,7 +1474,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
     <div className={cn('group', isUser && !editing && 'flex flex-col items-end')}>
       <div className={cn('relative min-w-0 overflow-hidden', isUser && !editing ? 'max-w-[85%]' : 'w-full')}>
         {formattedTime && !editing && (
-          <span className={cn('text-[10px] text-muted-foreground/50 mb-1 block opacity-0 group-hover:opacity-100 transition-opacity duration-150', isUser && 'text-right')}>
+          <span className={cn('chat-hover-timestamp text-[10px] text-muted-foreground/50 mb-1 block opacity-0 group-hover:opacity-100 transition-opacity duration-150', isUser && 'text-right')}>
             {formattedTime}
           </span>
         )}
@@ -1443,6 +1483,16 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
             <textarea
               value={editContent}
               onChange={(e) => setEditContent(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setEditing(false);
+                } else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                  e.preventDefault();
+                  handleEditSubmit();
+                }
+              }}
+              aria-label="Edit message"
               className="w-full min-h-[80px] p-3 rounded-md bg-background border border-input text-sm resize-none focus:outline-none focus:ring-1 focus:ring-ring font-sans"
             />
             <div className="flex gap-3 justify-end">
@@ -1512,8 +1562,17 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
                   const stripped = sanitizeAssistantTextContent(part.text, !!isStreaming);
                   const cleanedText = parseThinkingBlocks(stripped, !!isStreaming).cleanContent;
                   if (!cleanedText) return null;
+                  // Blinking caret on the last text run while the message is still
+                  // streaming — the live-text affordance T3/Cursor/Claude use.
+                  const showStreamCaret = !!isStreaming && index === orderedParts.length - 1;
                   return (
-                    <div key={`text-${index}`} className={index > 0 ? 'mt-3' : undefined}>
+                    <div
+                      key={`text-${index}`}
+                      className={cn(
+                        index > 0 ? 'mt-3' : undefined,
+                        showStreamCaret && 'streaming-caret-anchor',
+                      )}
+                    >
                       <MarkdownRenderer content={cleanedText} streaming={!!isStreaming} />
                     </div>
                   );
@@ -1538,6 +1597,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
                 onClick={handleCopy}
                 className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors duration-100"
                 title="Copy"
+                aria-label="Copy"
               >
                 {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
               </button>
@@ -1547,6 +1607,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
                 onClick={() => setEditing(true)}
                 className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors duration-100"
                 title="Edit"
+                aria-label="Edit"
               >
                 <Pencil className="h-3.5 w-3.5" />
               </button>
@@ -1556,6 +1617,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
                 onClick={onRegenerate}
                 className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors duration-100"
                 title="Regenerate"
+                aria-label="Regenerate"
               >
                 <RotateCcw className="h-3.5 w-3.5" />
               </button>
@@ -1565,6 +1627,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
                 onClick={onRewind}
                 className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors duration-100"
                 title="Rewind to here"
+                aria-label="Rewind to here"
               >
                 <GitBranch className="h-3.5 w-3.5" />
               </button>
