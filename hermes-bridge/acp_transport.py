@@ -31,8 +31,10 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -169,7 +171,7 @@ class BridgeAcpClient:
             RequestPermissionResponse,
         )
 
-        approval_id = f"acp-{int(time.time() * 1000)}-{len(self._approvals) + 1}"
+        approval_id = f"acp-{uuid.uuid4().hex[:16]}"
         options_clean = [
             {"option_id": str(getattr(o, "option_id", "")), "name": str(getattr(o, "name", "") or getattr(o, "option_id", ""))}
             for o in (options or [])
@@ -248,7 +250,10 @@ class BridgeAcpClient:
             if status in ("completed", "failed"):
                 self.emit("tool_end", title, tool_input, _tool_output(update))
         elif kind == "plan_update":
-            entries = getattr(update, "entries", None)
+            # The SDK nests entries under ``plan`` (PlanUpdate.plan.entries);
+            # tolerate a top-level ``entries`` shape too.
+            plan = getattr(update, "plan", None) or update
+            entries = getattr(plan, "entries", None) or getattr(update, "entries", None)
             if isinstance(entries, list) and entries:
                 self.emit("plan", entries)
         # usage_update / session_info_update / config_option_update /
@@ -270,27 +275,92 @@ class _AcpHandle:
     loop: asyncio.AbstractEventLoop
     approvals: dict[str, asyncio.Future] = field(default_factory=dict)
     last_used: float = field(default_factory=time.time)
+    # True while a prompt is in flight on this handle — the idle reaper must
+    # never close a session mid-turn (a long stream can legitimately exceed
+    # IDLE_TIMEOUT_SECONDS).
+    busy: bool = False
+    # Open file object for the per-conversation stderr log; closed when the
+    # handle is torn down so the fd doesn't leak.
+    stderr_file: Any = None
 
     def touch(self) -> None:
         self.last_used = time.time()
 
     async def close(self) -> None:
+        """Tear down the session: politely ask the agent to close, then
+        hard-kill + reap the process and release the stderr log fd.
+
+        Never awaits indefinitely: ``close_session`` is bounded by
+        ``CLOSE_SESSION_TIMEOUT_SECONDS`` so an unresponsive agent can't
+        wedge session management. Callers must NOT hold ``_sessions_lock``
+        across this call.
+        """
         try:
-            await self.conn.close_session(self.session_id)
+            await asyncio.wait_for(
+                self.conn.close_session(self.session_id),
+                timeout=CLOSE_SESSION_TIMEOUT_SECONDS,
+            )
         except Exception:
             pass
-        try:
-            self.proc.kill()
-        except Exception:
-            pass
+        if self.proc is not None:
+            try:
+                if self.proc.returncode is None:
+                    self.proc.kill()
+            except Exception:
+                pass
+            try:
+                await self.proc.wait()
+            except Exception:
+                pass
+        if self.stderr_file is not None:
+            try:
+                self.stderr_file.close()
+            except Exception:
+                pass
+            self.stderr_file = None
 
 
 _sessions: dict[str, _AcpHandle] = {}
 _sessions_lock = asyncio.Lock()
 
-APPROVAL_TIMEOUT_SECONDS = float(os.environ.get("HERMES_ACP_APPROVAL_TIMEOUT", "3600"))
-IDLE_TIMEOUT_SECONDS = float(os.environ.get("HERMES_ACP_IDLE_TIMEOUT", "1800"))
-PROMPT_TIMEOUT_SECONDS = float(os.environ.get("HERMES_ACP_PROMPT_TIMEOUT", "3600"))
+# How long to wait for the agent to acknowledge close_session before we
+# hard-kill the process. Keep it short — this runs on the bridge's event loop.
+CLOSE_SESSION_TIMEOUT_SECONDS = 5.0
+
+
+def _env_float(name: str, default: float) -> float:
+    """Parse a positive float from the environment with a fallback default.
+
+    A missing, non-numeric, or non-positive value falls back to ``default``
+    instead of raising at import time (a bad value must not break the bridge).
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("ignoring invalid %s=%r (using default %s)", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("ignoring non-positive %s=%r (using default %s)", name, raw, default)
+        return default
+    return value
+
+
+APPROVAL_TIMEOUT_SECONDS = _env_float("HERMES_ACP_APPROVAL_TIMEOUT", 3600)
+IDLE_TIMEOUT_SECONDS = _env_float("HERMES_ACP_IDLE_TIMEOUT", 1800)
+PROMPT_TIMEOUT_SECONDS = _env_float("HERMES_ACP_PROMPT_TIMEOUT", 3600)
+
+# Client-controlled conversation ids must be scrubbed before they end up in a
+# filename (they can carry path separators / traversal sequences).
+_SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _safe_conversation_id(conversation_id: str) -> str:
+    """Sanitize a conversation id for use in filenames (safe charset, capped)."""
+    safe = _SAFE_ID_RE.sub("_", str(conversation_id)).strip("_")
+    return (safe or "unknown")[:40]
 
 
 async def ensure_session(
@@ -311,6 +381,11 @@ async def ensure_session(
         if handle is not None and handle.proc.returncode is None:
             handle.touch()
             return handle
+        if handle is not None:
+            # The previous hermes-acp process died — drop the handle and
+            # release its stderr log fd in the background before respawning.
+            _sessions.pop(conversation_id, None)
+            loop.create_task(_close_handle_quietly(handle))
 
         cmd = _acp_command()
         if cmd is None:
@@ -318,54 +393,78 @@ async def ensure_session(
 
         client = BridgeAcpClient(emit=emit, approvals={})
         # Drain stderr to a per-conversation log file so a chatty agent can
-        # never deadlock the stdio pipe, and failures are debuggable.
+        # never deadlock the stdio pipe, and failures are debuggable. The
+        # conversation id is client-controlled — sanitize it before it goes
+        # into a filename.
         import tempfile
 
         stderr_path = os.path.join(
             tempfile.gettempdir(),
-            f"hermes-acp-{conversation_id[:40]}.log",
+            f"hermes-acp-{_safe_conversation_id(conversation_id)}.log",
         )
-        stderr_file = open(stderr_path, "ab", buffering=0)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=cwd or None,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=stderr_file,
-            # hermes-acp emits large JSON-RPC lines (initialize/new_session
-            # payloads can carry the full provider catalog + MCP tool lists).
-            # The default 64KB StreamReader limit makes the acp SDK's readline
-            # receive loop raise "Separator is not found" on them.
-            limit=4 * 1024 * 1024,
-        )
-        conn = acp.connect_to_agent(client, proc.stdin, proc.stdout, use_unstable_protocol=True)
+        stderr_file = None
+        proc = None
+        try:
+            stderr_file = open(stderr_path, "ab", buffering=0)
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=cwd or None,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=stderr_file,
+                # hermes-acp emits large JSON-RPC lines (initialize/new_session
+                # payloads can carry the full provider catalog + MCP tool lists).
+                # The default 64KB StreamReader limit makes the acp SDK's readline
+                # receive loop raise "Separator is not found" on them.
+                limit=4 * 1024 * 1024,
+            )
+            conn = acp.connect_to_agent(client, proc.stdin, proc.stdout, use_unstable_protocol=True)
 
-        init = await conn.initialize(
-            protocol_version=acp.PROTOCOL_VERSION,
-            client_info=Implementation(name="cloud-chat-hub", version="1.0.0"),
-            client_capabilities=ClientCapabilities(),
-        )
-        auth_methods = getattr(init, "auth_methods", None) or []
-        if auth_methods:
-            first = auth_methods[0]
-            method_id = str(getattr(first, "method_id", "") or "").strip()
-            if method_id:
+            init = await conn.initialize(
+                protocol_version=acp.PROTOCOL_VERSION,
+                client_info=Implementation(name="cloud-chat-hub", version="1.0.0"),
+                client_capabilities=ClientCapabilities(),
+            )
+            auth_methods = getattr(init, "auth_methods", None) or []
+            if auth_methods:
+                first = auth_methods[0]
+                method_id = str(getattr(first, "method_id", "") or "").strip()
+                if method_id:
+                    try:
+                        await conn.authenticate(method_id)
+                    except Exception as exc:
+                        logger.warning("acp authenticate(%s) failed: %s", method_id, exc)
+
+            ns = await conn.new_session(cwd=cwd or ".")
+            session_id = str(getattr(ns, "session_id", "") or "")
+            if not session_id:
+                raise RuntimeError("hermes-acp returned no session id")
+
+            if provider and provider not in ("auto", "default"):
+                model_id = f"{provider}:{model}" if model else provider
                 try:
-                    await conn.authenticate(method_id)
+                    await conn.set_session_model(model_id, session_id)
                 except Exception as exc:
-                    logger.warning("acp authenticate(%s) failed: %s", method_id, exc)
-
-        ns = await conn.new_session(cwd=cwd or ".")
-        session_id = str(getattr(ns, "session_id", "") or "")
-        if not session_id:
-            raise RuntimeError("hermes-acp returned no session id")
-
-        if provider and provider not in ("auto", "default"):
-            model_id = f"{provider}:{model}" if model else provider
-            try:
-                await conn.set_session_model(model_id, session_id)
-            except Exception as exc:
-                logger.warning("acp set_session_model(%s) failed: %s", model_id, exc)
+                    logger.warning("acp set_session_model(%s) failed: %s", model_id, exc)
+        except BaseException:
+            # Setup failed partway — never leave an orphaned hermes-acp or a
+            # leaked stderr log fd behind. Kill + reap, close the log, re-raise.
+            if proc is not None:
+                try:
+                    if proc.returncode is None:
+                        proc.kill()
+                except Exception:
+                    pass
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
+            if stderr_file is not None:
+                try:
+                    stderr_file.close()
+                except Exception:
+                    pass
+            raise
 
         handle = _AcpHandle(
             conversation_id=conversation_id,
@@ -376,10 +475,19 @@ async def ensure_session(
             client=client,
             loop=loop,
             approvals=client._approvals,
+            stderr_file=stderr_file,
         )
         _sessions[conversation_id] = handle
         logger.info("acp session %s ready for conversation %s (cwd=%s)", session_id, conversation_id, cwd)
         return handle
+
+
+async def _close_handle_quietly(handle: _AcpHandle) -> None:
+    """Close a handle in the background; never raises, never blocks callers."""
+    try:
+        await handle.close()
+    except Exception:
+        pass
 
 
 def run_prompt_blocking(
@@ -395,6 +503,9 @@ def run_prompt_blocking(
 ) -> None:
     """Blocking bridge used from the worker thread (mirrors the agent-loop transport)."""
     import acp
+    import inspect
+
+    prompt_timeout = timeout or PROMPT_TIMEOUT_SECONDS
 
     async def _impl() -> None:
         handle = await ensure_session(
@@ -405,29 +516,47 @@ def run_prompt_blocking(
             provider=provider,
             model=model,
         )
-        # Notifications must stream into THIS request's queue. The client is
-        # shared across prompts on the same conversation, so repoint its emit
-        # callback for the duration of this prompt.
-        handle.client.emit = emit
-        handle.touch()
-        blocks = [acp.text_block(user_message)]
-        # The `prompt` arg order changed between SDK versions: 0.9.0 is
-        # `prompt(prompt, session_id)`, 0.11+ is `prompt(session_id, prompt)`.
-        # Inspect the bound method so the transport works on whichever venv
-        # the bridge is running under (bridge .venv vs hermes-agent venv).
-        import inspect
-
-        first_param = next(
-            (n for n, p in inspect.signature(handle.conn.prompt).parameters.items() if n not in ("self", "kwargs")),
-            "session_id",
-        )
-        if first_param == "session_id":
-            await handle.conn.prompt(handle.session_id, blocks)
-        else:
-            await handle.conn.prompt(blocks, handle.session_id)
+        # Mark the handle busy for the whole turn so the idle reaper never
+        # SIGKILLs a session mid-prompt (a long stream can legitimately
+        # outlast IDLE_TIMEOUT_SECONDS).
+        handle.busy = True
+        try:
+            # Notifications must stream into THIS request's queue. The client is
+            # shared across prompts on the same conversation, so repoint its emit
+            # callback for the duration of this prompt.
+            handle.client.emit = emit
+            handle.touch()
+            blocks = [acp.text_block(user_message)]
+            # The `prompt` arg order changed between SDK versions: 0.9.0 is
+            # `prompt(prompt, session_id)`, 0.11+ is `prompt(session_id, prompt)`.
+            # Inspect the bound method so the transport works on whichever venv
+            # the bridge is running under (bridge .venv vs hermes-agent venv).
+            first_param = next(
+                (n for n, p in inspect.signature(handle.conn.prompt).parameters.items() if n not in ("self", "kwargs")),
+                "session_id",
+            )
+            if first_param == "session_id":
+                call = handle.conn.prompt(handle.session_id, blocks)
+            else:
+                call = handle.conn.prompt(blocks, handle.session_id)
+            # Bound the turn: a stuck or over-long prompt must not run forever,
+            # and its late output must not bleed into the next request.
+            await asyncio.wait_for(call, timeout=prompt_timeout)
+        except asyncio.TimeoutError:
+            # The turn overran its deadline. Cancel it and tear the session
+            # down so stale notifications from this turn are dropped instead
+            # of being repointed into the next request on this conversation.
+            async with _sessions_lock:
+                _sessions.pop(conversation_id, None)
+            await handle.close()
+            raise TimeoutError(f"hermes-acp prompt timed out after {prompt_timeout:.0f}s") from None
+        finally:
+            handle.busy = False
 
     future = asyncio.run_coroutine_threadsafe(_impl(), loop)
-    future.result(timeout=timeout or PROMPT_TIMEOUT_SECONDS)
+    # Backstop only: _impl owns the timeout (wait_for cancels the turn and
+    # tears the session down before this can fire).
+    future.result(timeout=prompt_timeout + CLOSE_SESSION_TIMEOUT_SECONDS + 30)
 
 
 async def resolve_approval(approval_id: str, option_id: str) -> bool:
@@ -440,32 +569,31 @@ async def resolve_approval(approval_id: str, option_id: str) -> bool:
     return False
 
 
-async def close_conversation(conversation_id: str) -> None:
-    """Close and drop a conversation's ACP session."""
-    async with _sessions_lock:
-        handle = _sessions.pop(conversation_id, None)
-    if handle is not None:
-        await handle.close()
-
-
 async def reap_idle_sessions() -> int:
-    """Close sessions idle for IDLE_TIMEOUT_SECONDS. Returns how many were closed."""
+    """Close sessions idle for IDLE_TIMEOUT_SECONDS. Returns how many were closed.
+
+    Handles with a prompt in flight (``busy``) are never reaped — a long turn
+    streaming content must not be killed mid-prompt. Handles are popped under
+    the lock but closed after releasing it: ``close()`` may wait up to
+    ``CLOSE_SESSION_TIMEOUT_SECONDS`` on an unresponsive agent and must not
+    block session management.
+    """
     now = time.time()
     closed = 0
+    stale: list[_AcpHandle] = []
     async with _sessions_lock:
-        stale = [
-            cid
-            for cid, handle in _sessions.items()
-            if now - handle.last_used > IDLE_TIMEOUT_SECONDS
-        ]
-        for cid in stale:
-            handle = _sessions.pop(cid, None)
-            if handle is not None:
-                try:
-                    await handle.close()
-                    closed += 1
-                except Exception:
-                    pass
+        for cid, handle in list(_sessions.items()):
+            if handle.busy:
+                continue
+            if now - handle.last_used > IDLE_TIMEOUT_SECONDS:
+                _sessions.pop(cid, None)
+                stale.append(handle)
+    for handle in stale:
+        try:
+            await handle.close()
+            closed += 1
+        except Exception:
+            pass
     return closed
 
 

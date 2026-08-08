@@ -1,15 +1,29 @@
 import type { Express } from 'express';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { sendJson } from '../lib/helpers';
+import { logger } from '../lib/logger';
 
 const execFileAsync = promisify(execFile);
 
-const HERMES_DIR = process.env.HOME + '/.hermes/hermes-agent';
-const HERMES_BIN = process.env.HOME + '/.hermes/hermes-agent/venv/bin/hermes';
+// os.homedir() is crash-safe when HOME is unset (falls back to the OS user
+// database); process.env.HOME + ... would produce a broken "/.hermes/…" path.
+const HERMES_HOME = homedir();
+if (!HERMES_HOME) {
+  logger.warn('[hermes-update] os.homedir() returned empty — Hermes paths may be incorrect');
+}
+const HERMES_DIR = join(HERMES_HOME, '.hermes', 'hermes-agent');
+const HERMES_BIN = join(HERMES_HOME, '.hermes', 'hermes-agent', 'venv', 'bin', 'hermes');
 
 // Track if an update is currently running
 let updateInProgress = false;
+
+// git fetch results are cached for the status poll so a polling UI doesn't
+// hit the network (and trip .git/index.lock) on every request.
+const STATUS_FETCH_TTL_MS = 20_000;
+let lastStatusFetchAt = 0;
 
 // Progress of the current (or last) update, polled by the UI modal
 interface UpdateProgress {
@@ -58,11 +72,17 @@ export function registerHermesUpdateRoute(app: Express) {
   // GET /api/hermes/update/status — check for available updates
   app.get('/api/hermes/update/status', async (_req, res) => {
     try {
-      // Check git for commits behind
-      await execFileAsync('git', ['fetch', 'origin', '--quiet'], {
-        cwd: HERMES_DIR,
-        timeout: 15000,
-      });
+      // Check git for commits behind. The fetch is network-bound and can
+      // collide with an in-flight update's own fetch (index.lock), so cache
+      // it ~20s and skip it entirely while an update is running.
+      const now = Date.now();
+      if (!updateInProgress && now - lastStatusFetchAt >= STATUS_FETCH_TTL_MS) {
+        await execFileAsync('git', ['fetch', 'origin', '--quiet'], {
+          cwd: HERMES_DIR,
+          timeout: 15000,
+        });
+        lastStatusFetchAt = Date.now();
+      }
 
       const { stdout } = await execFileAsync(
         'git',
@@ -121,7 +141,9 @@ export function registerHermesUpdateRoute(app: Express) {
         const firstLine = versionOut.split('\n')[0];
         const match = firstLine.match(/Hermes Agent (v[\d.]+)/);
         if (match) currentVersion = match[1];
-      } catch {}
+      } catch {
+        // intentionally ignored
+      }
 
       sendJson(res, 200, {
         commitsBehind,
@@ -134,10 +156,10 @@ export function registerHermesUpdateRoute(app: Express) {
         stashCount,
         blockedReason,
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       sendJson(res, 500, {
         error: 'Failed to check for updates',
-        details: err.message,
+        details: err instanceof Error ? err.message : String(err),
       });
     }
   });
@@ -219,7 +241,7 @@ export function registerHermesUpdateRoute(app: Express) {
           ['merge', '--ff-only', 'origin/main'],
           { cwd: HERMES_DIR, timeout: 60000 }
         );
-      } catch (mergeErr: any) {
+      } catch (mergeErr: unknown) {
         // Restore the user's local changes before bailing
         if (hadStash) {
           try {
@@ -227,14 +249,17 @@ export function registerHermesUpdateRoute(app: Express) {
               cwd: HERMES_DIR,
               timeout: 10000,
             });
-          } catch {}
+          } catch {
+            // stash pop may fail if no stash exists
+          }
         }
-        const mergeErrMsg = 'Merge failed (non fast-forward): ' + (mergeErr.stderr?.trim() || mergeErr.message);
+        const mergeErrMsg = 'Merge failed (non fast-forward): ' + (mergeErr instanceof Error ? mergeErr.message : String(mergeErr));
+        const execErr = mergeErr as { stderr?: string };
         finishProgress(false, mergeErrMsg);
         return sendJson(res, 500, {
           success: false,
           error: mergeErrMsg,
-          stderr: mergeErr.stderr?.slice(-500),
+          stderr: execErr.stderr?.slice(-500),
         });
       }
 
@@ -276,36 +301,77 @@ export function registerHermesUpdateRoute(app: Express) {
 
       // Step 6: reinstall dependencies via hermes update
       setProgress(6, 'Installing dependencies...');
-      const updateResult = await execFileAsync(HERMES_BIN, ['update'], {
-        cwd: HERMES_DIR,
-        timeout: 300000, // 5 min max
-        env: { ...process.env, NO_COLOR: '1' },
-      });
-
-      // Get new version
-      let newVersion = 'unknown';
       try {
-        const { stdout } = await execFileAsync(HERMES_BIN, ['--version'], {
-          timeout: 10000,
+        const updateResult = await execFileAsync(HERMES_BIN, ['update'], {
+          cwd: HERMES_DIR,
+          timeout: 300000, // 5 min max
           env: { ...process.env, NO_COLOR: '1' },
         });
-        const match = stdout.split('\n')[0].match(/Hermes Agent (v[\d.]+)/);
-        if (match) newVersion = match[1];
-      } catch {}
 
-      finishProgress(true, null, newVersion);
-      sendJson(res, 200, {
-        success: true,
-        newVersion,
-        output: updateResult.stdout.slice(-500), // last 500 chars of output
-      });
-    } catch (err: any) {
-      finishProgress(false, err.message);
+        // Get new version
+        let newVersion = 'unknown';
+        try {
+          const { stdout } = await execFileAsync(HERMES_BIN, ['--version'], {
+            timeout: 10000,
+            env: { ...process.env, NO_COLOR: '1' },
+          });
+          const match = stdout.split('\n')[0].match(/Hermes Agent (v[\d.]+)/);
+          if (match) newVersion = match[1];
+        } catch {
+          // intentionally ignored
+        }
+
+        finishProgress(true, null, newVersion);
+        sendJson(res, 200, {
+          success: true,
+          newVersion,
+          output: updateResult.stdout.slice(-500), // last 500 chars of output
+        });
+      } catch (err: unknown) {
+        // The merge already succeeded — a failure here would leave the repo
+        // at the new commit with broken deps. Roll back to the pre-update
+        // commit and restore the user's stashed changes (if any).
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const execErr = err as { stdout?: string; stderr?: string };
+        try {
+          await execFileAsync('git', ['reset', '--hard', preUpdateSha], {
+            cwd: HERMES_DIR,
+            timeout: 10000,
+          });
+          if (hadStash) {
+            try {
+              await execFileAsync('git', ['stash', 'pop'], {
+                cwd: HERMES_DIR,
+                timeout: 10000,
+              });
+            } catch {
+              // stash pop failed after rollback — leave the stash in place so
+              // the user can restore their changes manually
+            }
+          }
+        } catch (rollbackErr: unknown) {
+          const rollbackMsg =
+            `Update failed (${errMsg}) and rollback to ${preUpdateSha.slice(0, 7)} also failed: ` +
+            (rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr));
+          finishProgress(false, rollbackMsg);
+          return sendJson(res, 500, { success: false, error: rollbackMsg });
+        }
+        finishProgress(false, errMsg);
+        sendJson(res, 500, {
+          success: false,
+          error: errMsg,
+          stdout: execErr.stdout?.slice(-500),
+          stderr: execErr.stderr?.slice(-500),
+        });
+      }
+    } catch (err: unknown) {
+      finishProgress(false, err instanceof Error ? err.message : String(err));
+      const execErr = err as { stdout?: string; stderr?: string };
       sendJson(res, 500, {
         success: false,
-        error: err.message,
-        stdout: err.stdout?.slice(-500),
-        stderr: err.stderr?.slice(-500),
+        error: err instanceof Error ? err.message : String(err),
+        stdout: execErr.stdout?.slice(-500),
+        stderr: execErr.stderr?.slice(-500),
       });
     } finally {
       updateInProgress = false;

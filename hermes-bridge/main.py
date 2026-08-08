@@ -5911,6 +5911,27 @@ def _content_to_text(content) -> str:
     return str(content or "")
 
 
+def _format_plan_text(entries) -> str:
+    """Render ACP ``plan_update`` entries as markdown text for the chat stream.
+
+    The SSE protocol has no dedicated plan event (frontend HermesEvent types
+    are text / tool_activity / agent_status / reasoning / server_tool_event),
+    so the plan is forwarded as visible content — the same way the swarm path
+    streams its plan summary.
+    """
+    if not entries:
+        return ""
+    lines = ["\n### Plan"]
+    for entry in entries:
+        text = str(getattr(entry, "content", "") or "").strip()
+        if not text:
+            continue
+        status = str(getattr(entry, "status", "") or "")
+        marker = {"completed": "- [x]", "in_progress": "- [ ]", "pending": "- [ ]"}.get(status, "-")
+        lines.append(f"{marker} {text}")
+    return "\n".join(lines) + "\n" if len(lines) > 1 else ""
+
+
 async def _acp_chat_completions_impl(request: Request, body: ChatCompletionRequest):
     """Chat completions via the ACP transport (real hermes-agent)."""
     import acp_transport
@@ -5918,6 +5939,13 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
     available, reason = acp_transport.acp_available()
     if not available:
         print(f"[hermes-bridge] ACP mode requested but unavailable: {reason}", flush=True)
+        # `_mark_request_started` already ran (before the mode branch) — close
+        # the accounting here or the active-request metric leaks.
+        _mark_request_finished(
+            model=body.model,
+            success=False,
+            summary=f"model={body.model} mode=acp error=acp-unavailable",
+        )
         return JSONResponse(
             status_code=400,
             content={"error": {"message": f"ACP transport unavailable: {reason}"}},
@@ -6022,7 +6050,7 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
         elif kind == "approval_request":
             on_approval_request(payload[0])
         elif kind == "plan":
-            _qput(("thinking", 1))
+            _qput(("plan", payload[0]))
 
     request_outcome = {"success": True, "error": None}
 
@@ -6038,10 +6066,7 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
                 model=body.model,
             )
             print(f"[hermes-bridge] ACP conversation completed. conversation={workspace_id}", flush=True)
-            _update_bridge_metrics(success=True, decrement_active=True)
             _finalize_session(True)
-            # `_mark_request_started` already incremented active requests for
-            # every request (before the mode branch) — decrement on completion.
         except Exception as e:
             error_message = str(e)
             request_outcome["success"] = False
@@ -6049,7 +6074,6 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
             print(f"[hermes-bridge] ACP error: {error_message}", flush=True)
             _append_session_chat_chunk(session_id, "assistant", f"\n\n[Error: {error_message}]")
             _qput(("text", f"\n\n[Error: {error_message}]"))
-            _update_bridge_metrics(success=False, decrement_active=True)
             _finalize_session(False, error_message=error_message)
         finally:
             loop.call_soon_threadsafe(done_event.set)
@@ -6066,13 +6090,15 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
 
         agent_task = asyncio.ensure_future(asyncio.to_thread(_run_acp_sync))
         event_count = 0
-        idle_ticks = 0
-        HEARTBEAT_INTERVAL = 60
+        # Wall-clock keepalive: heartbeat after HEARTBEAT_INTERVAL seconds of
+        # silence, not after N idle poll iterations (~50ms each).
+        last_heartbeat = time.monotonic()
+        HEARTBEAT_INTERVAL = 60  # seconds
         while not done_event.is_set() or not event_queue.empty():
             drained = False
             while not event_queue.empty():
                 drained = True
-                idle_ticks = 0
+                last_heartbeat = time.monotonic()
                 try:
                     event = event_queue.get_nowait()
                 except asyncio.QueueEmpty:
@@ -6105,10 +6131,15 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
                     }))
                 elif event[0] == "approval_request":
                     yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"approval_request": event[1]}))
+                elif event[0] == "plan":
+                    plan_text = _format_plan_text(event[1])
+                    if plan_text:
+                        yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"content": plan_text}))
 
             if not done_event.is_set():
-                idle_ticks += 1
-                if idle_ticks % HEARTBEAT_INTERVAL == 0:
+                now = time.monotonic()
+                if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                    last_heartbeat = now
                     yield ": heartbeat\n\n"
                 await asyncio.sleep(0.05)
 

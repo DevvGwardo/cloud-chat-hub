@@ -3,12 +3,21 @@ import { execFile } from 'child_process';
 import { constants as fsConstants } from 'fs';
 import { access } from 'fs/promises';
 import { promisify } from 'util';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { sendJson } from '../lib/helpers';
+import { logger } from '../lib/logger';
 
 const execFileAsync = promisify(execFile);
 
-const HERMES_DIR = process.env.HOME + '/.hermes/hermes-agent';
-const HERMES_BIN = process.env.HOME + '/.hermes/hermes-agent/venv/bin/hermes';
+// os.homedir() is crash-safe when HOME is unset (falls back to the OS user
+// database); process.env.HOME + ... would produce a broken "/.hermes/…" path.
+const HERMES_HOME = homedir();
+if (!HERMES_HOME) {
+  logger.warn('[hermes-runtimes] os.homedir() returned empty — Hermes paths may be incorrect');
+}
+const HERMES_DIR = join(HERMES_HOME, '.hermes', 'hermes-agent');
+const HERMES_BIN = join(HERMES_HOME, '.hermes', 'hermes-agent', 'venv', 'bin', 'hermes');
 const DOCKER_HERMES_CONTAINER = 'hermes-docker';
 
 type ExecFileAsyncFn = (
@@ -52,7 +61,9 @@ export async function inspectHermesRuntimes(deps?: {
       });
       const match = stdout.split('\n')[0].match(/Hermes Agent (v[\d.]+)/);
       if (match) hostVersion = match[1];
-    } catch {}
+    } catch {
+      // intentionally ignored
+    }
   }
 
   let hostGitSha: string | null = null;
@@ -65,7 +76,9 @@ export async function inspectHermesRuntimes(deps?: {
       );
       const value = stdout.trim();
       if (value) hostGitSha = value;
-    } catch {}
+    } catch {
+      // intentionally ignored
+    }
   }
 
   const host = {
@@ -123,7 +136,9 @@ export async function inspectHermesRuntimes(deps?: {
       );
       const value = stdout.trim();
       if (value) containerImage = value;
-    } catch {}
+    } catch {
+      // intentionally ignored
+    }
 
     try {
       if (containerImage) {
@@ -135,8 +150,14 @@ export async function inspectHermesRuntimes(deps?: {
         const value = stdout.trim();
         if (value) imageCreated = value;
       }
-    } catch {}
+    } catch {
+      // intentionally ignored
+    }
 
+    // List published ports as containerPort|hostPort pairs, e.g.
+    // "8000/tcp|49153,6379/tcp|49154". Map-iteration order is arbitrary, so
+    // the first entry is not necessarily the API port — probe them all below.
+    const publishedPorts: Array<{ containerPort: number; hostPort: number }> = [];
     try {
       const { stdout } = await runExec(
         'docker',
@@ -144,26 +165,49 @@ export async function inspectHermesRuntimes(deps?: {
           'inspect',
           DOCKER_HERMES_CONTAINER,
           '--format',
-          '{{range $p, $conf := .NetworkSettings.Ports}}{{if $conf}}{{(index $conf 0).HostPort}}{{end}}{{end}}',
+          '{{range $p, $conf := .NetworkSettings.Ports}}{{if $conf}}{{$p}}|{{(index $conf 0).HostPort}},{{end}}{{end}}',
         ],
         { timeout: 10000 }
       );
-      const parsed = Number.parseInt(stdout.trim(), 10);
-      apiPort = Number.isFinite(parsed) ? parsed : null;
-    } catch {}
-
-    try {
-      if (apiPort !== null) {
-        const response = await fetchImpl(`http://localhost:${apiPort}/health`, {
-          signal: AbortSignal.timeout(3000),
-        });
-        if (response.ok) {
-          apiReachable = true;
-          const body = await response.json();
-          healthPlatform = body.platform || null;
+      for (const pair of stdout.trim().split(',')) {
+        const [containerRef, hostPortStr] = pair.split('|');
+        if (!containerRef || !hostPortStr) continue;
+        const containerPort = Number.parseInt(containerRef, 10); // "8000/tcp" -> 8000
+        const hostPort = Number.parseInt(hostPortStr, 10);
+        if (Number.isFinite(containerPort) && Number.isFinite(hostPort)) {
+          publishedPorts.push({ containerPort, hostPort });
         }
       }
-    } catch {}
+    } catch {
+      // intentionally ignored
+    }
+
+    // Probe each mapped host port until one answers /health — the container
+    // may publish several ports (Redis, DB, …) and only the API port passes.
+    try {
+      for (const { hostPort } of publishedPorts) {
+        try {
+          const response = await fetchImpl(`http://localhost:${hostPort}/health`, {
+            signal: AbortSignal.timeout(3000),
+          });
+          if (response.ok) {
+            apiPort = hostPort;
+            apiReachable = true;
+            const body = await response.json();
+            healthPlatform = body.platform || null;
+            break;
+          }
+        } catch {
+          // not this port — try the next mapped port
+        }
+      }
+      // No port answered — still surface the first mapped port for the UI.
+      if (apiPort === null && publishedPorts.length > 0) {
+        apiPort = publishedPorts[0].hostPort;
+      }
+    } catch {
+      // intentionally ignored
+    }
   }
 
   return {
@@ -208,10 +252,10 @@ export function registerHermesRuntimesRoute(app: Express) {
         runtimesCache = { payload, expiresAt: now + RUNTIMES_CACHE_TTL_MS };
       }
       sendJson(res, 200, payload);
-    } catch (err: any) {
+    } catch (err: unknown) {
       sendJson(res, 500, {
         error: 'Failed to inspect Hermes runtimes',
-        details: err.message,
+        details: err instanceof Error ? err.message : String(err),
       });
     }
   });
