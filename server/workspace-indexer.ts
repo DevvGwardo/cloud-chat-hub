@@ -104,7 +104,9 @@ export class WorkspaceIndex {
         try {
           const stats = await stat(join(rootPath, entryRelativePath));
           size = stats.size;
-        } catch {}
+        } catch {
+          // stat failed — use default size 0
+        }
 
         entries.push({
           path: entryRelativePath,
@@ -156,22 +158,44 @@ export class WorkspaceIndex {
         const proc = spawn('git', ['check-ignore', '--stdin'], { cwd: rootPath });
         let out = '';
         let err = '';
+        let settled = false;
+        const settle = (fn: () => void) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          fn();
+        };
+        // A hung git must not hang the request forever.
+        const timer = setTimeout(() => {
+          try { proc.kill('SIGKILL'); } catch { /* intentionally ignored */ }
+          settle(() => reject(new Error('git check-ignore timed out after 10s')));
+        }, 10_000);
         proc.stdout.on('data', (d) => { out += d.toString(); });
         proc.stderr.on('data', (d) => { err += d.toString(); });
-        proc.on('error', reject);
+        proc.on('error', (e) => settle(() => reject(e)));
         proc.on('close', (code) => {
-          // git check-ignore exit codes: 0 = matches found, 1 = no matches, >1 = error
-          if (code === 0 || code === 1) resolve(out);
-          else reject(Object.assign(new Error(err || `git check-ignore exited ${code}`), { code }));
+          settle(() => {
+            // git check-ignore exit codes: 0 = matches found, 1 = no matches, >1 = error
+            if (code === 0 || code === 1) resolve(out);
+            else reject(Object.assign(new Error(err || `git check-ignore exited ${code}`), { code }));
+          });
         });
-        proc.stdin.end(paths.join('\n'));
+        // EPIPE when git exits before consuming stdin (e.g. it was killed) —
+        // without a listener this would throw and crash the server.
+        proc.stdin.on('error', () => { /* intentionally ignored */ });
+        try {
+          proc.stdin.end(paths.join('\n'));
+        } catch {
+          // stdin already destroyed — nothing left to write
+        }
       });
       for (const line of stdout.trim().split('\n')) {
         if (line) ignoredSet.add(line);
       }
-    } catch (err: any) {
-      if (err.code !== 1) {
-        logger.warn('[workspace-indexer] git check-ignore failed:', err.message);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if ((err as { code?: number }).code !== 1) {
+        logger.warn('[workspace-indexer] git check-ignore failed: ' + msg);
       }
     }
   }
@@ -213,6 +237,12 @@ export class WorkspaceIndex {
       if (target[ti] === query[qi]) qi++;
     }
     return qi === query.length;
+  }
+
+  /** True when rootPath has a scan cached within the TTL window. */
+  isFresh(rootPath: string): boolean {
+    const cached = this.cache.get(rootPath);
+    return !!cached && Date.now() - cached.timestamp < CACHE_TTL_MS;
   }
 
   invalidate(rootPath?: string): void {

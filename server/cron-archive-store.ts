@@ -100,7 +100,6 @@ export function registerCronArchiveRoutes(app: express.Express) {
     isShuttingDown = true;
     // Don't use pino here — Electron quit can already be tearing the transport down.
     try {
-      // eslint-disable-next-line no-console
       console.log('[cron-archive] Closing database connection');
     } catch {
       /* ignore */

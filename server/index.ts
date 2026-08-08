@@ -2,6 +2,7 @@ import express, { type Request } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
+import { timingSafeEqual } from 'crypto';
 import { existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -57,6 +58,17 @@ export function isLoopbackAddress(address: string | null | undefined): boolean {
 
 function isLoopbackRequest(req: Request): boolean {
   return isLoopbackAddress(req.socket.remoteAddress);
+}
+
+/**
+ * Constant-time comparison for the tunnel access token so the ?key= /
+ * cookie checks don't leak timing information about the token.
+ */
+function tokensEqual(a: string, b: string): boolean {
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+  if (aBuf.length !== bBuf.length) return false;
+  return timingSafeEqual(aBuf, bBuf);
 }
 
 export const HEALTH_ROUTES = [
@@ -153,10 +165,10 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
 
     const cookies = req.headers.cookie || '';
     const cookieMatch = cookies.match(new RegExp(`(?:^|;\\s*)${REMOTE_KEY_COOKIE}=([^;]+)`));
-    if (cookieMatch?.[1] === tunnel.accessToken) return next();
+    if (cookieMatch?.[1] && tokensEqual(cookieMatch[1], tunnel.accessToken)) return next();
 
     const queryKey = typeof req.query.key === 'string' ? req.query.key : null;
-    if (queryKey === tunnel.accessToken) {
+    if (queryKey && tokensEqual(queryKey, tunnel.accessToken)) {
       res.setHeader(
         'Set-Cookie',
         `${REMOTE_KEY_COOKIE}=${tunnel.accessToken}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=86400`
@@ -164,7 +176,9 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
       return next();
     }
 
-    logger.warn(`[server] blocked unauthenticated tunnel request: ${req.method} ${req.originalUrl}`);
+    // req.path (not req.originalUrl) — the token arrives as ?key= and must
+    // not leak into logs.
+    logger.warn(`[server] blocked unauthenticated tunnel request: ${req.method} ${req.path}`);
     res.status(401);
     if (req.accepts('html') && !req.path.startsWith('/api/')) {
       res
@@ -224,18 +238,21 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
     try {
       const rootPath = req.query.path as string;
       const query = req.query.q as string;
-      const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+      // Clamp to [1, 200] — a negative limit would flow into slice(0, -5).
+      const rawLimit = parseInt(req.query.limit as string, 10);
+      const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 200) : 50;
 
       if (!rootPath || !query) {
         return sendJson(res, 400, { error: 'Missing required query params: path, q' });
       }
 
+      const wasCached = workspaceIndex.isFresh(rootPath);
       const entries = await workspaceIndex.scan(rootPath);
       const results = workspaceIndex.search(query, entries, limit);
 
-      sendJson(res, 200, { results, total: entries.length, cached: true });
-    } catch (err: any) {
-      sendJson(res, 500, { error: err.message });
+      sendJson(res, 200, { results, total: entries.length, cached: wasCached });
+    } catch (err: unknown) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -420,9 +437,11 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
   }
 
   // ─── 404 catch-all (debug unmatched routes) ─────────────────────────────────
+  // req.path, not req.originalUrl — query strings (e.g. a tunnel ?key=)
+  // must not leak into logs or responses.
   app.use((req, res) => {
-    logger.warn(`[server] 404 Not Found: ${req.method} ${req.originalUrl}`);
-    sendJson(res, 404, { error: `Route not found: ${req.method} ${req.originalUrl}` });
+    logger.warn(`[server] 404 Not Found: ${req.method} ${req.path}`);
+    sendJson(res, 404, { error: `Route not found: ${req.method} ${req.path}` });
   });
 
   return app;
@@ -461,7 +480,6 @@ export function startServer(port?: number) {
       if (serveFrontend) {
         const ip = getLanIp();
         const { lanUrl, localUrl } = formatConnectionInfo(ip, resolvedPort);
-        const _url = ip ? lanUrl : localUrl;
 
         logger.info('');
         logger.info('━━━ 📱 Mobile Access ━━━');
@@ -516,11 +534,16 @@ if (isEntry) {
     startManagedBridge().catch((err) => {
       logger.warn(`[server] managed bridge start failed: ${err instanceof Error ? err.message : err}`);
     });
-    const shutdown = () => {
-      stopManagedBridge();
-      process.exit(0);
-    };
-    process.on('SIGTERM', shutdown);
-    process.on('SIGINT', shutdown);
   }
+  const shutdown = () => {
+    // Kill the public tunnel first: while it lives, its process still accepts
+    // connections, so the access-token gate must stay armed until it's dead.
+    killTunnel();
+    if (process.env.MANAGE_BRIDGE === 'true') {
+      stopManagedBridge();
+    }
+    process.exit(0);
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }

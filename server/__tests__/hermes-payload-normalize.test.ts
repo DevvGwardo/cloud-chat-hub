@@ -24,7 +24,7 @@ describe('normalizeHermesAgentLoopPayload', () => {
 
     const normalized = normalizeHermesAgentLoopPayload(payload);
     expect(normalized).not.toBeNull();
-    const approval = normalized!.data.find((d) => d.type === 'approval_request');
+    const approval = normalized!.data!.find((d) => d.type === 'approval_request');
     expect(approval).toBeDefined();
     expect(approval).toMatchObject({
       type: 'approval_request',
@@ -47,9 +47,9 @@ describe('normalizeHermesAgentLoopPayload', () => {
 
     const normalized = normalizeHermesAgentLoopPayload(payload);
     expect(normalized).not.toBeNull();
-    const tool = normalized!.data.find((d) => d.type === 'hermes_tool_activity');
+    const tool = normalized!.data!.find((d) => d.type === 'hermes_tool_activity');
     expect(tool).toMatchObject({ type: 'hermes_tool_activity', activity: { tool: 'terminal: ls', status: 'running' } });
-    const status = normalized!.data.find((d) => d.type === 'agent_status');
+    const status = normalized!.data!.find((d) => d.type === 'agent_status');
     expect(status).toMatchObject({ type: 'agent_status', status: { phase: 'starting' } });
   });
 

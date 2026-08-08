@@ -112,6 +112,8 @@ function emptyConfigPath(): string {
 function startCloudflaredTunnel(localPort: number, resolve: (s: TunnelState) => void) {
   const proc = spawn('cloudflared', ['tunnel', '--config', emptyConfigPath(), '--url', `http://localhost:${localPort}`], {
     stdio: ['ignore', 'pipe', 'pipe'],
+    // Own process group so killTunnel() can take down wrapper children too
+    detached: process.platform !== 'win32',
   });
   currentProcess = proc;
 
@@ -141,17 +143,21 @@ function startCloudflaredTunnel(localPort: number, resolve: (s: TunnelState) => 
   });
 
   proc.on('close', (code) => {
+    if (currentProcess === proc) currentProcess = null;
     if (!resolved) {
       state = { running: false, url: null, provider: null, error: `cloudflared exited with code ${code}`, pid: null, accessToken: null };
-      currentProcess = null;
       resolve({ ...state });
+    } else {
+      // Tunnel was live (or torn down via killTunnel/timeout) — clear the
+      // state now that the process is really gone, preserving any error.
+      state = { running: false, url: null, provider: null, error: state.error, pid: null, accessToken: null };
     }
   });
 
   proc.on('error', (err) => {
+    if (currentProcess === proc) currentProcess = null;
     if (!resolved) {
       state = { running: false, url: null, provider: null, error: err.message, pid: null, accessToken: null };
-      currentProcess = null;
       resolve({ ...state });
     }
   });
@@ -170,6 +176,9 @@ function startCloudflaredTunnel(localPort: number, resolve: (s: TunnelState) => 
 function startLocaltunnel(localPort: number, resolve: (s: TunnelState) => void) {
   const proc = spawn('npx', ['--yes', 'localtunnel', '--port', String(localPort)], {
     stdio: ['ignore', 'pipe', 'pipe'],
+    // Own process group so killTunnel() can take down the localtunnel
+    // client child that npx spawns — SIGTERMing just npx orphans it.
+    detached: process.platform !== 'win32',
   });
   currentProcess = proc;
 
@@ -199,17 +208,21 @@ function startLocaltunnel(localPort: number, resolve: (s: TunnelState) => void) 
   });
 
   proc.on('close', (code) => {
+    if (currentProcess === proc) currentProcess = null;
     if (!resolved) {
       state = { running: false, url: null, provider: null, error: `localtunnel exited with code ${code}`, pid: null, accessToken: null };
-      currentProcess = null;
       resolve({ ...state });
+    } else {
+      // Tunnel was live (or torn down via killTunnel/timeout) — clear the
+      // state now that the process is really gone, preserving any error.
+      state = { running: false, url: null, provider: null, error: state.error, pid: null, accessToken: null };
     }
   });
 
   proc.on('error', (err) => {
+    if (currentProcess === proc) currentProcess = null;
     if (!resolved) {
       state = { running: false, url: null, provider: null, error: err.message, pid: null, accessToken: null };
-      currentProcess = null;
       resolve({ ...state });
     }
   });
@@ -225,13 +238,39 @@ function startLocaltunnel(localPort: number, resolve: (s: TunnelState) => void) 
   }, 15000);
 }
 
-/** Stop the running tunnel. */
+/**
+ * Stop the running tunnel. Kills the whole process group (the tunnel
+ * processes are spawned detached) so wrapper children — e.g. the localtunnel
+ * client spawned by npx — die too. SIGTERMing only the wrapper would orphan
+ * the child and leave the tunnel accepting connections.
+ *
+ * currentProcess/state are NOT cleared here: they reset on the child's
+ * 'close' event, so state.running stays true (and the access-token gate in
+ * index.ts stays armed) until the tunnel is actually dead. Escalates to
+ * SIGKILL if the group hasn't exited shortly after.
+ */
 export function killTunnel() {
-  if (currentProcess) {
-    try { currentProcess.kill('SIGTERM'); } catch {}
-    currentProcess = null;
+  const proc = currentProcess;
+  if (!proc?.pid) {
+    // No tracked process — just clear any stale state.
+    state = { running: false, url: null, provider: null, error: null, pid: null, accessToken: null };
+    return;
   }
-  state = { running: false, url: null, provider: null, error: null, pid: null, accessToken: null };
+  try {
+    // detached spawn → -pid targets the whole process group
+    process.kill(-proc.pid, 'SIGTERM');
+  } catch {
+    // Group may already be gone — fall back to the process alone
+    try { proc.kill('SIGTERM'); } catch { /* intentionally ignored */ }
+  }
+  const escalate = setTimeout(() => {
+    if (currentProcess === proc) {
+      const pid = proc.pid;
+      if (!pid) return; // already exited — nothing to escalate
+      try { process.kill(-pid, 'SIGKILL'); } catch { /* intentionally ignored */ }
+    }
+  }, 5000);
+  escalate.unref?.();
 }
 
 /** Get current tunnel state. */
