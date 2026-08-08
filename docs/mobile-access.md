@@ -1,6 +1,8 @@
 # Mobile & Remote Access
 
-CloudChat is primarily a desktop app, but the web build can be deployed to a server and accessed from any browser — including mobile phones.
+> **Status: optional, not currently deployed.** Spark is primarily a desktop app; the web build below is an opt-in way to reach it from a browser. No hosted instance is maintained — if you want web access, use one of the options below on your own infrastructure.
+
+Spark is primarily a desktop app, but the web build can be deployed to a server and accessed from any browser — including mobile phones.
 
 ## How It Works
 
@@ -31,33 +33,7 @@ Terminal and mini-browser gracefully degrade — they won't appear in the web bu
 
 ## Deployment Options
 
-### Option 1: Railway (recommended)
-
-**Prerequisites:**
-- [Railway](https://railway.app) account
-- `railway` CLI installed
-
-**Steps:**
-
-1. Create a new Railway project from the `cloud-chat-hub` directory
-2. Railway auto-detects Node.js — no custom buildpack needed
-3. Set environment variables:
-   - `PORT=3001` (Railway assigns this automatically)
-   - `SERVE_FRONTEND=true`
-   - `HERMES_BRIDGE_URL` (if using agent mode — point to your bridge instance)
-4. Set the start command:
-   ```
-   VITE_API_URL= npm run build && SERVE_FRONTEND=true npx tsx server/index.ts
-   ```
-5. Deploy
-
-Railway assigns a `*.railway.app` URL. Open it on any device.
-
-Data warning: SQLite is local to the server instance. Railway doesn't persist the filesystem between deploys without a volume mount. For persistent chat history, either:
-- Add a Railway volume to `/app/data` 
-- Or set up a Postgres-backed chat store (future feature)
-
-### Option 2: Cloudflare Tunnel (from your home machine)
+### Option 1: Cloudflare Tunnel (from your home machine)
 
 Best when you want to keep everything running on your local machine but access it from anywhere.
 
@@ -93,7 +69,7 @@ Best when you want to keep everything running on your local machine but access i
    cloudflared tunnel run cloudchat
    ```
 
-### Option 3: Direct VPS / Vercel / Fly.io
+### Option 2: Direct VPS / Vercel / Fly.io
 
 Any Node.js host works. The key is setting `SERVE_FRONTEND=true` and building with `VITE_API_URL=` (empty).
 
@@ -135,7 +111,7 @@ There is **no built-in auth** — the server is designed for local use. When dep
 
 ## Mobile Control App
 
-When you visit CloudChat from a mobile device (or scan the QR code shown in the Remote Access modal), open the `/m` mobile-optimized interface. This is a status-first view designed for quick Hermes checks and revival actions when you're away from home.
+When you visit Spark from a mobile device (or scan the QR code shown in the Remote Access modal), open the `/m` mobile-optimized interface. This is a status-first view designed for quick Hermes checks and revival actions when you're away from home.
 
 ### What the view shows
 
@@ -155,4 +131,4 @@ The revival panel uses these env vars on the server. None are required — actio
 
 ### Security Warning
 
-The mobile control app exposes revival actions over the same tunnel as the rest of CloudChat. **Anyone with the tunnel URL can wake your computer or power-cycle your machine.** Strongly consider adding Cloudflare Access (email, Google, or one-time pin) on your tunnel to prevent unauthorized access. Without it, the tunnel URL is effectively an open door to your home machine.
+The mobile control app exposes revival actions over the same tunnel as the rest of Spark. **Anyone with the tunnel URL can wake your computer or power-cycle your machine.** Strongly consider adding Cloudflare Access (email, Google, or one-time pin) on your tunnel to prevent unauthorized access. Without it, the tunnel URL is effectively an open door to your home machine.
