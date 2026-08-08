@@ -1,11 +1,11 @@
 /**
- * CloudChat Electron — Renderer / UI Tests
+ * Spark Electron — Renderer / UI Tests
  *
  * Tests that the React app renders correctly inside Electron,
  * key UI components are present, and the API connection works.
  */
 import { test, expect } from '@playwright/test'
-import { launchElectronApp, ElectronAppFixture } from './electron-app'
+import { launchElectronApp, ElectronAppFixture, ElectronAPI } from './electron-app'
 
 let fixture: ElectronAppFixture
 
@@ -28,82 +28,78 @@ test.describe('Renderer App', () => {
 
   test('embedded API server is reachable', async () => {
     const apiPort = await fixture.window.evaluate(() => {
-      return (window as any).electronAPI?.apiPort
+      return (window as unknown as { electronAPI?: ElectronAPI }).electronAPI?.apiPort
     })
 
     if (!apiPort) {
-      test.skip()
+      test.skip(true, 'electronAPI.apiPort was not exposed by the preload bridge')
       return
     }
 
-    // Try hitting the health endpoint from the renderer
-    const response = await fixture.window.evaluate(async (port: number) => {
+    // Hit the real health endpoint of the embedded Express server
+    // (server/index.ts) and require a 200 — not just "any HTTP response".
+    const health = await fixture.window.evaluate(async (port: number) => {
       try {
-        const res = await fetch(`http://localhost:${port}/api/health`)
-        return { ok: res.ok, status: res.status }
-      } catch (err: any) {
-        return { ok: false, error: err.message }
+        const res = await fetch(`http://localhost:${port}/functions/v1/health`)
+        const body = await res.json().catch(() => null)
+        return { ok: res.ok, status: res.status, bodyOk: body?.ok === true }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        return { ok: false, status: 0, bodyOk: false, error: message }
       }
     }, apiPort)
 
-    // The server should respond (even if it's a 404 on some routes)
-    expect(response.ok || response.status === 404).toBe(true)
+    expect(health.status).toBe(200)
+    expect(health.ok).toBe(true)
+    expect(health.bodyOk).toBe(true)
   })
 
   test('external links open in system browser (not in-app)', async () => {
-    // The will-navigate handler should prevent navigation away from localhost/file://
-    // We verify the handler is set up by checking the app stays on its page
     const urlBefore = fixture.window.url()
 
-    // Try to trigger a navigation (simulated)
-    const stayedOnPage = await fixture.window.evaluate(() => {
-      // Check that the app's origin is localhost or file://
-      return window.location.protocol === 'file:' ||
-             window.location.hostname === 'localhost'
+    // Actually trigger a navigation attempt instead of only inspecting the
+    // origin string: window.open() goes through setWindowOpenHandler, which
+    // denies it (deny ⇒ null) and hands the URL to the OS browser via
+    // shell.openExternal. (A plain <a href> click exercises will-navigate
+    // instead, but Electron's preventDefault leaves Playwright tracking a
+    // canceled navigation that stalls the next test's actions — so we cover
+    // the handler here and keep the suite order-independent.)
+    const result = await fixture.window.evaluate(() => {
+      const popup = window.open('https://example.com')
+      return { popupAllowed: popup !== null }
     })
 
-    expect(stayedOnPage).toBe(true)
-    const urlAfter = fixture.window.url()
-    // URL should not have changed to an external site
-    expect(urlAfter).toBe(urlBefore)
+    // The handler denied the popup: no in-app window was created.
+    expect(result.popupAllowed).toBe(false)
+
+    // The main window must not have navigated away from the app (poll, so a
+    // synchronous check can't race an async denied-navigation attempt).
+    await expect.poll(() => fixture.window.url(), { timeout: 3000 }).toBe(urlBefore)
   })
 })
 
 test.describe('UI Components', () => {
   test('sidebar is present', async () => {
-    // Wait a moment for React to fully hydrate
-    await fixture.window.waitForTimeout(3000)
+    // Stable selector: the app layout renders the sidebar inside
+    // <nav aria-label="Main navigation"> (src/components/layout/AppLayout.tsx).
+    const sidebar = fixture.window.locator('nav[aria-label="Main navigation"]').first()
 
-    const hasSidebar = await fixture.window.evaluate(() => {
-      // Look for sidebar-like elements
-      const candidates = [
-        document.querySelector('[class*="sidebar"]'),
-        document.querySelector('[class*="Sidebar"]'),
-        document.querySelector('[data-testid*="sidebar"]'),
-        document.querySelector('aside'),
-        document.querySelector('nav'),
-      ]
-      return candidates.some(el => el !== null)
-    })
+    // A fresh profile starts with the sidebar collapsed — open it through the
+    // real toggle so the assertion exercises the interaction path. If it's
+    // already open the button won't exist and the click times out (caught).
+    try {
+      await fixture.window.getByTitle('Open sidebar').first().click({ timeout: 3000 })
+    } catch {
+      /* sidebar already open */
+    }
 
-    // At least one sidebar-like element should exist
-    expect(hasSidebar).toBe(true)
+    await expect(sidebar).toBeVisible({ timeout: 10_000 })
   })
 
   test('chat area or main content is present', async () => {
-    await fixture.window.waitForTimeout(2000)
-
-    const hasContent = await fixture.window.evaluate(() => {
-      const candidates = [
-        document.querySelector('[class*="chat"]'),
-        document.querySelector('[class*="Chat"]'),
-        document.querySelector('[class*="main"]'),
-        document.querySelector('[class*="content"]'),
-        document.querySelector('main'),
-      ]
-      return candidates.some(el => el !== null)
-    })
-
-    expect(hasContent).toBe(true)
+    // Stable selector: the chat composer textarea rendered by ChatInput
+    // (src/components/chat/ChatInput.tsx) inside the main pane.
+    const composer = fixture.window.locator('textarea.chat-composer-textarea').first()
+    await expect(composer).toBeVisible({ timeout: 10_000 })
   })
 })

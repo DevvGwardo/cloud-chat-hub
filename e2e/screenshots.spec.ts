@@ -10,6 +10,7 @@
  * Run: npx playwright test e2e/screenshots.spec.ts --config playwright-electron.config.ts
  */
 import { test, _electron as electron, ElectronApplication, Page } from '@playwright/test'
+import { ElectronAPI } from './electron-app'
 import path from 'path'
 import os from 'os'
 import fs from 'fs'
@@ -133,7 +134,7 @@ async function openSidebar() {
 }
 
 async function seed() {
-  const port = await win.evaluate(() => (window as any).electronAPI?.apiPort)
+  const port = await win.evaluate(() => (window as unknown as { electronAPI?: ElectronAPI }).electronAPI?.apiPort)
   apiBase = `http://localhost:${port}`
   const post = async (body: unknown) => {
     const r = await fetch(`${apiBase}/functions/v1/chat-store/import`, {
@@ -199,7 +200,7 @@ test('capture product screenshots', async () => {
 
   // Debug: confirm the seed landed and the sidebar is reachable.
   const count = await win.evaluate(async () => {
-    const port = (window as any).electronAPI?.apiPort
+    const port = (window as unknown as { electronAPI?: ElectronAPI }).electronAPI?.apiPort
     const r = await fetch(`http://localhost:${port}/functions/v1/chat-store/conversations?includeArchived=1`)
     const j = await r.json()
     return j.total ?? (j.conversations?.length ?? -1)

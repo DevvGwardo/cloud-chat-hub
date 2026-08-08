@@ -1,11 +1,11 @@
 /**
- * CloudChat Electron — Core App Tests
+ * Spark Electron — Core App Tests
  *
  * Tests the basic app launch, window properties, security headers,
  * and the Electron API bridge exposed via preload.
  */
 import { test, expect } from '@playwright/test'
-import { launchElectronApp, ElectronAppFixture } from './electron-app'
+import { launchElectronApp, ElectronAppFixture, ElectronAPI } from './electron-app'
 
 let fixture: ElectronAppFixture
 
@@ -20,8 +20,8 @@ test.afterAll(async () => {
 test.describe('App Launch', () => {
   test('main window opens with correct title', async () => {
     const title = await fixture.window.title()
-    // Title may be "CloudChat" or include port info from dev server
-    expect(title).toContain('Cloud')
+    // The app is named "Spark" (BrowserWindow title + index.html <title>)
+    expect(title).toContain('Spark')
   })
 
   test('window has reasonable dimensions', async () => {
@@ -29,18 +29,23 @@ test.describe('App Launch', () => {
       width: window.innerWidth,
       height: window.innerHeight,
     }))
-    // Window should have been created at 1400x900 (or close to it)
-    expect(dims.width).toBeGreaterThanOrEqual(800)
-    expect(dims.height).toBeGreaterThanOrEqual(600)
+    // The BrowserWindow is created at 1400x900 (electron/index.ts createWindow).
+    // Allow tolerance for the hiddenInset title bar / scrollbars.
+    expect(dims.width).toBeGreaterThanOrEqual(1300)
+    expect(dims.height).toBeGreaterThanOrEqual(800)
   })
 
   test('page loads without JS errors', async () => {
-    const errors: string[] = []
-    fixture.window.on('pageerror', (err) => errors.push(err.message))
-    // Give the page a moment to settle
-    await fixture.window.waitForTimeout(2000)
+    // Deterministic wait: once React has mounted into #root, load-time errors
+    // have already fired. Errors are collected by the launcher from the first
+    // load (before this test body runs), so nothing can slip past.
+    await fixture.window.waitForFunction(() => {
+      const root = document.getElementById('root')
+      return root !== null && root.children.length > 0
+    }, undefined, { timeout: 15_000 })
+
     // Filter out known non-critical warnings
-    const criticalErrors = errors.filter(e =>
+    const criticalErrors = fixture.windowErrors.filter(e =>
       !e.includes('favicon') &&
       !e.includes('ResizeObserver') &&
       !e.includes('Non-Error promise rejection')
@@ -52,18 +57,18 @@ test.describe('App Launch', () => {
 test.describe('Electron API Bridge (preload)', () => {
   test('window.electronAPI is exposed', async () => {
     const hasAPI = await fixture.window.evaluate(() => {
-      return typeof (window as any).electronAPI !== 'undefined'
+      return typeof (window as unknown as { electronAPI?: ElectronAPI }).electronAPI !== 'undefined'
     })
     expect(hasAPI).toBe(true)
   })
 
   test('electronAPI exposes version info', async () => {
     const versions = await fixture.window.evaluate(() => {
-      const api = (window as any).electronAPI
+      const api = (window as unknown as { electronAPI?: ElectronAPI }).electronAPI
       return {
-        hasElectron: typeof api.versions?.electron === 'string',
-        hasNode: typeof api.versions?.node === 'string',
-        hasChrome: typeof api.versions?.chrome === 'string',
+        hasElectron: typeof api?.versions?.electron === 'string',
+        hasNode: typeof api?.versions?.node === 'string',
+        hasChrome: typeof api?.versions?.chrome === 'string',
       }
     })
     expect(versions.hasElectron).toBe(true)
@@ -73,7 +78,7 @@ test.describe('Electron API Bridge (preload)', () => {
 
   test('electronAPI exposes platform string', async () => {
     const platform = await fixture.window.evaluate(() => {
-      return (window as any).electronAPI?.platform
+      return (window as unknown as { electronAPI?: ElectronAPI }).electronAPI?.platform
     })
     expect(typeof platform).toBe('string')
     expect(['darwin', 'linux', 'win32']).toContain(platform)
@@ -81,7 +86,7 @@ test.describe('Electron API Bridge (preload)', () => {
 
   test('electronAPI exposes apiPort', async () => {
     const port = await fixture.window.evaluate(() => {
-      return (window as any).electronAPI?.apiPort
+      return (window as unknown as { electronAPI?: ElectronAPI }).electronAPI?.apiPort
     })
     expect(typeof port).toBe('number')
     expect(port).toBeGreaterThanOrEqual(3000)
@@ -90,7 +95,7 @@ test.describe('Electron API Bridge (preload)', () => {
 
   test('electronAPI exposes browser control methods', async () => {
     const browserAPI = await fixture.window.evaluate(() => {
-      const api = (window as any).electronAPI?.browser
+      const api = (window as unknown as { electronAPI?: ElectronAPI }).electronAPI?.browser
       if (!api) return null
       return {
         create: typeof api.create === 'function',
@@ -120,7 +125,7 @@ test.describe('Electron API Bridge (preload)', () => {
 
   test('electronAPI exposes terminal control methods', async () => {
     const termAPI = await fixture.window.evaluate(() => {
-      const api = (window as any).electronAPI?.terminal
+      const api = (window as unknown as { electronAPI?: ElectronAPI }).electronAPI?.terminal
       if (!api) return null
       return {
         spawn: typeof api.spawn === 'function',
@@ -140,42 +145,34 @@ test.describe('Electron API Bridge (preload)', () => {
 
 test.describe('Security', () => {
   test('Content-Security-Policy header is set', async () => {
-    // Check the response headers from the loaded page
-    const _csp = await fixture.window.evaluate(() => {
-      // CSP can be checked via meta tag or headers; for Electron it's set via headers
-      // Check if the page would block inline scripts (indicator CSP is active)
-      const meta = document.querySelector('meta[http-equiv="Content-Security-Policy"]')
-      return meta ? meta.getAttribute('content') : null
-    })
-    // CSP is set via session headers, not meta tag — verify it's not trivially bypassable
-    // by checking that eval is blocked (CSP should prevent it)
-    const _evalBlocked = await fixture.window.evaluate(() => {
-      try {
-         
-        eval('1+1')
-        return false // eval worked — CSP might not be active
-      } catch {
-        return true // eval blocked
-      }
-    }).catch(() => true) // If the evaluate itself fails, CSP is very strict (good)
-    // We accept either: CSP set via headers (default), or eval blocked
-    // The important thing is the app loaded and works
-    expect(true).toBe(true) // App loaded = CSP didn't break the app
+    // The main process injects a CSP on every main-window document response
+    // via session.webRequest.onHeadersReceived (electron/index.ts). The
+    // launcher captured the header from the first load — assert it actually
+    // reached the renderer instead of a tautology.
+    // Note: we intentionally do NOT assert `eval` is blocked here — in dev
+    // (unpackaged) builds the CSP relaxes script-src with 'unsafe-eval' for
+    // HMR, so eval blocking is only guaranteed in packaged builds. The header
+    // itself is always present.
+    expect(fixture.cspHeader).not.toBeNull()
+    expect(fixture.cspHeader!).toContain("default-src 'self'")
+    expect(fixture.cspHeader!).toContain('script-src')
   })
 
   test('contextIsolation prevents direct node access', async () => {
     const hasNodeAccess = await fixture.window.evaluate(() => {
       // In a properly isolated context, these should be undefined
       return {
-        hasRequire: typeof (window as any).require !== 'undefined',
-        hasProcess: typeof (window as any).process !== 'undefined' &&
-                    typeof (window as any).process?.versions?.node !== 'undefined',
-        hasGlobal: typeof (globalThis as any).process !== 'undefined' &&
-                   typeof (globalThis as any).process?.versions?.node !== 'undefined',
+        hasRequire: typeof (window as unknown as { require?: unknown }).require !== 'undefined',
+        hasProcess: typeof (window as unknown as { process?: { versions?: { node?: string } } }).process !== 'undefined' &&
+                    typeof (window as unknown as { process?: { versions?: { node?: string } } }).process?.versions?.node !== 'undefined',
+        hasGlobal: typeof (globalThis as unknown as { process?: { versions?: { node?: string } } }).process !== 'undefined' &&
+                   typeof (globalThis as unknown as { process?: { versions?: { node?: string } } }).process?.versions?.node !== 'undefined',
       }
     })
     // nodeIntegration is false + contextIsolation is true
-    // so window.require and window.process should NOT be available
+    // so window.require, window.process and globalThis.process should NOT be available
     expect(hasNodeAccess.hasRequire).toBe(false)
+    expect(hasNodeAccess.hasProcess).toBe(false)
+    expect(hasNodeAccess.hasGlobal).toBe(false)
   })
 })

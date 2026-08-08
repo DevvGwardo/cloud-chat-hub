@@ -11,7 +11,14 @@ export default defineConfig({
     include: ["src/**/*.{test,spec}.{ts,tsx}", "server/**/*.{test,spec}.{ts,tsx}", "electron/**/*.{test,spec}.{ts,tsx}"],
     coverage: {
       provider: "v8",
-      include: ["server/**/*.ts"],
+      // Include the units actually under test — not just server/**. The
+      // coverage gap let MCP discovery and MessageBubble regressions slip
+      // through with no signal.
+      include: [
+        "server/**/*.ts",
+        "src/lib/mcp-connect.ts",
+        "src/components/chat/MessageBubble.tsx",
+      ],
       exclude: ["server/scripts/**", "server/__tests__/**"],
       thresholds: {
         lines: 50,
