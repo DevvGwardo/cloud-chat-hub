@@ -164,6 +164,9 @@ class RunAgentRepoModeTests(unittest.TestCase):
         self.assertEqual(seen_tool_choices, [None])
 
     def test_read_only_repo_turns_only_expose_repo_reads(self):
+        # Read-only intent gates the PROMPT, not the tool catalog. hermes-desktop
+        # parity: repo mode always exposes the full read + edit toolset, and the
+        # system prompt tells the agent not to edit unless explicitly asked.
         agent = AIAgent(
             base_url="https://example.com",
             api_key="test-key",
@@ -182,10 +185,11 @@ class RunAgentRepoModeTests(unittest.TestCase):
         self.assertIn("git_log", tool_names)
         self.assertIn("git_show", tool_names)
         self.assertIn("git_diff", tool_names)
-        self.assertNotIn("edit_repo_file", tool_names)
-        self.assertNotIn("create_repo_file", tool_names)
-        self.assertNotIn("delete_repo_file", tool_names)
-        self.assertNotIn("batch_edit_repo_files", tool_names)
+        # Edit tools remain available; intent only shapes prompt guidance.
+        self.assertIn("edit_repo_file", tool_names)
+        self.assertIn("create_repo_file", tool_names)
+        self.assertIn("delete_repo_file", tool_names)
+        self.assertIn("batch_edit_repo_files", tool_names)
 
     def test_read_only_repo_turns_without_github_access_skip_repo_tools_and_note_limitation(self):
         agent = AIAgent(
@@ -1185,6 +1189,30 @@ class ListUserReposToolTests(unittest.TestCase):
         tool_names = {t["function"]["name"] for t in agent.tools}
         self.assertIn("list_user_repos", tool_names)
         self.assertIn("read_repo_file", tool_names)
+
+    def test_edit_tools_always_present_in_repo_mode(self):
+        # hermes-desktop parity: repo mode always exposes the FULL toolset
+        # (read + edit). The intent heuristic only shapes the prompt — it must
+        # never strip edit tools, or agents end up unable to edit ("edit tools
+        # aren't available in this session's catalog").
+        for edit_intent in (False, True):
+            agent = AIAgent(
+                base_url="https://example.com",
+                api_key="test-key",
+                model="meta-llama/llama-4-maverick",
+                repo_mode=True,
+                repo_edit_intent=edit_intent,
+                github_pat="test-pat",
+                github_repo_owner="octo",
+                github_repo_name="repo",
+            )
+            tool_names = {t["function"]["name"] for t in agent.tools}
+            for expected in (
+                "read_repo_file", "edit_repo_file", "create_repo_file",
+                "delete_repo_file", "batch_edit_repo_files", "git_log",
+                "git_show", "git_diff",
+            ):
+                self.assertIn(expected, tool_names, f"edit_intent={edit_intent}")
 
     def test_list_user_repos_tool_present_in_edit_mode(self):
         agent = AIAgent(

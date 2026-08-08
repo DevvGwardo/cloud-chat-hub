@@ -12,12 +12,62 @@ level ``from run_agent import AIAgent`` (it binds the wrong class). Same
 convention as test_hermes_adapter_cu.py.
 """
 
+import http.client as _http_client
 import importlib.util
-import json
+import json as _json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlparse
+
+
+class _FakeResponse:
+    def __init__(self, status, reason, body_bytes):
+        self.status_code = status
+        self.reason_phrase = reason
+        self.text = body_bytes.decode("utf-8", "replace")
+        self._body = body_bytes
+
+    def json(self):
+        return _json.loads(self._body or b"{}")
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class _StdlibHTTPClient:
+    """httpx.Client stand-in backed by stdlib http.client.
+
+    test_run_agent.py installs an httpx stub into sys.modules when httpx
+    hasn't been imported yet; depending on collection order, hermes_adapter
+    (imported lazily) may bind that stub whose ``post()`` returns ``{}``.
+    Routing the dispatch tests through stdlib http.client keeps them
+    order-independent while still exercising the real JSON-RPC exchange
+    against the local mock server.
+    """
+
+    def __init__(self, timeout=30, *args, **kwargs):
+        self._timeout = timeout
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def post(self, url, json=None, headers=None):
+        parsed = urlparse(url)
+        conn = _http_client.HTTPConnection(
+            parsed.hostname, parsed.port, timeout=self._timeout
+        )
+        body = _json.dumps(json) if json is not None else None
+        conn.request("POST", parsed.path or "/", body=body, headers=headers or {})
+        resp = conn.getresponse()
+        data = resp.read()
+        conn.close()
+        return _FakeResponse(resp.status, resp.reason, data)
 
 
 def _ha():
@@ -34,7 +84,7 @@ class _MockMCPHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length) or b"{}")
+        body = _json.loads(self.rfile.read(length) or b"{}")
         method = body.get("method")
         name = (body.get("params") or {}).get("name", "?")
         if method == "tools/call":
@@ -47,7 +97,7 @@ class _MockMCPHandler(BaseHTTPRequestHandler):
             }
         else:
             payload = {"jsonrpc": "2.0", "id": body.get("id", 1), "result": {}}
-        data = json.dumps(payload).encode()
+        data = _json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
@@ -67,7 +117,7 @@ class _MockMCPErrorHandler(_MockMCPHandler):
             "id": 1,
             "error": {"code": -32000, "message": "simulated server error"},
         }
-        data = json.dumps(payload).encode()
+        data = _json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
@@ -133,7 +183,8 @@ class CustomMCPServerProviderTests(unittest.TestCase):
         self.provider = ha.CustomMCPServerProvider([self._tool_def()])
         self.provider._register_tools()
 
-        result = ha.registry.dispatch("get_weather", {"city": "NYC"})
+        with patch.object(ha.httpx, "Client", _StdlibHTTPClient):
+            result = ha.registry.dispatch("get_weather", {"city": "NYC"})
         self.assertEqual(result, "get_weather: mock tool output")
 
     def test_dispatch_sends_auth_header_and_payload(self):
@@ -142,7 +193,7 @@ class CustomMCPServerProviderTests(unittest.TestCase):
         class _CaptureHandler(_MockMCPHandler):
             def do_POST(self):
                 captured["auth"] = self.headers.get("Authorization")
-                captured["body"] = json.loads(
+                captured["body"] = _json.loads(
                     self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 )
                 data = b'{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}'
@@ -162,7 +213,8 @@ class CustomMCPServerProviderTests(unittest.TestCase):
                 [self._tool_def(url=f"http://127.0.0.1:{port}/mcp")]
             )
             self.provider._register_tools()
-            result = ha.registry.dispatch("get_weather", {"city": "NYC"})
+            with patch.object(ha.httpx, "Client", _StdlibHTTPClient):
+                result = ha.registry.dispatch("get_weather", {"city": "NYC"})
             self.assertEqual(result, "ok")
             self.assertEqual(captured["auth"], "Bearer secret-key")
             self.assertEqual(captured["body"]["method"], "tools/call")
@@ -183,7 +235,8 @@ class CustomMCPServerProviderTests(unittest.TestCase):
                 [self._tool_def(url=f"http://127.0.0.1:{port}/mcp")]
             )
             self.provider._register_tools()
-            result = ha.registry.dispatch("get_weather", {"city": "NYC"})
+            with patch.object(ha.httpx, "Client", _StdlibHTTPClient):
+                result = ha.registry.dispatch("get_weather", {"city": "NYC"})
             self.assertIn("simulated server error", result)
             self.assertIn("-32000", result)
         finally:
@@ -197,7 +250,8 @@ class CustomMCPServerProviderTests(unittest.TestCase):
             [self._tool_def(url="http://127.0.0.1:1/mcp")]
         )
         self.provider._register_tools()
-        result = ha.registry.dispatch("get_weather", {"city": "NYC"})
+        with patch.object(ha.httpx, "Client", _StdlibHTTPClient):
+            result = ha.registry.dispatch("get_weather", {"city": "NYC"})
         self.assertIsInstance(result, str)
         self.assertIn("get_weather", result)
 

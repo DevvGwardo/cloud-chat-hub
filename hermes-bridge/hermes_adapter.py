@@ -530,19 +530,25 @@ class RepoToolProvider:
         self._deregister_tools()
 
     def _register_tools(self):
-        """Register repo tools into the real agent's tool registry."""
+        """Register repo tools into the real agent's tool registry.
+
+        Always registers the FULL repo toolset (read + edit). Gating edit
+        tools on the per-message intent heuristic left agents unable to edit
+        whenever the user's phrasing missed the edit patterns — hermes-desktop
+        always has edit tools and relies on the system prompt to decide when
+        to use them. The ``edit_intent`` flag remains for prompt guidance only.
+        """
         tools_to_register = [
             "list_user_repos",
             "read_repo_file",
             "git_log",
             "git_show",
             "git_diff",
+            "edit_repo_file",
+            "create_repo_file",
+            "delete_repo_file",
+            "batch_edit_repo_files",
         ]
-        if self.edit_intent:
-            tools_to_register.extend([
-                "edit_repo_file", "create_repo_file",
-                "delete_repo_file", "batch_edit_repo_files",
-            ])
 
         handlers = {
             "list_user_repos": self._handle_list_user_repos,
@@ -570,7 +576,7 @@ class RepoToolProvider:
 
         print(
             f"[hermes-adapter] Registered {len(self._registered_tools)} repo tools "
-            f"for {self.owner}/{self.name} (edit_intent={self.edit_intent})",
+            f"for {self.owner}/{self.name}",
             flush=True,
         )
 

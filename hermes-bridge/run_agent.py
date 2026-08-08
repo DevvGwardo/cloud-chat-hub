@@ -1415,14 +1415,15 @@ class AIAgent:
         # Add repo tools when in repo mode (GitHub API). Skipped in worktree mode
         # where local file/terminal tools operate on the isolated clone cwd.
         if self.repo_mode and not self.worktree_mode:
-            if not self.repo_edit_intent:
-                repo_tools = []
-                if self.github_pat and self.github_repo_owner and self.github_repo_name:
-                    repo_tools = [
-                        t for t in REPO_TOOL_DEFINITIONS
-                        if t["function"]["name"] in REPO_READONLY_TOOL_NAMES
-                    ]
-            else:
+            # Always expose the FULL repo toolset (read + edit). Gating edit
+            # tools on the per-message intent heuristic left agents unable to
+            # edit whenever the user's phrasing missed the edit patterns
+            # ("edit tools aren't available in this session's catalog").
+            # hermes-desktop always has edit tools and relies on the system
+            # prompt to decide when to use them — same model here. The
+            # repo_edit_intent flag remains for prompt guidance only.
+            repo_tools = []
+            if self.github_pat and self.github_repo_owner and self.github_repo_name:
                 repo_tools = list(REPO_TOOL_DEFINITIONS)
             # Always include list_user_repos when PAT is available (for 404 recovery)
             if self.github_pat and not any(
