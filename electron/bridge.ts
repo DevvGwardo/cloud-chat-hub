@@ -266,9 +266,33 @@ async function waitForBridgeExit(timeoutMs = 5_000): Promise<boolean> {
   return false
 }
 
-// ── Setup status ───────────────────────────────────────────────────────────
+// Spark patches (patches/*) are rebased against this exact Hermes release —
+// see patches/README.md ("Rebased for Hermes 0.19.0 (2026.7.20)").
+const HERMES_AGENT_VERSION_TAG = 'v2026.7.20'
+const HERMES_AGENT_PATCH_NAME = 'hermes-api-server-runs-parity.patch'
 
-export async function getBridgeSetupStatus(): Promise<BridgeSetupStatus> {
+// getBridgeSetupStatus() shells out to the Python interpreter on every call
+// (execFileSync), which blocks the main process UI thread. Cache the expensive
+// probe — the renderer polls bridge:status, and a few seconds of staleness is
+// fine. The cache is invalidated whenever bridge state changes (start/stop).
+const BRIDGE_STATUS_CACHE_TTL_MS = 3000
+let bridgeStatusCache: { at: number; value: Promise<BridgeSetupStatus> } | null = null
+
+function invalidateBridgeStatusCache() {
+  bridgeStatusCache = null
+}
+
+export function getBridgeSetupStatus(): Promise<BridgeSetupStatus> {
+  const now = Date.now()
+  if (bridgeStatusCache && now - bridgeStatusCache.at < BRIDGE_STATUS_CACHE_TTL_MS) {
+    return bridgeStatusCache.value
+  }
+  const value = computeBridgeSetupStatus()
+  bridgeStatusCache = { at: now, value }
+  return value
+}
+
+async function computeBridgeSetupStatus(): Promise<BridgeSetupStatus> {
   const pythonPath = resolvePython()
   const gitPath = findGit()
   const bridgeSource = resolveBridgeSource()
@@ -319,6 +343,7 @@ export async function getBridgeSetupStatus(): Promise<BridgeSetupStatus> {
 export async function startBridge(): Promise<BridgeStartResult> {
   // Coalesce concurrent calls
   if (bridgeStartPromise) return bridgeStartPromise
+  invalidateBridgeStatusCache()
 
   bridgeStartPromise = (async (): Promise<BridgeStartResult> => {
     const fail = (message: string): BridgeStartResult => {
@@ -388,6 +413,7 @@ export async function startBridge(): Promise<BridgeStartResult> {
     })
     bridgeProcess.on('exit', (code, signal) => {
       console.log(`[bridge] process exited code=${code} signal=${signal}`)
+      invalidateBridgeStatusCache()
       if (code !== 0) {
         lastBridgeStartError = `Hermes bridge exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'none'})`
       }
@@ -412,6 +438,7 @@ export async function startBridge(): Promise<BridgeStartResult> {
 
 export function stopBridge(): void {
   if (!bridgeProcess) return
+  invalidateBridgeStatusCache()
   // Clear the start error so the exit handler's 'code !== 0' check doesn't
   // misinterpret an intentional kill as a crash.
   lastBridgeStartError = null
@@ -475,6 +502,11 @@ export async function installBridgeDeps(onProgress?: (line: string) => void): Pr
 /**
  * Clone NousResearch/hermes-agent into ~/.hermes/hermes-agent and pip-install
  * its deps. Skips clone if directory already exists.
+ *
+ * The clone is pinned to the exact release Spark's patches/ are rebased
+ * against (HERMES_AGENT_VERSION_TAG = Hermes 0.19.0), and the patch is applied
+ * programmatically with a version check — cloning unpinned master silently
+ * drifts out of sync with the patch.
  */
 export async function installHermesAgent(onProgress?: (line: string) => void): Promise<{ ok: boolean; message?: string }> {
   const target = hermesAgentDir()
@@ -489,9 +521,9 @@ export async function installHermesAgent(onProgress?: (line: string) => void): P
   }
 
   if (!existsSync(target)) {
-    log('Cloning NousResearch/hermes-agent…')
+    log(`Cloning NousResearch/hermes-agent @ ${HERMES_AGENT_VERSION_TAG}…`)
     const clone = await new Promise<{ ok: boolean; err?: string }>((res) => {
-      const proc = spawn(git, ['clone', '--depth', '1',
+      const proc = spawn(git, ['clone', '--depth', '1', '--branch', HERMES_AGENT_VERSION_TAG,
         'https://github.com/NousResearch/hermes-agent.git', target], { stdio: ['ignore', 'pipe', 'pipe'] })
       let err = ''
       proc.stderr?.on('data', (c: Buffer) => {
@@ -510,6 +542,37 @@ export async function installHermesAgent(onProgress?: (line: string) => void): P
     }
   } else {
     log('hermes-agent directory already exists, skipping clone')
+  }
+
+  // Version check: Spark's patches only apply to the pinned release. Refuse to
+  // patch a different version instead of silently corrupting the checkout.
+  const version = getHermesAgentVersion(git, target)
+  if (!version.ok) {
+    return { ok: false, message: version.message ?? 'Could not determine hermes-agent version' }
+  }
+  if (version.tag !== HERMES_AGENT_VERSION_TAG) {
+    return {
+      ok: false,
+      message: `hermes-agent is at ${version.tag}, but Spark patches target ${HERMES_AGENT_VERSION_TAG}. ` +
+        `Run "git -C ~/.hermes/hermes-agent fetch --tags && git -C ~/.hermes/hermes-agent checkout ${HERMES_AGENT_VERSION_TAG}" and retry.`,
+    }
+  }
+
+  // Apply Spark's patch programmatically (idempotent — skipped when already applied).
+  const patchPath = resolveHermesPatchPath()
+  if (!patchPath) {
+    log(`Spark patch file (${HERMES_AGENT_PATCH_NAME}) not found — skipping patch application`)
+  } else if (isHermesPatchApplied(git, target, patchPath)) {
+    log('Spark patch already applied, skipping')
+  } else {
+    try {
+      execFileSync(git, ['-C', target, 'apply', '--check', patchPath], { stdio: 'ignore' })
+      execFileSync(git, ['-C', target, 'apply', patchPath], { stdio: 'ignore' })
+      log(`Applied ${HERMES_AGENT_PATCH_NAME}`)
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      return { ok: false, message: `Failed to apply ${HERMES_AGENT_PATCH_NAME}: ${detail.slice(-500)}` }
+    }
   }
 
   // Install hermes-agent's deps using our resolved Python.
@@ -540,4 +603,50 @@ export async function installHermesAgent(onProgress?: (line: string) => void): P
       else res({ ok: false, message: err.trim().slice(-2000) || `pip exited ${code}` })
     })
   })
+}
+
+// ── Hermes agent version pinning & patch application ───────────────────────
+
+/**
+ * Resolve the pinned Hermes release the checkout is at. Shallow clones of a
+ * tag report the tag via `git describe --tags --exact-match`.
+ */
+function getHermesAgentVersion(git: string, dir: string): { ok: boolean; tag?: string; message?: string } {
+  try {
+    const tag = execFileSync(git, ['-C', dir, 'describe', '--tags', '--exact-match'], {
+      encoding: 'utf8',
+    }).trim()
+    if (!tag) throw new Error('empty describe output')
+    return { ok: true, tag }
+  } catch {
+    try {
+      const sha = execFileSync(git, ['-C', dir, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim()
+      return { ok: false, message: `Could not determine hermes-agent version (HEAD is ${sha})` }
+    } catch {
+      return { ok: false, message: '~/.hermes/hermes-agent is not a git checkout; cannot verify version' }
+    }
+  }
+}
+
+/**
+ * `git apply --reverse --check` exits 0 when the patch is already applied.
+ */
+function isHermesPatchApplied(git: string, dir: string, patchPath: string): boolean {
+  try {
+    execFileSync(git, ['-C', dir, 'apply', '--reverse', '--check', patchPath], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Locate Spark's Hermes patch. Packaged builds receive it via extraResources
+ * (process.resourcesPath/patches); dev uses the repo's patches/ directory.
+ */
+function resolveHermesPatchPath(): string | null {
+  const candidates = isPackaged()
+    ? [join(process.resourcesPath, 'patches', HERMES_AGENT_PATCH_NAME)]
+    : [resolve(__dirname, '../../patches', HERMES_AGENT_PATCH_NAME)]
+  return candidates.find((p) => existsSync(p)) ?? null
 }

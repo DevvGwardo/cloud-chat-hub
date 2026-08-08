@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react-swc";
 import path from "path";
 import { componentTagger } from "lovable-tagger";
 import { visualizer } from "rollup-plugin-visualizer";
+import { shoelaceAssetsPlugin } from "./vite-plugin-shoelace-assets";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({
@@ -15,6 +16,9 @@ export default defineConfig(({ mode }) => ({
   },
   plugins: [
     react(),
+    // Bundles Shoelace icons locally so the offline/desktop build never hits
+    // the jsDelivr CDN (see setBasePath in src/main.tsx).
+    shoelaceAssetsPlugin(),
     mode === "development" && componentTagger(),
     mode === "analyze" && visualizer({ open: true, gzipSize: true, brotliSize: true }),
   ].filter(Boolean),

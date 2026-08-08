@@ -1,9 +1,19 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import os from 'os'
 
-// Main process sets ELECTRON_API_PORT env var before creating BrowserWindow
-const apiPort = Number(process.env.ELECTRON_API_PORT) || 3001
-const snapshotDir = process.env.CLOUDCHAT_IMAGE_SNAPSHOT_DIR || ''
+// Sandboxed preloads cannot import Node modules (no `os`) and process.env does
+// not reliably reach a sandboxed renderer, so the main process passes everything
+// we need via webPreferences.additionalArguments, which is appended to
+// process.argv in the renderer (available in the sandboxed preload polyfill).
+// The old env-var values are kept as fallbacks for unsandboxed/dev scenarios.
+function argvValue(flag: string): string | undefined {
+  const prefix = `${flag}=`
+  const match = process.argv.find((arg) => arg.startsWith(prefix))
+  return match ? match.slice(prefix.length) : undefined
+}
+
+const apiPort = Number(argvValue('--electron-api-port') || process.env?.ELECTRON_API_PORT) || 3001
+const snapshotDir = argvValue('--cloudchat-snapshot-dir') || process.env?.CLOUDCHAT_IMAGE_SNAPSHOT_DIR || ''
+const homeDir = argvValue('--electron-home-dir') || ''
 
 contextBridge.exposeInMainWorld('electronAPI', {
   versions: {
@@ -12,7 +22,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     chrome: process.versions.chrome
   },
   platform: process.platform,
-  homeDir: os.homedir(),
+  homeDir,
   snapshotDir,
   apiPort,
   getAppVersion: (): Promise<string> => ipcRenderer.invoke('app:get-version'),

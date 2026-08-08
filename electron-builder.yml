@@ -9,8 +9,18 @@ afterPack: build/afterPack.cjs
 files:
   - "out/**"
   - "server/**"
-  - "node_modules/**"
   - "package.json"
+  # node_modules is deliberately NOT listed here: electron-builder automatically
+  # includes the production dependency tree (dependencies in package.json), which
+  # is what out/main/index.js actually requires at runtime. Shipping
+  # "node_modules/**" wholesale dragged in the entire 1.3GB dev tree (electron,
+  # vite, vitest, playwright, electron-builder, …). The renderer is fully
+  # bundled into out/renderer, so it needs no node_modules at runtime.
+  # Dev-only stragglers that live in `dependencies` are excluded explicitly:
+  - "!node_modules/typescript/**"
+  - "!node_modules/tsup/**"
+  - "!node_modules/@types/**"
+  - "!node_modules/@testing-library/**"
   - "!**/.git"
   - "!**/node_modules/.cache"
   - "!docs/**"
@@ -39,6 +49,19 @@ extraResources:
       - "!update.log"
   - from: "resources/python-runtime"
     to: "python-runtime"
+  # Runtime icons (tray + window). The build/ dir is a build resource and is NOT
+  # shipped inside the app bundle; electron/index.ts resolves these from
+  # process.resourcesPath/icons.
+  - from: "build/spark-icon.png"
+    to: "icons/spark-icon.png"
+  - from: "build/spark-tray-iconTemplate.png"
+    to: "icons/spark-tray-iconTemplate.png"
+  # Hermes agent patches — applied programmatically by electron/bridge.ts after
+  # cloning the pinned hermes-agent release.
+  - from: "patches"
+    to: "patches"
+    filter:
+      - "*.patch"
 mac:
   icon: build/spark-icon.icns
   # Architecture is chosen per release job via the electron-builder CLI flag
@@ -54,8 +77,9 @@ mac:
   hardenedRuntime: true
   gatekeeperAssess: false
 win:
-  # TODO: replace with build/icon.ico for a proper Windows icon
-  icon: build/spark-icon.png
+  # NSIS requires a proper .ico — generated from build/spark-icon.png via
+  # `magick build/spark-icon.png -define icon:auto-resize=256,128,64,48,32,16 build/spark-icon.ico`
+  icon: build/spark-icon.ico
   target:
     - target: nsis
       arch: [x64]
@@ -83,7 +107,7 @@ linux:
 publish:
   provider: github
   owner: DevvGwardo
-  repo: cloud-chat-hub
+  repo: spark
   private: true
 npmRebuild: false
 asar: true

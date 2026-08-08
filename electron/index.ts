@@ -21,7 +21,14 @@ let apiPort: number = 3001
 let dockBounceId: number | null = null
 let miniBrowserView: BrowserView | null = null
 let lastMiniBrowserBounds: Electron.Rectangle | null = null
-const dockIconPath = join(__dirname, '../../build/spark-icon.png')
+// Runtime icon paths: packaged builds receive icons via extraResources at
+// process.resourcesPath/icons; dev uses the repo's build/ directory.
+function resolveIconPath(name: string): string {
+  const base = app.isPackaged
+    ? join(process.resourcesPath, 'icons')
+    : join(__dirname, '../../build')
+  return join(base, name)
+}
 const CLOUDCHAT_ASSET_PROTOCOL = 'cloudchat-asset'
 const CLOUDCHAT_ASSET_ROOTS = {
   hermes: join(homedir(), '.hermes/images'),
@@ -48,6 +55,10 @@ interface AttentionRequestPayload {
 }
 
 const preloadPathCandidates = [
+  // Sandboxed renderers can't run ESM preloads, so electron.vite.config.ts emits
+  // a CommonJS bundle (.cjs). Older builds produced .mjs/.js — kept as fallbacks.
+  join(__dirname, '../preload/preload.cjs'),
+  join(__dirname, '../preload/index.cjs'),
   join(__dirname, '../preload/preload.mjs'),
   join(__dirname, '../preload/preload.js'),
   join(__dirname, '../preload/index.mjs'),
@@ -66,11 +77,66 @@ async function resolvePreloadPath() {
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
 
+  if (!is.dev) {
+    // A missing preload silently disables the entire privileged bridge in
+    // packaged builds — fail loudly instead of limping along.
+    throw new Error(
+      'Preload bundle not found. Looked for: ' + preloadPathCandidates.join(', ')
+    )
+  }
+
   console.warn(
     'Preload bundle was not ready before BrowserWindow creation. Falling back to the expected output path.',
     preloadPathCandidates
   )
   return preloadPathCandidates[0]
+}
+
+// ── Trust boundaries (navigation + IPC) ─────────────────────────────────────
+// The only pages allowed in the main window's webContents are the app's own
+// renderer: the Vite dev server (localhost) in dev, out/renderer/index.html in
+// production. Everything else — arbitrary http(s) hosts, any file:, data:,
+// javascript: URL, and the mini BrowserView's webContents — is untrusted.
+function isTrustedRendererUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      // Exact hostname match — never startsWith: 'http://localhost.evil.com'
+      // would otherwise pass.
+      return parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1'
+    }
+    if (parsed.protocol === 'file:') {
+      // Only the app's own renderer bundle may load from disk.
+      const expected = join(__dirname, '../renderer/index.html')
+      return resolve(decodeURIComponent(parsed.pathname)) === resolve(expected)
+    }
+  } catch {
+    // Malformed URL — treat as untrusted.
+  }
+  return false
+}
+
+/**
+ * Every privileged IPC handler must verify the caller: only the main window's
+ * own webContents, loaded from the app origin, may invoke it. Any other
+ * webContents in the shared session (e.g. the mini BrowserView showing
+ * arbitrary remote sites) is rejected.
+ */
+function isTrustedSender(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean {
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    return false
+  }
+  const frameUrl = event.senderFrame?.url
+  if (!frameUrl) {
+    return false
+  }
+  return isTrustedRendererUrl(frameUrl)
+}
+
+function assertTrustedSender(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent) {
+  if (!isTrustedSender(event)) {
+    throw new Error('Untrusted IPC sender')
+  }
 }
 
 function assetTextResponse(status: number, body: string) {
@@ -177,7 +243,8 @@ function registerLocalAssetProtocol() {
   })
 }
 
-ipcMain.handle('cloudchat:snapshotLocalImage', async (_event, inputPath: string) => {
+ipcMain.handle('cloudchat:snapshotLocalImage', async (event, inputPath: string) => {
+  assertTrustedSender(event)
   if (typeof inputPath !== 'string') {
     throw new Error('Invalid image path')
   }
@@ -218,6 +285,21 @@ ipcMain.handle('cloudchat:snapshotLocalImage', async (_event, inputPath: string)
   }
 })
 
+// The embedded Express server is process-wide. createWindow() can run more than
+// once (macOS `activate`), but the server must start exactly once — otherwise
+// each activate leaks another server on an ephemeral port with fresh DBs.
+let embeddedServerPromise: Promise<number> | null = null
+
+function startEmbeddedServerOnce(): Promise<number> {
+  if (!embeddedServerPromise) {
+    embeddedServerPromise = startEmbeddedServer().catch((err) => {
+      embeddedServerPromise = null
+      throw err
+    })
+  }
+  return embeddedServerPromise
+}
+
 async function createWindow() {
   process.env.CLOUDCHAT_USER_DATA_DIR = app.getPath('userData')
   process.env.CLOUDCHAT_IMAGE_SNAPSHOT_DIR = getSnapshotDir()
@@ -232,8 +314,8 @@ async function createWindow() {
     process.env.FRONTEND_DIST_DIR = rendererDir
   }
 
-  // Start embedded Express server
-  apiPort = await startEmbeddedServer()
+  // Start embedded Express server (once per process — see startEmbeddedServerOnce)
+  apiPort = await startEmbeddedServerOnce()
   console.log(`Embedded server started on port ${apiPort}`)
 
   // Set port in env so preload can read it synchronously
@@ -241,12 +323,14 @@ async function createWindow() {
   const preloadPath = await resolvePreloadPath()
   console.log(`Using preload script: ${preloadPath}`)
 
+  const appIconPath = resolveIconPath('spark-icon.png')
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 800,
     minHeight: 600,
-    ...(existsSync(dockIconPath) ? { icon: dockIconPath } : {}),
+    ...(existsSync(appIconPath) ? { icon: appIconPath } : {}),
     title: 'Spark',
     backgroundColor: '#1a1a1a',
     titleBarStyle: 'hiddenInset',
@@ -256,13 +340,28 @@ async function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       backgroundThrottling: false,
-      sandbox: false // Required: preload needs process.env for API port
+      // Sandbox the renderer. The preload only needs process.argv, process.platform
+      // and process.versions — all available in the sandboxed preload polyfill.
+      // Values that used to travel via process.env (unreliable under sandbox)
+      // are passed through additionalArguments instead (see electron/preload.ts).
+      sandbox: true,
+      additionalArguments: [
+        `--electron-api-port=${apiPort}`,
+        `--cloudchat-snapshot-dir=${getSnapshotDir()}`,
+        `--electron-home-dir=${homedir()}`,
+      ],
     }
   })
 
-  // Grant microphone + clipboard permission requests from the renderer
+  // Grant microphone + clipboard permission requests from the renderer.
+  // Only the main window's own webContents is trusted: the mini BrowserView
+  // loads arbitrary remote sites and must never receive mic/camera access.
   mainWindow.webContents.session.setPermissionRequestHandler(
-    (_webContents, permission, callback) => {
+    (webContents, permission, callback) => {
+      if (webContents !== mainWindow?.webContents) {
+        callback(false)
+        return
+      }
       if (permission === 'media' || permission === 'clipboard-sanitized-write' || permission === 'clipboard-read') {
         callback(true)
       } else {
@@ -308,21 +407,38 @@ async function createWindow() {
     })
   })
 
-  // Open external links (e.g. "View on GitHub") in the system browser
+  // Open external links (e.g. "View on GitHub") in the system browser.
+  // window.open() with any non-http(s) URL (data:, javascript:, about:, …) is
+  // denied outright.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('https://') || url.startsWith('http://')) {
-      shell.openExternal(url)
-      return { action: 'deny' }
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+        shell.openExternal(url)
+      }
+    } catch {
+      // Malformed URL — denied below.
     }
-    return { action: 'allow' }
+    return { action: 'deny' }
   })
 
-  // Catch <a target="_blank"> and any navigation away from the app
+  // Catch <a target="_blank"> and any navigation away from the app. Trusted
+  // URLs are only the app's own renderer (localhost in dev / out/renderer in
+  // prod). The previous prefix matching was unsafe: 'http://localhost' also
+  // matched http://localhost.evil.com and 'file://' allowed ANY local HTML file.
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    const appOrigins = ['http://localhost', 'file://', `${CLOUDCHAT_ASSET_PROTOCOL}://`]
-    if (!appOrigins.some((origin) => url.startsWith(origin))) {
+    if (!isTrustedRendererUrl(url)) {
       event.preventDefault()
-      shell.openExternal(url)
+      // Open legitimate external links in the system browser; drop everything
+      // else (file:, data:, javascript:, …).
+      try {
+        const parsed = new URL(url)
+        if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+          shell.openExternal(url)
+        }
+      } catch {
+        // Malformed URL — already prevented.
+      }
     }
   })
 
@@ -371,12 +487,13 @@ async function createWindow() {
 }
 
 function applyAppIcon() {
-  if (!existsSync(dockIconPath)) {
+  const appIconPath = resolveIconPath('spark-icon.png')
+  if (!existsSync(appIconPath)) {
     return
   }
 
   try {
-    const icon = nativeImage.createFromPath(dockIconPath)
+    const icon = nativeImage.createFromPath(appIconPath)
     if (icon.isEmpty()) {
       return
     }
@@ -448,32 +565,49 @@ function notifyAttentionRequest(payload: AttentionRequestPayload = {}) {
   notification.show()
 }
 
-ipcMain.handle('app:notify-attention', (_event, payload?: AttentionRequestPayload) => {
+ipcMain.handle('app:notify-attention', (event, payload?: AttentionRequestPayload) => {
+  assertTrustedSender(event)
   notifyAttentionRequest(payload)
 })
 
-ipcMain.handle('app:clear-attention', () => {
+ipcMain.handle('app:clear-attention', (event) => {
+  assertTrustedSender(event)
   clearAttentionRequest()
 })
 
-ipcMain.handle('app:get-version', () => app.getVersion())
+ipcMain.handle('app:get-version', (event) => {
+  assertTrustedSender(event)
+  return app.getVersion()
+})
 
 // ── Hermes Bridge & first-run setup ────────────────────────────────────────
-ipcMain.handle('bridge:status', () => getBridgeSetupStatus())
-ipcMain.handle('bridge:start', () => startBridge())
+ipcMain.handle('bridge:status', (event) => {
+  assertTrustedSender(event)
+  return getBridgeSetupStatus()
+})
+ipcMain.handle('bridge:start', (event) => {
+  assertTrustedSender(event)
+  return startBridge()
+})
 ipcMain.handle('bridge:install-deps', async (event) => {
+  assertTrustedSender(event)
   const send = (line: string) =>
     event.sender.send('bridge:install-progress', line)
   return installBridgeDeps(send)
 })
 ipcMain.handle('bridge:install-hermes-agent', async (event) => {
+  assertTrustedSender(event)
   const send = (line: string) =>
     event.sender.send('bridge:install-progress', line)
   return installHermesAgent(send)
 })
-ipcMain.handle('openrouter:oauth', () => startOpenRouterOAuth())
+ipcMain.handle('openrouter:oauth', (event) => {
+  assertTrustedSender(event)
+  return startOpenRouterOAuth()
+})
 
-ipcMain.handle('file:save-dialog', async (_event, payload: { defaultFilename?: string; content?: string }) => {
+ipcMain.handle('file:save-dialog', async (event, payload: { defaultFilename?: string; content?: string }) => {
+  assertTrustedSender(event)
   const defaultFilename = typeof payload?.defaultFilename === 'string' ? payload.defaultFilename : 'export.txt'
   const content = typeof payload?.content === 'string' ? payload.content : ''
   const parent = BrowserWindow.getFocusedWindow() ?? mainWindow ?? undefined
@@ -489,9 +623,18 @@ ipcMain.handle('file:save-dialog', async (_event, payload: { defaultFilename?: s
   }
 })
 
-ipcMain.handle('shell:open-external', async (_event, url: string) => {
+ipcMain.handle('shell:open-external', async (event, url: string) => {
+  assertTrustedSender(event)
   if (typeof url !== 'string') return false
-  if (!/^(https?:\/\/|file:\/\/\/)/i.test(url)) return false
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return false
+  }
+  // https:// only (http:// additionally in dev); never file:, data:, etc.
+  const allowed = parsed.protocol === 'https:' || (is.dev && parsed.protocol === 'http:')
+  if (!allowed) return false
   try {
     await shell.openExternal(url)
     return true
@@ -572,7 +715,8 @@ function attachMiniBrowserListeners(view: BrowserView) {
   })
 }
 
-ipcMain.handle('browser:create', (_event, url?: string) => {
+ipcMain.handle('browser:create', (event, url?: string) => {
+  assertTrustedSender(event)
   if (!mainWindow) return false
   const initialUrl = url || 'about:blank'
   if (!isAllowedBrowserUrl(initialUrl, true)) {
@@ -583,7 +727,9 @@ ipcMain.handle('browser:create', (_event, url?: string) => {
   // Reuse existing view — navigate instead of destroy/recreate
   if (miniBrowserView) {
     if (initialUrl !== 'about:blank') {
-      void miniBrowserView.webContents.loadURL(initialUrl)
+      void miniBrowserView.webContents.loadURL(initialUrl).catch((err) => {
+  console.warn('[mini-browser] loadURL failed:', err)
+})
     }
     return true
   }
@@ -593,8 +739,12 @@ ipcMain.handle('browser:create', (_event, url?: string) => {
       nodeIntegration: false,
       contextIsolation: true,
       backgroundThrottling: false,
-      sandbox: false, // Disabled: sandbox blocks media playback (YouTube, etc.)
-      plugins: true,  // Allow media plugins if needed
+      // Sandbox the mini browser: it loads arbitrary remote sites and must not
+      // gain Node/IPC capabilities. (The previous `sandbox: false` comment
+      // claimed sandbox blocks media playback — it does not; autoplay policies
+      // are independent of the process sandbox.)
+      sandbox: true,
+      plugins: true,
     }
   })
   attachMiniBrowserListeners(miniBrowserView)
@@ -610,39 +760,49 @@ ipcMain.handle('browser:create', (_event, url?: string) => {
   }
   miniBrowserView.setBounds(lastMiniBrowserBounds)
   miniBrowserView.setAutoResize({ width: false, height: false })
-  void miniBrowserView.webContents.loadURL(initialUrl)
+  void miniBrowserView.webContents.loadURL(initialUrl).catch((err) => {
+  console.warn('[mini-browser] loadURL failed:', err)
+})
   return true
 })
 
-ipcMain.handle('browser:navigate', (_event, url: string) => {
+ipcMain.handle('browser:navigate', (event, url: string) => {
+  assertTrustedSender(event)
   if (!isAllowedBrowserUrl(url)) {
     console.warn('Blocked navigation to non-http URL:', url)
     return
   }
-  void miniBrowserView?.webContents.loadURL(url)
+  void miniBrowserView?.webContents.loadURL(url).catch((err) => {
+    console.warn('[mini-browser] loadURL failed:', err)
+  })
 })
 
-ipcMain.handle('browser:go-back', () => {
+ipcMain.handle('browser:go-back', (event) => {
+  assertTrustedSender(event)
   if (miniBrowserView?.webContents.canGoBack()) {
     miniBrowserView.webContents.goBack()
   }
 })
 
-ipcMain.handle('browser:go-forward', () => {
+ipcMain.handle('browser:go-forward', (event) => {
+  assertTrustedSender(event)
   if (miniBrowserView?.webContents.canGoForward()) {
     miniBrowserView.webContents.goForward()
   }
 })
 
-ipcMain.handle('browser:reload', () => {
+ipcMain.handle('browser:reload', (event) => {
+  assertTrustedSender(event)
   miniBrowserView?.webContents.reload()
 })
 
-ipcMain.handle('browser:get-url', () => {
+ipcMain.handle('browser:get-url', (event) => {
+  assertTrustedSender(event)
   return miniBrowserView?.webContents.getURL() ?? null
 })
 
-ipcMain.handle('browser:close', () => {
+ipcMain.handle('browser:close', (event) => {
+  assertTrustedSender(event)
   if (miniBrowserView && mainWindow) {
     mainWindow.removeBrowserView(miniBrowserView)
     miniBrowserView.webContents.close()
@@ -651,7 +811,8 @@ ipcMain.handle('browser:close', () => {
   }
 })
 
-ipcMain.handle('browser:resize', (_event, bounds: { x: number; y: number; width: number; height: number }) => {
+ipcMain.handle('browser:resize', (event, bounds: { x: number; y: number; width: number; height: number }) => {
+  assertTrustedSender(event)
   if (!miniBrowserView || !mainWindow) return;
   const winBounds = mainWindow.getContentBounds();
   // BrowserView y must account for the 36px toolbar — never let it overlap the URL bar.
@@ -676,13 +837,15 @@ ipcMain.handle('browser:resize', (_event, bounds: { x: number; y: number; width:
   miniBrowserView.setBounds(clamped);
 })
 
-ipcMain.handle('browser:show', () => {
+ipcMain.handle('browser:show', (event) => {
+  assertTrustedSender(event)
   if (miniBrowserView && mainWindow) {
     mainWindow.addBrowserView(miniBrowserView)
   }
 })
 
-ipcMain.handle('browser:hide', () => {
+ipcMain.handle('browser:hide', (event) => {
+  assertTrustedSender(event)
   if (miniBrowserView && mainWindow) {
     mainWindow.removeBrowserView(miniBrowserView)
   }
@@ -703,7 +866,8 @@ async function getPty() {
   return ptyModule
 }
 
-ipcMain.handle('terminal:spawn', async (_event, options?: { cwd?: string; command?: string }) => {
+ipcMain.handle('terminal:spawn', async (event, options?: { cwd?: string; command?: string }) => {
+  assertTrustedSender(event)
   const pty = await getPty()
   const id = `term-${++terminalIdCounter}`
   const shellPath = process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/zsh'
@@ -745,11 +909,13 @@ ipcMain.handle('terminal:spawn', async (_event, options?: { cwd?: string; comman
   return { id }
 })
 
-ipcMain.on('terminal:write', (_event, id: string, data: string) => {
+ipcMain.on('terminal:write', (event, id: string, data: string) => {
+  if (!isTrustedSender(event)) return
   terminals.get(id)?.write(data)
 })
 
-ipcMain.on('terminal:resize', (_event, id: string, cols: number, rows: number) => {
+ipcMain.on('terminal:resize', (event, id: string, cols: number, rows: number) => {
+  if (!isTrustedSender(event)) return
   if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols <= 0 || rows <= 0) return
   const previous = terminalSizes.get(id)
   if (previous?.cols === cols && previous.rows === rows) return
@@ -757,7 +923,8 @@ ipcMain.on('terminal:resize', (_event, id: string, cols: number, rows: number) =
   terminals.get(id)?.resize(cols, rows)
 })
 
-ipcMain.on('terminal:kill', (_event, id: string) => {
+ipcMain.on('terminal:kill', (event, id: string) => {
+  if (!isTrustedSender(event)) return
   terminals.get(id)?.kill()
   terminals.delete(id)
   terminalSizes.delete(id)
@@ -765,8 +932,8 @@ ipcMain.on('terminal:kill', (_event, id: string) => {
 
 function createTray() {
   // Use a 16x16 template image for macOS menu bar (or empty placeholder until icon exists)
-  const trayTemplatePath = join(__dirname, '../../build/spark-tray-iconTemplate.png')
-  const trayFallbackPath = join(__dirname, '../../build/spark-icon.png')
+  const trayTemplatePath = resolveIconPath('spark-tray-iconTemplate.png')
+  const trayFallbackPath = resolveIconPath('spark-icon.png')
   const trayIconPath = existsSync(trayTemplatePath) ? trayTemplatePath : trayFallbackPath
   let icon: Electron.NativeImage
   try {
@@ -824,15 +991,23 @@ app.whenReady().then(async () => {
   registerLocalAssetProtocol()
   applyAppIcon()
 
-  // Start the Hermes bridge before the renderer loads so /api/hermes/* proxies
-  // don't 502 while ChatInput and the status pill poll on first paint.
-  const bridgeResult = await startBridge()
-  console.log('[bridge] startup result:', bridgeResult.status, bridgeResult.message ?? '')
-
+  // Create the window first so the UI paints immediately — startBridge() can
+  // block for up to 30s waiting for the bridge to become healthy.
   await createWindow()
   createTray()
   setupDockMenu()
   registerGlobalShortcut()
+
+  // Start the Hermes bridge in the background so /api/hermes/* proxies don't
+  // 502 while ChatInput and the status pill poll on first paint. The renderer
+  // already polls bridge:status.
+  startBridge()
+    .then((result) => {
+      console.log('[bridge] startup result:', result.status, result.message ?? '')
+    })
+    .catch((err) => {
+      console.error('[bridge] startup failed:', err)
+    })
 
   // Auto-updates (skip in dev)
   if (!is.dev) {
@@ -881,6 +1056,13 @@ process.on('uncaughtException', (err) => {
     return
   }
   console.error('[electron] uncaughtException:', err)
+})
+
+// Fire-and-forget promises (e.g. void loadURL(...), the background bridge
+// start) can reject; in current Electron an unhandled rejection can terminate
+// the main process. Never let that take the app down.
+process.on('unhandledRejection', (reason) => {
+  console.error('[electron] unhandledRejection:', reason)
 })
 
 app.on('will-quit', () => {
