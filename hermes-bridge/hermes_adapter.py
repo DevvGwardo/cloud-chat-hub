@@ -48,6 +48,11 @@ REPO_TREE_TTL = int(os.environ.get("HERMES_REPO_TREE_TTL", "600"))
 # --------------------------------------------------------------------------
 _cache_stats = {"repo_file_hits": 0, "repo_file_misses": 0, "repo_tree_hits": 0, "repo_tree_misses": 0}
 
+# The real Hermes tool registry is process-global. Repo tools are registered
+# with request-specific handlers, so overlapping repo runs must not mutate it
+# concurrently or one run can call another run's repo/GitHub handlers.
+_repo_tool_registry_lock = threading.Lock()
+
 
 def _get_cache_stats() -> dict:
     return dict(_cache_stats)
@@ -1369,6 +1374,7 @@ class HermesAgentAdapter:
         self._streamed_text_chunks: list[str] = []
         self._last_status_message: Optional[str] = None
         self._last_fallback_switch_key: Optional[str] = None
+        self._repo_registry_lock_acquired = False
 
         self.repo_mode = repo_mode
         self.worktree_mode = worktree_mode
@@ -1396,181 +1402,197 @@ class HermesAgentAdapter:
         # the real hermes-agent calls get_tool_definitions() in __init__, which
         # checks the registry at that moment. If tools aren't registered yet,
         # validate_toolset() returns False and the toolset is silently skipped.
-        self._repo_provider: Optional[RepoToolProvider] = None
-        # Worktree mode uses local file/terminal tools on the worktree cwd;
-        # GitHub API repo tools would edit the remote, not the isolated clone.
-        if repo_mode and github_repo_owner and github_repo_name and not worktree_mode:
-            self._repo_provider = RepoToolProvider(
-                github_pat=github_pat,
-                owner=github_repo_owner,
-                name=github_repo_name,
-                file_tree=repo_file_tree or [],
-                edit_intent=repo_edit_intent,
-                on_server_tool_event=on_server_tool_event,
-                workspace_id=workspace_id,
-                on_text=on_text,
+        try:
+            self._repo_provider: Optional[RepoToolProvider] = None
+            # Worktree mode uses local file/terminal tools on the worktree cwd;
+            # GitHub API repo tools would edit the remote, not the isolated clone.
+            if repo_mode and github_repo_owner and github_repo_name and not worktree_mode:
+                _repo_tool_registry_lock.acquire()
+                self._repo_registry_lock_acquired = True
+                self._repo_provider = RepoToolProvider(
+                    github_pat=github_pat,
+                    owner=github_repo_owner,
+                    name=github_repo_name,
+                    file_tree=repo_file_tree or [],
+                    edit_intent=repo_edit_intent,
+                    on_server_tool_event=on_server_tool_event,
+                    workspace_id=workspace_id,
+                    on_text=on_text,
+                )
+                real_toolsets.append(_REPO_TOOLSET)
+                # Pre-register tools so the agent discovers them during __init__
+                self._repo_provider._register_tools()
+
+            # Register CloudChat custom MCP tools (from user-configured MCP
+            # servers) into the real agent's registry BEFORE agent creation.
+            # Without this the real hermes-agent silently drops custom_tools
+            # and the agent never sees the user's MCP servers.
+            self._custom_mcp_provider: Optional[CustomMCPServerProvider] = None
+            if custom_tools:
+                self._custom_mcp_provider = CustomMCPServerProvider(
+                    custom_tools,
+                    on_server_tool_event=on_server_tool_event,
+                )
+                self._custom_mcp_provider._register_tools()
+                real_toolsets.append(_CUSTOM_MCP_TOOLSET)
+
+            # Build ephemeral system prompt for repo context.
+            # Always include today's date so web_search / news-style queries
+            # aren't anchored to the model's training cutoff year.
+            from datetime import datetime
+            date_preamble = f"Today's date is {datetime.now().astimezone().strftime('%Y-%m-%d')}."
+            repo_prompt = (
+                self._repo_provider.build_repo_system_prompt() if self._repo_provider else ""
             )
-            real_toolsets.append(_REPO_TOOLSET)
-            # Pre-register tools so the agent discovers them during __init__
-            self._repo_provider._register_tools()
-
-        # Register CloudChat custom MCP tools (from user-configured MCP
-        # servers) into the real agent's registry BEFORE agent creation.
-        # Without this the real hermes-agent silently drops custom_tools
-        # and the agent never sees the user's MCP servers.
-        self._custom_mcp_provider: Optional[CustomMCPServerProvider] = None
-        if custom_tools:
-            self._custom_mcp_provider = CustomMCPServerProvider(
-                custom_tools,
-                on_server_tool_event=on_server_tool_event,
-            )
-            self._custom_mcp_provider._register_tools()
-            real_toolsets.append(_CUSTOM_MCP_TOOLSET)
-
-        # Build ephemeral system prompt for repo context.
-        # Always include today's date so web_search / news-style queries
-        # aren't anchored to the model's training cutoff year.
-        from datetime import datetime
-        date_preamble = f"Today's date is {datetime.now().astimezone().strftime('%Y-%m-%d')}."
-        repo_prompt = (
-            self._repo_provider.build_repo_system_prompt() if self._repo_provider else ""
-        )
-        worktree_prompt = ""
-        if worktree_mode:
-            worktree_prompt = (
-                "You are running in an isolated local git worktree. "
-                "Use file, terminal, and code_execution tools to read and edit "
-                "the repository on disk. GitHub API repo tools are disabled for "
-                "this session — do not attempt edit_repo_file or similar remote edits."
-            )
-        prompt_parts = [date_preamble]
-        if worktree_prompt:
-            prompt_parts.append(worktree_prompt)
-        if repo_prompt:
-            prompt_parts.append(repo_prompt)
-        self._cu_poller = None
-        self._cu_poller_lock = threading.Lock()
-        if any(ts in real_toolsets for ts in ("computer_use", "computer")):
-            from computer_use_frames import (
-                COMPUTER_USE_CAPTURE_HINT,
-                install_spark_keep_cu_screenshots_patch,
-            )
-
-            os.environ["SPARK_KEEP_CU_SCREENSHOTS"] = "1"
-            install_spark_keep_cu_screenshots_patch()
-            prompt_parts.append(COMPUTER_USE_CAPTURE_HINT)
-        self._ephemeral_system_prompt = "\n\n".join(prompt_parts).strip()
-
-        # Determine provider from base_url or hermes config.
-        # Maps the base_url host to the corresponding hermes-agent provider ID.
-        provider = provider_override.strip() if isinstance(provider_override, str) and provider_override.strip() else None
-        _bu = (base_url or "").lower()
-        if provider:
-            pass
-        elif "openrouter.ai" in _bu:
-            provider = "openrouter"
-        elif "minimax" in _bu:
-            provider = "minimax"
-        elif "api.anthropic.com" in _bu:
-            provider = "anthropic"
-        elif "api.openai.com" in _bu:
-            provider = "openai"
-        elif "api.deepseek.com" in _bu:
-            provider = "deepseek"
-        elif "generativelanguage.googleapis.com" in _bu or "googleapis.com" in _bu:
-            provider = "gemini"
-        elif "api.x.ai" in _bu:
-            provider = "xai"
-        elif "api.groq.com" in _bu:
-            provider = "groq"
-        elif "api.mistral.ai" in _bu:
-            provider = "mistral"
-        elif "moonshot" in _bu or "kimi" in _bu:
-            provider = "kimi-coding"
-        elif "z.ai" in _bu or "bigmodel" in _bu:
-            provider = "zai"
-        elif "dashscope" in _bu or "aliyuncs.com" in _bu:
-            provider = "alibaba"
-        elif "huggingface" in _bu:
-            provider = "huggingface"
-        elif "cerebras" in _bu:
-            provider = "cerebras"
-        elif "together.xyz" in _bu:
-            provider = "together"
-        elif "nousresearch" in _bu or "nous" in _bu:
-            provider = "nous"
-        # If base_url doesn't match known providers, check hermes config
-        if not provider:
-            try:
-                import yaml
-                cfg_path = os.path.expanduser("~/.hermes/config.yaml")
-                with open(cfg_path) as f:
-                    cfg = yaml.safe_load(f) or {}
-                cfg_provider = (cfg.get("model", {}) or {}).get("provider", "")
-                if cfg_provider:
-                    provider = cfg_provider
-            except Exception:
-                pass
-
-        # Create the real AIAgent
-        key_preview = f"{api_key[:8]}...{api_key[-4:]}" if api_key and len(api_key) > 12 else repr(api_key)
-        print(
-            f"[hermes-adapter] Creating agent: base_url={base_url} "
-            f"api_key={key_preview} provider={provider} model={model}",
-            flush=True,
-        )
-        # Only pass parameters the real hermes-agent AIAgent actually accepts.
-        # The real signature is: base_url, api_key, provider, api_mode, model,
-        # max_iterations, enabled_toolsets, quiet_mode, platform, callbacks, etc.
-        # Reasoning effort from CloudChat's Effort slider → the real agent's
-        # reasoning_config ({"enabled": False} for "none", else {"enabled", "effort"}).
-        reasoning_config = None
-        if reasoning_effort:
-            try:
-                from hermes_constants import parse_reasoning_effort
-                reasoning_config = parse_reasoning_effort(reasoning_effort)
-            except Exception:
-                reasoning_config = (
-                    {"enabled": False} if reasoning_effort == "none"
-                    else {"enabled": True, "effort": reasoning_effort}
+            worktree_prompt = ""
+            if worktree_mode:
+                worktree_prompt = (
+                    "You are running in an isolated local git worktree. "
+                    "Use file, terminal, and code_execution tools to read and edit "
+                    "the repository on disk. GitHub API repo tools are disabled for "
+                    "this session — do not attempt edit_repo_file or similar remote edits."
+                )
+            prompt_parts = [date_preamble]
+            if worktree_prompt:
+                prompt_parts.append(worktree_prompt)
+            if repo_prompt:
+                prompt_parts.append(repo_prompt)
+            self._cu_poller = None
+            self._cu_poller_lock = threading.Lock()
+            if any(ts in real_toolsets for ts in ("computer_use", "computer")):
+                from computer_use_frames import (
+                    COMPUTER_USE_CAPTURE_HINT,
+                    install_spark_keep_cu_screenshots_patch,
                 )
 
-        # For MoA, base_url/api_key are placeholders — MoAClient owns real slots.
-        # Still pass them so non-MoA paths keep working.
-        agent_kwargs = {
-            "base_url": base_url,
-            "api_key": api_key,
-            "provider": provider,
-            "model": model,
-            "max_iterations": max_iterations,
-            "enabled_toolsets": real_toolsets,
-            "reasoning_config": reasoning_config,
-            # hermes-desktop way of sessions: the conversation identity IS the
-            # session identity. Passing the conversation's workspace_id as the
-            # real agent's session_id gives ONE stable state.db session per
-            # conversation (same id across turns, full transcript, searchable,
-            # resumable). Without it the agent auto-generates a fresh id every
-            # turn, fragmenting the conversation across session rows.
-            "session_id": self.workspace_id or None,
-            "platform": "cloudchat",
-            "quiet_mode": True,
-            # Callbacks — translated to CloudChat's format
-            "stream_delta_callback": self._on_stream_delta,
-            "tool_start_callback": self._on_tool_start,
-            "tool_complete_callback": self._on_tool_complete,
-            "reasoning_callback": self._on_reasoning,
-            "step_callback": self._on_step,
-            "status_callback": self._on_status,
-            # MoA reference/aggregator events arrive via tool_progress_callback
-            "tool_progress_callback": self._on_tool_progress,
-        }
-        self._agent = RealAIAgent(**agent_kwargs)
+                os.environ["SPARK_KEEP_CU_SCREENSHOTS"] = "1"
+                install_spark_keep_cu_screenshots_patch()
+                prompt_parts.append(COMPUTER_USE_CAPTURE_HINT)
+            self._ephemeral_system_prompt = "\n\n".join(prompt_parts).strip()
 
-        print(
-            f"[hermes-adapter] Real agent created. model={model} "
-            f"toolsets={real_toolsets} repo_mode={repo_mode} worktree_mode={worktree_mode}",
-            flush=True,
-        )
+            # Determine provider from base_url or hermes config.
+            # Maps the base_url host to the corresponding hermes-agent provider ID.
+            provider = provider_override.strip() if isinstance(provider_override, str) and provider_override.strip() else None
+            _bu = (base_url or "").lower()
+            if provider:
+                pass
+            elif "openrouter.ai" in _bu:
+                provider = "openrouter"
+            elif "minimax" in _bu:
+                provider = "minimax"
+            elif "api.anthropic.com" in _bu:
+                provider = "anthropic"
+            elif "api.openai.com" in _bu:
+                provider = "openai"
+            elif "api.deepseek.com" in _bu:
+                provider = "deepseek"
+            elif "generativelanguage.googleapis.com" in _bu or "googleapis.com" in _bu:
+                provider = "gemini"
+            elif "api.x.ai" in _bu:
+                provider = "xai"
+            elif "api.groq.com" in _bu:
+                provider = "groq"
+            elif "api.mistral.ai" in _bu:
+                provider = "mistral"
+            elif "moonshot" in _bu or "kimi" in _bu:
+                provider = "kimi-coding"
+            elif "z.ai" in _bu or "bigmodel" in _bu:
+                provider = "zai"
+            elif "dashscope" in _bu or "aliyuncs.com" in _bu:
+                provider = "alibaba"
+            elif "huggingface" in _bu:
+                provider = "huggingface"
+            elif "cerebras" in _bu:
+                provider = "cerebras"
+            elif "together.xyz" in _bu:
+                provider = "together"
+            elif "nousresearch" in _bu or "nous" in _bu:
+                provider = "nous"
+            # If base_url doesn't match known providers, check hermes config
+            if not provider:
+                try:
+                    import yaml
+                    cfg_path = os.path.expanduser("~/.hermes/config.yaml")
+                    with open(cfg_path) as f:
+                        cfg = yaml.safe_load(f) or {}
+                    cfg_provider = (cfg.get("model", {}) or {}).get("provider", "")
+                    if cfg_provider:
+                        provider = cfg_provider
+                except Exception:
+                    pass
+
+            # Create the real AIAgent
+            key_preview = f"{api_key[:8]}...{api_key[-4:]}" if api_key and len(api_key) > 12 else repr(api_key)
+            print(
+                f"[hermes-adapter] Creating agent: base_url={base_url} "
+                f"api_key={key_preview} provider={provider} model={model}",
+                flush=True,
+            )
+            # Only pass parameters the real hermes-agent AIAgent actually accepts.
+            # The real signature is: base_url, api_key, provider, api_mode, model,
+            # max_iterations, enabled_toolsets, quiet_mode, platform, callbacks, etc.
+            # Reasoning effort from CloudChat's Effort slider → the real agent's
+            # reasoning_config ({"enabled": False} for "none", else {"enabled", "effort"}).
+            reasoning_config = None
+            if reasoning_effort:
+                try:
+                    from hermes_constants import parse_reasoning_effort
+                    reasoning_config = parse_reasoning_effort(reasoning_effort)
+                except Exception:
+                    reasoning_config = (
+                        {"enabled": False} if reasoning_effort == "none"
+                        else {"enabled": True, "effort": reasoning_effort}
+                    )
+
+            # For MoA, base_url/api_key are placeholders — MoAClient owns real slots.
+            # Still pass them so non-MoA paths keep working.
+            agent_kwargs = {
+                "base_url": base_url,
+                "api_key": api_key,
+                "provider": provider,
+                "model": model,
+                "max_iterations": max_iterations,
+                "enabled_toolsets": real_toolsets,
+                "reasoning_config": reasoning_config,
+                # hermes-desktop way of sessions: the conversation identity IS the
+                # session identity. Passing the conversation's workspace_id as the
+                # real agent's session_id gives ONE stable state.db session per
+                # conversation (same id across turns, full transcript, searchable,
+                # resumable). Without it the agent auto-generates a fresh id every
+                # turn, fragmenting the conversation across session rows.
+                "session_id": self.workspace_id or None,
+                "platform": "cloudchat",
+                "quiet_mode": True,
+                # Callbacks — translated to CloudChat's format
+                "stream_delta_callback": self._on_stream_delta,
+                "tool_start_callback": self._on_tool_start,
+                "tool_complete_callback": self._on_tool_complete,
+                "reasoning_callback": self._on_reasoning,
+                "step_callback": self._on_step,
+                "status_callback": self._on_status,
+                # MoA reference/aggregator events arrive via tool_progress_callback
+                "tool_progress_callback": self._on_tool_progress,
+            }
+            self._agent = RealAIAgent(**agent_kwargs)
+
+            print(
+                f"[hermes-adapter] Real agent created. model={model} "
+                f"toolsets={real_toolsets} repo_mode={repo_mode} worktree_mode={worktree_mode}",
+                flush=True,
+            )
+        except Exception:
+            self._cleanup_repo_tools()
+            raise
+
+
+    def _cleanup_repo_tools(self):
+        try:
+            if self._repo_provider:
+                self._repo_provider._deregister_tools()
+        finally:
+            if self._repo_registry_lock_acquired:
+                self._repo_registry_lock_acquired = False
+                _repo_tool_registry_lock.release()
 
     # --- Callback translators ---
 
@@ -1801,8 +1823,7 @@ class HermesAgentAdapter:
             except Exception:
                 pass
             # Deregister repo tools after the conversation to clean up the registry
-            if self._repo_provider:
-                self._repo_provider._deregister_tools()
+            self._cleanup_repo_tools()
             # Deregister custom MCP tools after the conversation too
             if self._custom_mcp_provider:
                 self._custom_mcp_provider._deregister_tools()
