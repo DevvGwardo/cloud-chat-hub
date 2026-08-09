@@ -97,12 +97,11 @@ jobs:
     # hang on the page-close CDP handshake when the app's main process is
     # blocked (microsoft/playwright#39248 — macOS unaffected). The 28
     # assertions themselves run and pass; the worker then burns its 60s
-    # teardown budget, failing the job with "Worker teardown timeout" even
+    # teardown budget, failing the step with "Worker teardown timeout" even
     # though every spec is green. Keep the suite running as signal for every
     # PR (regressions in the security specs still show as test failures in
     # the log) but do not let this platform teardown quirk gate merges.
     # TODO: root-cause the blocking main-process op and re-enable gating.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
 
@@ -126,4 +125,7 @@ jobs:
         run: npx electron-vite build
 
       - name: Run Playwright e2e tests
+        # continue-on-error: see the job-level KNOWN ISSUE comment above —
+        # the teardown quirk must not fail the job while the specs are green.
+        continue-on-error: true
         run: xvfb-run -a npx playwright test --config playwright-electron.config.ts
