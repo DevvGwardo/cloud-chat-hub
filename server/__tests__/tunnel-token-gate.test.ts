@@ -77,8 +77,8 @@ function rawGet(
   })
 }
 
-// Tunnel traffic terminates at the local cloudflared process, so the gate
-// keys off the Host header matching the tunnel hostname.
+// Tunnel traffic terminates at the local cloudflared process, which may rewrite
+// Host to the local origin and preserve the public host in X-Forwarded-Host.
 describe('public tunnel access token gate', () => {
   it('blocks tunnel-host requests without the token', async () => {
     const server = await createTestServer()
@@ -109,6 +109,35 @@ describe('public tunnel access token gate', () => {
         cookie: `spark_remote_key=${TOKEN}`,
       })
       expect(res.status).toBe(200)
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('blocks loopback proxy requests forwarded from the tunnel hostname without the token', async () => {
+    const server = await createTestServer()
+    const { host: localHost } = new URL(server.url)
+    try {
+      const res = await rawGet(server.url, '/functions/v1/health', {
+        host: localHost,
+        'x-forwarded-host': TUNNEL_HOST,
+      })
+      expect(res.status).toBe(401)
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('accepts loopback proxy requests forwarded from the tunnel hostname with ?key=', async () => {
+    const server = await createTestServer()
+    const { host: localHost } = new URL(server.url)
+    try {
+      const res = await rawGet(server.url, `/functions/v1/health?key=${TOKEN}`, {
+        host: localHost,
+        'x-forwarded-host': TUNNEL_HOST,
+      })
+      expect(res.status).toBe(200)
+      expect(String(res.headers['set-cookie'])).toContain(`spark_remote_key=${TOKEN}`)
     } finally {
       await server.close()
     }

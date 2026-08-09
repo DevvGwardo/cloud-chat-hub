@@ -151,17 +151,26 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
 
   // ─── Public-tunnel access gate ─────────────────────────────────────────────
   // Tunnel traffic terminates at the local cloudflared/localtunnel process, so
-  // it arrives from 127.0.0.1 — identify it by the Host header instead. While
-  // a tunnel is running, any request addressed to the tunnel hostname must
-  // present the per-tunnel token (?key=… on first visit, cookie afterwards).
-  // Local and LAN access is unaffected.
+  // it arrives from 127.0.0.1. Some providers rewrite Host to the local origin
+  // and preserve the public hostname in X-Forwarded-Host; trust that forwarded
+  // host only for loopback proxy traffic. While a tunnel is running, any request
+  // addressed to the tunnel hostname must present the per-tunnel token (?key=…
+  // on first visit, cookie afterwards). Local and LAN access is unaffected.
   const REMOTE_KEY_COOKIE = 'spark_remote_key';
   app.use((req, res, next) => {
     const tunnel = getTunnelState();
     if (!tunnel.running || !tunnel.url || !tunnel.accessToken) return next();
 
-    const tunnelHost = new URL(tunnel.url).host;
-    if ((req.headers.host || '').toLowerCase() !== tunnelHost.toLowerCase()) return next();
+    const tunnelHost = new URL(tunnel.url).host.toLowerCase();
+    const requestHost = (req.headers.host || '').toLowerCase();
+    const forwardedHost = (req.headers['x-forwarded-host'] as string | undefined)
+      ?.split(',')[0]
+      ?.trim()
+      ?.toLowerCase();
+    const isTunnelRequest =
+      requestHost === tunnelHost ||
+      (isLoopbackRequest(req) && forwardedHost === tunnelHost);
+    if (!isTunnelRequest) return next();
 
     const cookies = req.headers.cookie || '';
     const cookieMatch = cookies.match(new RegExp(`(?:^|;\\s*)${REMOTE_KEY_COOKIE}=([^;]+)`));
