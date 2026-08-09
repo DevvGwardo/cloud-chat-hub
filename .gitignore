@@ -100,6 +100,10 @@ hermes-bridge/data/*.json
 # Agent runtime scratch
 .commandcode/
 .tasks/
+.zcode/
+
+# Runtime team orchestration state
+data/teams-store.json
 
 # Local promo/video renders
 videos/
