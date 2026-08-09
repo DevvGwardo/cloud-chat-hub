@@ -41,7 +41,6 @@ describe('useMiniBrowserBridge', () => {
   });
 
   afterEach(() => {
-    // @ts-expect-error cleanup test stub
     delete window.electronAPI;
   });
 

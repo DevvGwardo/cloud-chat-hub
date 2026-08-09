@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import asyncio
 import time
@@ -1005,19 +1006,25 @@ print("{_HERMES_SKILLS_HUB_RESULT_PREFIX}" + json.dumps({{"skills": skills}}, en
 
 
 def _run_hermes_cron_helper(action: str, payload: Optional[dict] = None):
-    completed = subprocess.run(
-        [
-            _HERMES_CRON_HELPER_PYTHON,
-            "-c",
-            _HERMES_CRON_HELPER_CODE,
-            _HERMES_AGENT_DIR,
-            action,
-            json.dumps(payload or {}),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            [
+                _HERMES_CRON_HELPER_PYTHON,
+                "-c",
+                _HERMES_CRON_HELPER_CODE,
+                _HERMES_AGENT_DIR,
+                action,
+                json.dumps(payload or {}),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"Hermes cron helper timed out after 30s for {action}"
+        )
     if completed.returncode != 0:
         stderr = completed.stderr.strip()
         stdout = completed.stdout.strip()
@@ -1264,9 +1271,14 @@ def _excerpt_history_output(output: str, limit: int = 500) -> Optional[str]:
 
 MAX_RUN_HISTORY = 20
 
+# Client-controlled cron job ids must be validated before they are used to
+# build filesystem paths (output_dir = OUTPUT_DIR / job_id) — otherwise a
+# crafted id could traverse directories. Mirror of acp_transport._SAFE_ID_RE.
+_JOB_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
 
 def _build_hermes_run_history(job_id: str) -> list[dict]:
-    if not _HERMES_CRON_AVAILABLE:
+    if not _HERMES_CRON_AVAILABLE or not _JOB_ID_RE.match(job_id or ""):
         return []
 
     runs: list[dict] = []
@@ -1357,16 +1369,31 @@ try:
         while True:
             try:
                 line = await _brain_proc.stdout.readline()
-                if not line:
-                    break
-                msg = json.loads(line.decode())
-                mid = msg.get("id")
-                if mid is not None and mid in _brain_pending:
-                    fut = _brain_pending.pop(mid)
-                    if not fut.done():
-                        fut.set_result(msg)
             except Exception:
+                # Stream failure — treat as end of stream and disable brain.
                 break
+            if not line:
+                # EOF — the brain process closed its stdout.
+                break
+            try:
+                msg = json.loads(line.decode())
+            except Exception as e:
+                # A single malformed line must not kill the reader for the
+                # process lifetime (previously: `except Exception: break`,
+                # which left _brain_initialized True and made every _brain_rpc
+                # hang for its 10s timeout). Skip the line and keep reading.
+                print(f"[hermes-bridge] brain: skipping malformed line: {e}", flush=True)
+                continue
+            mid = msg.get("id")
+            if mid is not None and mid in _brain_pending:
+                fut = _brain_pending.pop(mid)
+                if not fut.done():
+                    fut.set_result(msg)
+        # Process/stream ended — mark brain unavailable so callers stop
+        # retrying instead of hanging on 10s timeouts.
+        global _brain_initialized
+        _brain_initialized = False
+        print("[hermes-bridge] brain: reader exited (process/stream ended); brain calls disabled", flush=True)
 
     async def _brain_rpc(method: str, params: dict) -> dict:
         """Send a JSON-RPC request and wait for response. Returns the result dict."""
@@ -1727,29 +1754,6 @@ try:
         if val is None:
             return True  # brain unavailable — assume match
         return val == expected
-
-    def _update_bridge_metrics(success: bool, increment_active: bool = False, decrement_active: bool = False):
-        """Update bridge health metrics (active_requests, error_rate, uptime)."""
-        global _bridge_total_requests, _bridge_error_count, _bridge_start_time, _bridge_active_requests
-        if not _brain_initialized or _brain_proc is None:
-            return
-        if decrement_active:
-            _bridge_active_requests = max(0, _bridge_active_requests - 1)
-        if increment_active:
-            _bridge_active_requests += 1
-        if not success:
-            _bridge_error_count += 1
-        error_rate = round(_bridge_error_count / max(_bridge_total_requests, 1), 4)
-        uptime = round(time.time() - _bridge_start_time, 1) if _bridge_start_time > 0 else 0.0
-        metrics = json.dumps({
-            "active_requests": _bridge_active_requests,
-            "error_rate": error_rate,
-            "uptime": uptime,
-            "start_time": _bridge_start_time,
-            "total_requests": _bridge_total_requests,
-            "error_count": _bridge_error_count,
-        })
-        _brain_set("bridge:metrics", metrics)
 
 except ImportError:
     # mcp package not available, bridge runs without brain integration
@@ -6640,6 +6644,8 @@ async def run_cron_job(job_id: str):
 
 @app.get("/cron/{job_id}/history")
 async def get_cron_history(job_id: str):
+    if not _JOB_ID_RE.match(job_id or ""):
+        return JSONResponse(status_code=422, content={"error": "invalid job_id"})
     if _HERMES_CRON_AVAILABLE:
         if not _hermes_get_job(job_id):
             return JSONResponse(status_code=404, content={"error": "not found"})

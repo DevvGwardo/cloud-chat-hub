@@ -81,7 +81,7 @@ bridge_flush() {
 
     for dir in "$BRIDGE_SURFACED" "$BRIDGE_STAGED"; do
         for f in "$dir"/*.json; do
-            [ -f "$f" ] && cat "$f" >> "$tmpfile" && echo "," >> "$tmpfile"
+            [ -f "$f" ] && cat "$f" >> "$tmpfile" && echo >> "$tmpfile"
         done
     done
 

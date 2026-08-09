@@ -1726,13 +1726,23 @@ class AIAgent:
                 "User-Agent": "Hermes-Agent",
             }
             all_repos = []
+            rate_limit_retries = 0
             with httpx.Client(timeout=15) as client:
                 while url:
                     resp = client.get(url, headers=headers)
                     if resp.status_code == 401:
                         return "Error: GitHub token is invalid or expired. The user should update their token in Settings."
                     if resp.status_code == 429:
-                        retry_after = int(resp.headers.get("Retry-After", "5"))
+                        rate_limit_retries += 1
+                        if rate_limit_retries > 3:
+                            raise RuntimeError(
+                                "GitHub API rate limited (429) after 3 retries — try again later."
+                            )
+                        raw_retry_after = resp.headers.get("Retry-After", "5")
+                        try:
+                            retry_after = min(max(int(raw_retry_after), 1), 30)
+                        except ValueError:
+                            retry_after = 5
                         time.sleep(retry_after)
                         continue
                     resp.raise_for_status()

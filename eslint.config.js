@@ -5,7 +5,21 @@ import reactRefresh from "eslint-plugin-react-refresh";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist", "out", "release", "dist-electron"] },
+  {
+    ignores: [
+      "dist",
+      "out",
+      "release",
+      "dist-electron",
+      // Generated / vendored dirs (the bare names above only match at the
+      // config root; these catch nested copies and virtualenvs).
+      "**/dist",
+      "**/e2e-results",
+      "**/playwright-report",
+      "**/venv",
+      "**/.venv",
+    ],
+  },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ["**/*.{ts,tsx}"],
@@ -23,6 +37,16 @@ export default tseslint.config(
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_" }],
       "@typescript-eslint/no-explicit-any": "warn",
       "no-empty": "warn",
+    },
+  },
+  {
+    // Plain JS (scripts/*.cjs, postcss.config.js, root test scripts) previously
+    // matched no config block and escaped all rules.
+    extends: [js.configs.recommended],
+    files: ["**/*.{js,cjs,mjs}"],
+    languageOptions: {
+      ecmaVersion: 2020,
+      globals: globals.node,
     },
   },
 );

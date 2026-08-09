@@ -6,6 +6,7 @@ import { isRepoWriteMessage } from '@/lib/repo-intent';
 import type { ToolActivityEvent } from '@/components/chat/AgentActivity';
 import { SERVER_EXECUTED_REPO_TOOLS, SERVER_TOOL_EVENT_TYPES, type ServerToolEvent } from '@/lib/server-tool-events';
 import { extractPseudoToolInvocations, extractTextFileEdits, getPseudoToolSourceText } from '@/lib/pseudo-tool-calls';
+import { parseToolActivityInput } from '@/lib/tool-activity';
 import type { Provider } from '@/stores/settings-store';
 
 /** Delay before auto-continue fires after a stalled or interrupted response. */
@@ -355,22 +356,6 @@ export async function upsertStoredMessage(message: StoredMessage): Promise<void>
     await db.messages.add(message);
   } catch {
     await db.messages.update(message.id, message);
-  }
-}
-
-function parseToolActivityInput(input: string): Record<string, unknown> {
-  const trimmed = input.trim();
-  if (!trimmed) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(trimmed);
-    return parsed && typeof parsed === 'object'
-      ? parsed as Record<string, unknown>
-      : { input: trimmed };
-  } catch {
-    return { input: trimmed };
   }
 }
 

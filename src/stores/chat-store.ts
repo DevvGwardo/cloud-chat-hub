@@ -7,7 +7,6 @@ interface ChatState {
   conversations: Conversation[];
   archivedConversations: Conversation[];
   activeConversationId: string | null;
-  searchQuery: string;
 
   loadConversations: () => Promise<void>;
   createConversation: (provider: string, model: string, systemPrompt: string) => Promise<string>;
@@ -20,7 +19,6 @@ interface ChatState {
   addTagToConversation: (id: string, tag: string) => Promise<void>;
   removeTagFromConversation: (id: string, tag: string) => Promise<void>;
   deleteOldConversations: (olderThanDays: number) => Promise<number>;
-  setSearchQuery: (q: string) => void;
   clearActiveConversation: () => void;
 
   // Fork/Rewind
@@ -34,7 +32,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   conversations: [],
   archivedConversations: [],
   activeConversationId: null,
-  searchQuery: '',
 
   loadConversations: async () => {
     const [conversations, archivedConversations] = await Promise.all([
@@ -130,7 +127,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     return toDelete.length;
   },
 
-  setSearchQuery: (q) => set({ searchQuery: q }),
   clearActiveConversation: () => set({ activeConversationId: null }),
 
   // Fork/Rewind

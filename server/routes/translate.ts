@@ -11,6 +11,10 @@ import { sendJson } from '../lib/helpers';
 import { getUnknownErrorMessage } from '../lib/github-utils';
 import { runOpenClawTurn } from '../openclaw';
 
+// Every provider call is bounded — a hung upstream must not hold the request
+// open indefinitely.
+const PROVIDER_TIMEOUT_MS = 30_000;
+
 // ─── /functions/v1/translate ───────────────────────────────────────────────────
 
 function buildTranslationSystemMessage(targetLanguage: string, text: string): string {
@@ -142,6 +146,7 @@ app.post('/functions/v1/translate', async (req, res) => {
           temperature: 0.3,
           messages: translatedMessages,
         }),
+        signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
       });
 
       if (!response.ok) {
@@ -185,6 +190,7 @@ app.post('/functions/v1/translate', async (req, res) => {
         max_tokens: 4096,
         messages: translatedMessages,
       }),
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
     });
 
     if (!response.ok) {

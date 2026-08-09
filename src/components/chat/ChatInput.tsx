@@ -409,14 +409,11 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
     });
   }, []);
 
-  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(e.clipboardData?.items ?? [])
-      .filter((i) => PASTEABLE_IMAGE_TYPES.has(i.type))
-      .map((i) => i.getAsFile())
-      .filter((f): f is File => !!f);
+  // Shared by paste and the Attach button: thumbnail each file immediately,
+  // upload it to ~/.hermes/images in the background, and compose the saved
+  // path into the message at send time.
+  const attachFiles = useCallback((files: File[]) => {
     if (files.length === 0) return;
-
-    e.preventDefault();
     setPasteError(null);
 
     for (const file of files) {
@@ -446,6 +443,19 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
       })();
     }
   }, [removeAttachment]);
+
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(e.clipboardData?.items ?? [])
+      .filter((i) => PASTEABLE_IMAGE_TYPES.has(i.type))
+      .map((i) => i.getAsFile())
+      .filter((f): f is File => !!f);
+    if (files.length === 0) return;
+
+    e.preventDefault();
+    attachFiles(files);
+  }, [attachFiles]);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const readyAttachmentPaths = attachments
     .filter((a) => a.status === 'ready' && a.path)
@@ -620,6 +630,17 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
 
   return (
     <div className="w-full max-w-[720px] mx-auto px-3 md:px-20 pb-3 pt-2" data-tour="composer">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept={Array.from(PASTEABLE_IMAGE_TYPES).join(',')}
+        multiple
+        hidden
+        onChange={(e) => {
+          attachFiles(Array.from(e.target.files ?? []));
+          e.target.value = '';
+        }}
+      />
       <div className="flex flex-col">
         <QueuedMessageTray
           messages={queuedMessages}
@@ -731,8 +752,10 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
             <div data-toolbar-clip className="flex min-w-0 flex-1 items-center gap-1 overflow-x-clip">
             {/* Plus button */}
             <button
+              onClick={() => fileInputRef.current?.click()}
               className="h-6 w-6 shrink-0 rounded-full flex items-center justify-center text-[#666666] hover:text-foreground hover:bg-muted transition-colors duration-100"
               title="Attach"
+              aria-label="Attach image"
             >
               <Plus className="h-4 w-4" />
             </button>

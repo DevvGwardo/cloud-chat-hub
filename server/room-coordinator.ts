@@ -1,5 +1,5 @@
 import { logger } from './lib/logger';
-import { createRoomStore, type RoomMessage } from './room-store';
+import { getRoomStore, type RoomMessage, type RoomStore } from './room-store';
 import { buildAgentSystemPrompt } from './lib/room-prompt-builder';
 import { OPENAI_COMPATIBLE } from './provider-config';
 import type { RoomMember } from './room-store';
@@ -161,7 +161,7 @@ async function triggerAgent(
   member: RoomMember,
   allMembers: RoomMember[],
   recentMessages: RoomMessage[],
-  store: ReturnType<typeof createRoomStore>,
+  store: RoomStore,
   userMessage: string,
   depth = 0,
   maxDepth = MAX_AGENT_CHAIN_DEPTH,
@@ -398,7 +398,9 @@ export async function postToRoom(
   senderDisplayName?: string,
   teamId?: string,
 ): Promise<{ message: RoomMessage; triggeredAgents: Array<{ profileName: string; displayName: string }> }> {
-  const store = createRoomStore();
+  // Shared per-process store — a fresh createRoomStore() per call leaked
+  // SQLite connections and contended with the routes' connection.
+  const store = getRoomStore();
 
   const room = store.getRoom(roomId);
   if (!room) {

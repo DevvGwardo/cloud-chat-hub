@@ -1,6 +1,6 @@
 import React, { Suspense, useEffect, useRef, useState, useMemo } from 'react';
 import { useShallow } from 'zustand/shallow';
-import { Plus, Trash2, Settings, Columns2, Pin, MessageSquare, Lock, Circle, GitFork, Search, ChevronRight, Zap, Clock, House, BookOpen, Sparkles, BarChart3, User, Network, Image, Download, Upload, Archive, ArchiveRestore, ChevronDown, Tag, X, Kanban, CornerDownLeft, ListChecks, Users, ScrollText, Server, Webhook, Link2 } from 'lucide-react';
+import { Plus, Trash2, Settings, Columns2, Pin, MessageSquare, Lock, Circle, GitFork, ChevronRight, Zap, Clock, House, BookOpen, Sparkles, BarChart3, User, Network, Image, Download, Upload, Archive, ArchiveRestore, ChevronDown, Tag, X, Kanban, CornerDownLeft, ListChecks, Users, ScrollText, Server, Webhook, Link2 } from 'lucide-react';
 import { Github } from 'lucide-react';
 import { GhostIcon } from '@/components/chat/GhostIcon';
 import { useChatStore } from '@/stores/chat-store';
@@ -231,7 +231,7 @@ export const ChatSidebar: React.FC = () => {
   const isCompactFooter = sidebarWidth <= 320;
   const isUltraCompactFooter = sidebarWidth <= 280;
   const accessStatusLabel = getRepoAccessLabel(activeRepo);
-  const permissionsLabel = isUltraCompactFooter ? null : isCompactFooter ? accessStatusLabel : accessStatusLabel;
+  const permissionsLabel = isUltraCompactFooter ? null : accessStatusLabel;
   const repoDisplayName = activeRepo
     ? isCompactFooter
       ? activeRepo.name
@@ -654,7 +654,6 @@ export const ChatSidebar: React.FC = () => {
           >
             <Trash2 className="h-3.5 w-3.5" />
           </button>
-          <Search className="h-3.5 w-3.5 text-[#666666]" />
           {cleanupOpen && (
             <div className="absolute right-0 top-full z-50 mt-1 min-w-[160px] rounded-lg border border-[#2F2F2F] bg-[hsl(var(--card))] py-1 shadow-lg">
               {cleanupDays === null ? (
@@ -986,6 +985,7 @@ export const ChatSidebar: React.FC = () => {
                               <button
                                 onClick={(e) => { e.stopPropagation(); setDeleteConfirm(conv.id); }}
                                 className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-background/80 hover:text-destructive"
+                                aria-label="Delete conversation"
                               >
                                 <Trash2 className="h-3 w-3" />
                               </button>

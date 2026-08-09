@@ -23,7 +23,7 @@ import { registerTeamRoutes } from './routes/team';
 import { registerTranscribeRoute } from './routes/transcribe';
 import { registerImagesRoute } from './routes/images';
 import { registerRoomRoutes } from './routes/rooms';
-import { sendJson, csrfProtection } from './lib/helpers';
+import { sendJson, csrfProtection, ALLOWED_ORIGINS } from './lib/helpers';
 import { logger, requestIdMiddleware } from './lib/logger';
 import { MAX_BODY_SIZE } from './config';
 
@@ -33,6 +33,7 @@ import { registerBridgeRoutes } from './routes/bridge';
 import { registerWorkspaceRoutes } from './routes/workspace';
 import { startManagedBridge, stopManagedBridge } from './lib/bridge-manager';
 import { taskOrchestrator } from './task-orchestrator';
+import { shutdownTeamCoordinator } from './team-coordinator';
 import { getLanIp, generateTerminalQr, generateQrSvgDataUri, formatConnectionInfo } from './lib/qr-display';
 import { startTunnel, killTunnel, getTunnelState, cloudflaredAvailable, brewAvailable, installCloudflared } from './lib/tunnel';
 
@@ -144,7 +145,24 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
     if (res.getHeader('x-vercel-ai-data-stream')) return false;
     return compression.filter(req, res);
   } }));
-  app.use(cors());
+  // Origin-aware CORS. Never reflect arbitrary origins: unauthenticated GET
+  // endpoints (e.g. profile .env, chat-store conversations) must stay unreadable
+  // cross-origin. Only allowlist dev-server origins plus loopback hosts (LAN
+  // phone access). Requests without an Origin header (same-origin, curl,
+  // Electron file://) are unaffected — no ACAO header is emitted.
+  app.use(cors({
+    origin(origin, callback) {
+      if (!origin) return callback(null, false);
+      if (ALLOWED_ORIGINS.has(origin)) return callback(null, true);
+      try {
+        const host = new URL(origin).hostname;
+        const isLoopback = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
+        return callback(null, isLoopback);
+      } catch {
+        return callback(null, false);
+      }
+    },
+  }));
   app.use(requestIdMiddleware);
   app.use(csrfProtection);
 
@@ -258,17 +276,22 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
 
     // JSON endpoint for the frontend component
     app.get('/api/remote/info', async (req, res) => {
-      const ip = getLanIp();
-      const port = Number(process.env.PORT || 3001);
-      const { lanUrl, localUrl } = formatConnectionInfo(ip, port);
-      const tunnelState = getTunnelState();
-      const tunnelUrl = publicTunnelUrl(tunnelState, req);
-      // Use tunnel URL if available (works from anywhere), otherwise LAN URL
-      const url = tunnelState.running && tunnelState.url
-        ? tunnelUrl!
-        : (ip ? lanUrl : localUrl);
-      const qrSvg = await generateQrSvgDataUri(url);
-      sendJson(res, 200, { url, lanUrl, localUrl, qrSvg, tunnelUrl });
+      try {
+        const ip = getLanIp();
+        const port = Number(process.env.PORT || 3001);
+        const { lanUrl, localUrl } = formatConnectionInfo(ip, port);
+        const tunnelState = getTunnelState();
+        const tunnelUrl = publicTunnelUrl(tunnelState, req);
+        // Use tunnel URL if available (works from anywhere), otherwise LAN URL
+        const url = tunnelState.running && tunnelState.url
+          ? tunnelUrl!
+          : (ip ? lanUrl : localUrl);
+        const qrSvg = await generateQrSvgDataUri(url);
+        sendJson(res, 200, { url, lanUrl, localUrl, qrSvg, tunnelUrl });
+      } catch (err) {
+        logger.error(`[server] /api/remote/info failed: ${err instanceof Error ? err.message : String(err)}`);
+        sendJson(res, 500, { error: 'Internal server error' });
+      }
     });
 
     // Tunnel management endpoints
@@ -312,13 +335,14 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
     });
 
     app.get('/remote', async (_req, res) => {
-      const ip = getLanIp();
-      const port = Number(process.env.PORT || 3001);
-      const { lanUrl, localUrl } = formatConnectionInfo(ip, port);
-      const url = ip ? lanUrl : localUrl;
-      const qrSvg = await generateQrSvgDataUri(url);
+      try {
+        const ip = getLanIp();
+        const port = Number(process.env.PORT || 3001);
+        const { lanUrl, localUrl } = formatConnectionInfo(ip, port);
+        const url = ip ? lanUrl : localUrl;
+        const qrSvg = await generateQrSvgDataUri(url);
 
-      res.send(`<!doctype html>
+        res.send(`<!doctype html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -405,6 +429,10 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
   </div>
 </body>
 </html>`);
+      } catch (err) {
+        logger.error(`[server] /remote failed: ${err instanceof Error ? err.message : String(err)}`);
+        sendJson(res, 500, { error: 'Internal server error' });
+      }
     });
   }
 
@@ -428,6 +456,20 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
   app.use((req, res) => {
     logger.warn(`[server] 404 Not Found: ${req.method} ${req.path}`);
     sendJson(res, 404, { error: `Route not found: ${req.method} ${req.path}` });
+  });
+
+  // ─── Global error handler ───────────────────────────────────────────────────
+  // Express 4 does not forward rejected promises from async handlers, but sync
+  // throws and next(err) land here instead of crashing the process.
+  app.use((err: unknown, req: Request, res: express.Response, _next: express.NextFunction) => {
+    logger.error(
+      `[server] Unhandled error on ${req.method} ${req.path}: ${err instanceof Error ? err.stack || err.message : String(err)}`,
+    );
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
+    sendJson(res, 500, { error: 'Internal server error' });
   });
 
   return app;
@@ -525,6 +567,9 @@ if (isEntry) {
     // Kill the public tunnel first: while it lives, its process still accepts
     // connections, so the access-token gate must stay armed until it's dead.
     killTunnel();
+    // Stop team-agent subprocesses so a `npm run server` exit doesn't orphan
+    // run-kanban-agent.py children.
+    shutdownTeamCoordinator();
     if (process.env.MANAGE_BRIDGE === 'true') {
       stopManagedBridge();
     }

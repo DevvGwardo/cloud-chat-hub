@@ -1,3 +1,4 @@
+// @vitest-environment node
 import type { AddressInfo } from 'net'
 import { execSync } from 'node:child_process'
 import { mkdtempSync } from 'node:fs'

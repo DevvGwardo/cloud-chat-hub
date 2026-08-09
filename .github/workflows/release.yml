@@ -41,10 +41,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           # Must match CI (Node 22). better-sqlite3 12.10+ ships win32
           # prebuilds for ABI 127+ (Node 22+), not Node 20 — a Node 20

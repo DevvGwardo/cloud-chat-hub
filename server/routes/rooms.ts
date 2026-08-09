@@ -1,5 +1,5 @@
 import type { Express, Request, Response } from 'express';
-import { createRoomStore, isConstraintError } from '../room-store';
+import { getRoomStore, isConstraintError } from '../room-store';
 import { postToRoom } from '../room-coordinator';
 import { sendJson } from '../lib/helpers';
 
@@ -8,7 +8,8 @@ function isNonEmptyString(value: unknown): value is string {
 }
 
 export function registerRoomRoutes(app: Express) {
-  const store = createRoomStore();
+  // Shared per-process store (same connection as room-coordinator's triggers).
+  const store = getRoomStore();
 
   // POST /api/rooms — create a room
   app.post('/api/rooms', (req: Request, res: Response) => {

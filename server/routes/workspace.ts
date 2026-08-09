@@ -3,6 +3,8 @@ import { realpath, readFile, stat } from 'fs/promises';
 import { isAbsolute, resolve, relative, sep } from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { lookup } from 'dns/promises';
+import { isIP } from 'net';
 import { sendJson } from '../lib/helpers';
 import { resolveAttachedLocalRepoPath } from '../lib/github-utils';
 import { workspaceIndex } from '../workspace-indexer';
@@ -52,6 +54,61 @@ function truncateText(text: string, maxBytes: number): { text: string; truncated
     text: buf.subarray(0, maxBytes).toString('utf8') + '\n\n[Truncated]',
     truncated: true,
   };
+}
+
+// ─── SSRF guard for /functions/v1/fetch-url ─────────────────────────────────
+
+class BlockedUrlError extends Error {}
+
+/**
+ * True when the IP is a private/loopback/link-local/reserved address that
+ * must never be fetched by the URL proxy (SSRF). Handles both IPv4 and IPv6,
+ * including IPv4-mapped IPv6 (`::ffff:127.0.0.1`).
+ */
+export function isBlockedIp(ip: string): boolean {
+  const normalized = ip.toLowerCase();
+  // IPv4-mapped IPv6: check the embedded IPv4 address.
+  if (normalized.startsWith('::ffff:')) {
+    return isBlockedIp(normalized.slice('::ffff:'.length));
+  }
+  // Unspecified addresses.
+  if (normalized === '0.0.0.0' || normalized === '::') return true;
+  // Loopback: 127.0.0.0/8 and ::1.
+  if (normalized === '::1' || normalized.startsWith('127.')) return true;
+  // Link-local: 169.254.0.0/16 and fe80::/10.
+  if (normalized.startsWith('169.254.')) return true;
+  if (normalized.startsWith('fe80:')) return true;
+  // Unique-local IPv6: fc00::/7.
+  if (/^f[cd][0-9a-f]*:/.test(normalized)) return true;
+  // Private IPv4: 10/8, 172.16/12, 192.168/16.
+  if (normalized.startsWith('10.')) return true;
+  if (normalized.startsWith('192.168.')) return true;
+  if (normalized.startsWith('172.')) {
+    const second = Number(normalized.split('.')[1]);
+    if (second >= 16 && second <= 31) return true;
+  }
+  return false;
+}
+
+/**
+ * Resolve the URL hostname and reject it if any resolved address is in a
+ * blocked range. IP literals are checked directly (no DNS). Throws
+ * BlockedUrlError when the target must not be fetched.
+ */
+async function assertUrlAllowed(url: URL): Promise<void> {
+  const hostname = url.hostname.replace(/^\[|\]$/g, '');
+  if (isIP(hostname)) {
+    if (isBlockedIp(hostname)) {
+      throw new BlockedUrlError('URL resolves to a private or loopback address');
+    }
+    return;
+  }
+  const addresses = await lookup(hostname, { all: true });
+  for (const { address } of addresses) {
+    if (isBlockedIp(address)) {
+      throw new BlockedUrlError('URL resolves to a private or loopback address');
+    }
+  }
 }
 
 function stripHtml(html: string): string {
@@ -250,14 +307,47 @@ export function registerWorkspaceRoutes(app: Express) {
         return sendJson(res, 400, { error: 'Only http(s) URLs are supported' });
       }
 
-      const response = await fetch(parsed.toString(), {
-        signal: AbortSignal.timeout(FETCH_URL_TIMEOUT_MS),
-        headers: { 'User-Agent': 'CloudChat/1.0 (+context-ref)' },
-      });
+      // SSRF guard: resolve the hostname up front and reject private/loopback/
+      // link-local/reserved ranges. Follow redirects manually so every hop is
+      // re-checked against the same blocklist (a public URL must not redirect
+      // into the local network).
+      const MAX_REDIRECTS = 3;
+      let currentUrl = parsed;
+      let response: Awaited<ReturnType<typeof fetch>> | null = null;
+      for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+        await assertUrlAllowed(currentUrl);
+
+        const hopResponse = await fetch(currentUrl.toString(), {
+          redirect: 'manual',
+          signal: AbortSignal.timeout(FETCH_URL_TIMEOUT_MS),
+          headers: { 'User-Agent': 'CloudChat/1.0 (+context-ref)' },
+        });
+
+        if (hopResponse.status >= 300 && hopResponse.status < 400) {
+          const location = hopResponse.headers.get('location');
+          if (!location) {
+            response = hopResponse;
+            break;
+          }
+          try {
+            currentUrl = new URL(location, currentUrl);
+          } catch {
+            return sendJson(res, 400, { error: 'Invalid redirect location' });
+          }
+          continue;
+        }
+
+        response = hopResponse;
+        break;
+      }
+
+      if (!response) {
+        return sendJson(res, 400, { error: `Too many redirects (max ${MAX_REDIRECTS})` });
+      }
 
       if (!response.ok) {
         return sendJson(res, 200, {
-          url: parsed.toString(),
+          url: currentUrl.toString(),
           fetched: false,
           note: `HTTP ${response.status} — use web tools to fetch this URL.`,
         });
@@ -269,12 +359,15 @@ export function registerWorkspaceRoutes(app: Express) {
       const { text: body, truncated } = truncateText(text, MAX_URL_BYTES);
 
       sendJson(res, 200, {
-        url: parsed.toString(),
+        url: currentUrl.toString(),
         fetched: true,
         content: body,
         truncated,
       });
     } catch (err: unknown) {
+      if (err instanceof BlockedUrlError) {
+        return sendJson(res, 400, { error: err.message });
+      }
       const message = err instanceof Error ? err.message : 'Fetch failed';
       sendJson(res, 200, {
         url: req.query.url,

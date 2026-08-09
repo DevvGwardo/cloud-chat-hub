@@ -399,6 +399,8 @@ export const GitHubPanel: React.FC<GitHubPanelProps> = ({
           onClick={fetchRepos}
           disabled={loading}
           className="p-1 rounded hover:bg-secondary transition-colors"
+          aria-label="Refresh repositories"
+          title="Refresh repositories"
         >
           <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
         </button>

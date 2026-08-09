@@ -1,6 +1,8 @@
 // @vitest-environment node
+import express from 'express'
 import type { AddressInfo } from 'net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { registerHermesAdminRoute } from '../routes/hermes-admin'
 
 async function createTestServer() {
   const { createApp } = await import('../index')
@@ -218,6 +220,109 @@ describe('Hermes admin route', () => {
     } finally {
       await server.close()
     }
+  })
+
+  // ─── Local-only gate for destructive ops ───────────────────────────────────
+
+  function makeFakeRes() {
+    const res: Record<string, unknown> & {
+      statusCode: number
+      body?: unknown
+      status: (code: number) => typeof res
+      json: (body: unknown) => typeof res
+      send: (body: unknown) => typeof res
+      type: () => typeof res
+      setHeader: () => typeof res
+      writeHead: () => typeof res
+      write: () => boolean
+      end: () => typeof res
+    } = {
+      statusCode: 200,
+      status(code) {
+        res.statusCode = code
+        return res
+      },
+      json(body) {
+        res.body = body
+        return res
+      },
+      send(body) {
+        res.body = body
+        return res
+      },
+      type() {
+        return res
+      },
+      setHeader() {
+        return res
+      },
+      writeHead() {
+        return res
+      },
+      write() {
+        return true
+      },
+      end() {
+        return res
+      },
+    }
+    return res
+  }
+
+  function makeFakeReq(remoteAddress: string) {
+    return {
+      method: 'POST',
+      url: '/api/hermes/kanban/swarm/',
+      originalUrl: '/api/hermes/kanban/swarm/',
+      headers: {},
+      query: {},
+      params: {},
+      body: {},
+      socket: { remoteAddress },
+    }
+  }
+
+  /**
+   * Drive a request through the middleware chain. The gate/route send the
+   * response without calling next(), so resolve on a timer tick instead of
+   * the router's done callback.
+   */
+  function handle(app: express.Express, req: ReturnType<typeof makeFakeReq>, res: ReturnType<typeof makeFakeRes>) {
+    return new Promise<void>((resolve) => {
+      // app.handle exists at runtime but is not declared in the express types.
+      (app as unknown as { handle: (r: unknown, s: unknown, cb: () => void) => void })
+        .handle(req, res, () => resolve())
+      setTimeout(resolve, 0)
+    })
+  }
+
+  it('blocks trailing-slash destructive ops from non-local clients', async () => {
+    // Express 4 (strict routing off) matches `/api/hermes/kanban/swarm/`
+    // against the swarm route with a trailing slash in req.path — the gate
+    // must normalize it or the exact-match set is bypassed.
+    const app = express()
+    registerHermesAdminRoute(app)
+
+    const res = makeFakeRes()
+    await handle(app, makeFakeReq('192.168.1.50'), res)
+
+    expect(res.statusCode).toBe(403)
+    expect((res.body as { error?: string }).error).toContain('only available from the local app')
+  })
+
+  it('allows trailing-slash destructive ops from loopback clients', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })))
+
+    const app = express()
+    registerHermesAdminRoute(app)
+
+    const res = makeFakeRes()
+    await handle(app, makeFakeReq('127.0.0.1'), res)
+
+    expect(res.statusCode).toBe(200)
   })
 
   it('proxies /api/hermes/providers to the bridge /v1/providers catalog', async () => {

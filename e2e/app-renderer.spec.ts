@@ -31,10 +31,9 @@ test.describe('Renderer App', () => {
       return (window as unknown as { electronAPI?: ElectronAPI }).electronAPI?.apiPort
     })
 
-    if (!apiPort) {
-      test.skip(true, 'electronAPI.apiPort was not exposed by the preload bridge')
-      return
-    }
+    // The preload bridge is a hard requirement for the embedded-server test —
+    // fail loudly instead of silently skipping when it's missing.
+    expect(apiPort, 'electronAPI.apiPort must be exposed by the preload bridge').toBeDefined()
 
     // Hit the real health endpoint of the embedded Express server
     // (server/index.ts) and require a 200 — not just "any HTTP response".
@@ -47,7 +46,7 @@ test.describe('Renderer App', () => {
         const message = err instanceof Error ? err.message : String(err)
         return { ok: false, status: 0, bodyOk: false, error: message }
       }
-    }, apiPort)
+    }, apiPort!)
 
     expect(health.status).toBe(200)
     expect(health.ok).toBe(true)

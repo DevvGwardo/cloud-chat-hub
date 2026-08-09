@@ -124,6 +124,12 @@ const issueStateOptions: Array<{ value: IssueState; label: string }> = [
 
 const AVATAR_COLORS = ['#D97706', '#3B82F6', '#A855F7', '#EF4444', '#22C55E', '#EC4899', '#6366F1', '#14B8A6'];
 
+// Fixed pseudo-random bar heights for the activity skeleton, precomputed once
+// so they don't re-randomize on every re-render.
+const ACTIVITY_SKELETON_HEIGHTS = Array.from({ length: 30 }, () =>
+  Math.max(4, Math.round(Math.random() * 30)),
+);
+
 const sortIcons: Record<string, React.FC<{ className?: string; style?: React.CSSProperties }>> = {
   'updated:desc': Timer,
   'created:desc': ArrowDown,
@@ -751,7 +757,7 @@ export const RepoIssueBrowser: React.FC<RepoIssueBrowserProps> = ({ isOpen, onCl
                   <span className="text-[11px] font-semibold uppercase tracking-[1px]" style={{ fontFamily: V4.fontBody, color: V4.textSecondary }}>Activity</span>
                   <div className="flex h-[52px] items-end gap-[2px] rounded-xl border p-2" style={{ background: V4.bgCard, borderColor: V4.borderSubtle }}>
                     {Array.from({ length: 30 }, (_, i) => (
-                      <div key={i} className="flex-1 animate-pulse rounded-[2px]" style={{ height: Math.max(4, Math.round(Math.random() * 30)), backgroundColor: '#F59E0B18', minWidth: 3 }} />
+                      <div key={i} className="flex-1 animate-pulse rounded-[2px]" style={{ height: ACTIVITY_SKELETON_HEIGHTS[i], backgroundColor: '#F59E0B18', minWidth: 3 }} />
                     ))}
                   </div>
                 </div>

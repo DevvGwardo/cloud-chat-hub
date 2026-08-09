@@ -21,8 +21,8 @@ interface ChatPanelProps {
   panelId: string;
   conversationId: string | null;
   isFocused: boolean;
-  onFocus: () => void;
-  onClose?: () => void;  // undefined for the last remaining panel (can't close)
+  onFocus: (panelId: string) => void;
+  onClose?: (panelId: string) => void;  // undefined for the last remaining panel (can't close)
   onOpenPR?: (panelId: string, mode?: 'create' | 'review') => void;
 }
 
@@ -298,7 +298,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = React.memo(({
           'flex flex-col h-full',
           isMultiPanel && isFocused ? 'ring-1 ring-primary/40 ring-inset' : ''
         )}
-        onClick={onFocus}
+        onClick={() => onFocus(panelId)}
       >
         {backgroundConversationIds.map((backgroundConversationId) => (
           <BackgroundStandardChatRuntime
@@ -476,7 +476,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = React.memo(({
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                onClose();
+                onClose(panelId);
               }}
               className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors duration-100 shrink-0"
               title="Close panel"

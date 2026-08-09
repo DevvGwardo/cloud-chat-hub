@@ -1,4 +1,4 @@
-import { app, BrowserView, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, Notification, Tray, nativeImage, net, protocol, shell } from 'electron'
+import { app, BrowserView, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, Notification, Tray, nativeImage, net, protocol, session, shell } from 'electron'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { createHash } from 'crypto'
@@ -300,6 +300,49 @@ function startEmbeddedServerOnce(): Promise<number> {
   return embeddedServerPromise
 }
 
+// Content Security Policy — injected via response headers on the shared
+// (default) session. Registered exactly once in app.whenReady: createWindow()
+// can run more than once on macOS (activate), and a registration inside it
+// would stack a duplicate onHeadersReceived listener per window. The
+// webContentsId checks below scope the injection to the current main window.
+function registerCspHeaders() {
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    // Skip CSP injection for BrowserView (mini browser) — it needs full web access for sites like YouTube
+    if (miniBrowserView && details.webContentsId === miniBrowserView.webContents.id) {
+      callback({ responseHeaders: details.responseHeaders })
+      return
+    }
+    // Also skip for any non-main-window webContents (safety net)
+    if (!mainWindow || details.webContentsId !== mainWindow.webContents.id) {
+      callback({ responseHeaders: details.responseHeaders })
+      return
+    }
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [
+          "default-src 'self';" +
+          // Hash of the inline FOUC-prevention theme script in index.html.
+          // If that script changes, regenerate this hash from the CSP console error.
+          // Dev (electron-vite) injects an inline React-refresh preamble and uses
+          // eval for HMR, so script-src is relaxed in dev only — production keeps
+          // the strict hash-based policy.
+          (is.dev
+            ? " script-src 'self' 'unsafe-inline' 'unsafe-eval';"
+            : " script-src 'self' 'sha256-0vw5FNYeotOv1pKtYDJoVY1QPOJ7d3jJvy4jR5P0U2Q=';") +
+          " style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;" +
+          " font-src 'self' https://fonts.gstatic.com data:;" +
+          // blob: allows local object-URL previews (pasted image thumbnails)
+          " img-src 'self' data: blob: https: http: file: cloudchat-asset:;" +
+          " media-src 'self' blob:;" +
+          " connect-src 'self' data: http://localhost:* " + (is.dev ? "ws://localhost:* " : "") + "https://api.github.com https://api.anthropic.com https://api.openai.com https://api.deepseek.com https://generativelanguage.googleapis.com https://api.minimax.chat https://api.moonshot.cn https://api.x.ai https://openrouter.ai https://api.together.xyz https://api.groq.com https://api.mistral.ai https://api.perplexity.ai;" +
+          " worker-src 'self' blob:;"
+        ]
+      }
+    })
+  })
+}
+
 async function createWindow() {
   process.env.CLOUDCHAT_USER_DATA_DIR = app.getPath('userData')
   process.env.CLOUDCHAT_IMAGE_SNAPSHOT_DIR = getSnapshotDir()
@@ -370,42 +413,9 @@ async function createWindow() {
     }
   )
 
-  // Content Security Policy — only apply to the main window, not the BrowserView
-  mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
-    // Skip CSP injection for BrowserView (mini browser) — it needs full web access for sites like YouTube
-    if (miniBrowserView && details.webContentsId === miniBrowserView.webContents.id) {
-      callback({ responseHeaders: details.responseHeaders })
-      return
-    }
-    // Also skip for any non-main-window webContents (safety net)
-    if (!mainWindow || details.webContentsId !== mainWindow.webContents.id) {
-      callback({ responseHeaders: details.responseHeaders })
-      return
-    }
-    callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        'Content-Security-Policy': [
-          "default-src 'self';" +
-          // Hash of the inline FOUC-prevention theme script in index.html.
-          // If that script changes, regenerate this hash from the CSP console error.
-          // Dev (electron-vite) injects an inline React-refresh preamble and uses
-          // eval for HMR, so script-src is relaxed in dev only — production keeps
-          // the strict hash-based policy.
-          (is.dev
-            ? " script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net;"
-            : " script-src 'self' https://cdn.jsdelivr.net 'sha256-0vw5FNYeotOv1pKtYDJoVY1QPOJ7d3jJvy4jR5P0U2Q=';") +
-          " style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net;" +
-          " font-src 'self' https://fonts.gstatic.com data:;" +
-          // blob: allows local object-URL previews (pasted image thumbnails)
-          " img-src 'self' data: blob: https: http: file: cloudchat-asset:;" +
-          " media-src 'self' blob:;" +
-          " connect-src 'self' data: http://localhost:* " + (is.dev ? "ws://localhost:* " : "") + "https://api.github.com https://api.anthropic.com https://api.openai.com https://api.deepseek.com https://generativelanguage.googleapis.com https://api.minimax.chat https://api.moonshot.cn https://api.x.ai https://openrouter.ai https://api.together.xyz https://api.groq.com https://api.mistral.ai https://api.perplexity.ai https://cdn.jsdelivr.net;" +
-          " worker-src 'self' blob:;"
-        ]
-      }
-    })
-  })
+  // Content Security Policy is registered once for the whole process in
+  // registerCspHeaders() (called from app.whenReady) — it scopes itself to
+  // the main window via webContentsId checks, so nothing per-window is needed.
 
   // Open external links (e.g. "View on GitHub") in the system browser.
   // window.open() with any non-http(s) URL (data:, javascript:, about:, …) is
@@ -456,6 +466,14 @@ async function createWindow() {
 
   mainWindow.on('closed', () => {
     mainWindow = null
+    // The mini BrowserView is attached to this window's webContents — destroy
+    // it with the window so a recreated window never inherits a dead view
+    // (or its listeners), and browser:create starts fresh.
+    if (miniBrowserView) {
+      miniBrowserView.webContents.close()
+      miniBrowserView = null
+      lastMiniBrowserBounds = null
+    }
   })
 
   mainWindow.on('focus', () => {
@@ -515,7 +533,14 @@ function clearAttentionRequest() {
   dockBounceId = null
 }
 
-function focusMainWindow() {
+async function focusMainWindow() {
+  if (!mainWindow) {
+    // On macOS the app stays alive after the window closes (window-all-closed
+    // keeps running), so tray "Show Spark" / "New Chat" and the global
+    // shortcut must recreate the window instead of silently no-oping.
+    await createWindow()
+  }
+
   if (!mainWindow) {
     return
   }
@@ -726,12 +751,20 @@ ipcMain.handle('browser:create', (event, url?: string) => {
 
   // Reuse existing view — navigate instead of destroy/recreate
   if (miniBrowserView) {
-    if (initialUrl !== 'about:blank') {
-      void miniBrowserView.webContents.loadURL(initialUrl).catch((err) => {
-  console.warn('[mini-browser] loadURL failed:', err)
-})
+    // The window may have been closed and recreated (macOS); the closed
+    // handler destroys the view, but guard anyway so a stale reference can
+    // never be silently re-attached to a new window.
+    if (miniBrowserView.webContents.isDestroyed()) {
+      miniBrowserView = null
+      lastMiniBrowserBounds = null
+    } else {
+      if (initialUrl !== 'about:blank') {
+        void miniBrowserView.webContents.loadURL(initialUrl).catch((err) => {
+          console.warn('[mini-browser] loadURL failed:', err)
+        })
+      }
+      return true
     }
-    return true
   }
 
   miniBrowserView = new BrowserView({
@@ -873,6 +906,13 @@ ipcMain.handle('terminal:spawn', async (event, options?: { cwd?: string; command
   const shellPath = process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/zsh'
   const cwd = options?.cwd || app.getPath('home')
 
+  // The per-launch bridge token (electron/bridge.ts) is internal to Electron's
+  // bridge manager — strip it (and nothing else) so it never leaks into user
+  // terminals. PATH/HOME and any user API keys the shell legitimately needs
+  // stay intact.
+  const terminalEnv = { ...process.env } as Record<string, string>
+  delete terminalEnv.HERMES_BRIDGE_TOKEN
+
   let term: import('node-pty').IPty
   if (options?.command) {
     // Spawn a shell with a specific command (e.g. hermes bridge)
@@ -881,7 +921,7 @@ ipcMain.handle('terminal:spawn', async (event, options?: { cwd?: string; command
       cols: 80,
       rows: 24,
       cwd,
-      env: { ...process.env } as Record<string, string>,
+      env: terminalEnv,
     })
   } else {
     // Default: interactive shell
@@ -890,7 +930,7 @@ ipcMain.handle('terminal:spawn', async (event, options?: { cwd?: string; command
       cols: 80,
       rows: 24,
       cwd,
-      env: { ...process.env } as Record<string, string>,
+      env: terminalEnv,
     })
   }
 
@@ -990,6 +1030,9 @@ app.setAboutPanelOptions({
 app.whenReady().then(async () => {
   registerLocalAssetProtocol()
   applyAppIcon()
+  // Register the CSP header injection once — createWindow() can run multiple
+  // times on macOS, and a per-window registration would stack listeners.
+  registerCspHeaders()
 
   // Create the window first so the UI paints immediately — startBridge() can
   // block for up to 30s waiting for the bridge to become healthy.

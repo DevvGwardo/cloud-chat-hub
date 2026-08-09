@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { useChatScopeId } from '@/contexts/PanelContext';
 import { useChangesetStore, type FileChange } from '@/stores/changeset-store';
 import type { ToolActivityEvent } from './AgentActivity';
+import { parseToolActivityInput } from '@/lib/tool-activity';
 import { Terminal, FileCode, GitBranch, Search, Pencil, Brain, FileText } from 'lucide-react';
 
 type Activity = 'thinking' | 'reading' | 'editing' | 'planning' | 'writing';
@@ -30,17 +31,6 @@ interface ActivityIndicatorProps {
   }>;
   toolActivity?: ToolActivityEvent[];
   statusLabel?: string;
-}
-
-function parseToolActivityInput(input: string): Record<string, unknown> {
-  const trimmed = input.trim();
-  if (!trimmed) return {};
-  try {
-    const parsed = JSON.parse(trimmed);
-    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
 }
 
 function deriveActivity(messages: ActivityIndicatorProps['messages'], toolActivity?: ToolActivityEvent[]): Activity {

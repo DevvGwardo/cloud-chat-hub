@@ -16,7 +16,7 @@ export function setupAutoUpdater(mainWindow: BrowserWindow) {
     autoUpdater.setFeedURL({
       provider: 'github',
       owner: 'DevvGwardo',
-      repo: 'cloud-chat-hub',
+      repo: 'spark',
       private: true,
       token: updateToken,
     })
@@ -36,7 +36,10 @@ export function setupAutoUpdater(mainWindow: BrowserWindow) {
       // Renderer not ready or function missing — assume no streams
     }
 
-    const result = await dialog.showMessageBox(mainWindow, {
+    // The main window may already be gone (macOS keeps the app alive after
+    // close, and updates can land while the window is closed) — fall back to
+    // an unparented dialog instead of throwing on a destroyed window.
+    const dialogOptions: Electron.MessageBoxOptions = {
       type: 'info',
       title: 'Update Ready',
       message: `Version ${info.version} has been downloaded.`,
@@ -45,7 +48,10 @@ export function setupAutoUpdater(mainWindow: BrowserWindow) {
         : 'Restart CloudChat to install the update.',
       buttons: hasStreams ? ['Restart Anyway', 'Later'] : ['Restart Now', 'Later'],
       defaultId: 0,
-    })
+    }
+    const result = mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showMessageBox(mainWindow, dialogOptions)
+      : await dialog.showMessageBox(dialogOptions)
 
     if (result.response === 0) {
       autoUpdater.quitAndInstall()

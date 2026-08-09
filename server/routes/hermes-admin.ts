@@ -38,7 +38,11 @@ const DESTRUCTIVE_HERMES_OPS = new Set([
 ]);
 
 function requireLocalHermesMutation(req: Request, res: Response, next: NextFunction): void {
-  const key = `${req.method.toUpperCase()} ${req.path}`;
+  // Express 4 has strict routing off, so `POST /api/hermes/kanban/swarm/`
+  // (trailing slash) matches the route but yields a req.path with the slash,
+  // which would bypass the exact-match set below. Normalize before lookup.
+  const normalizedPath = req.path.length > 1 ? req.path.replace(/\/+$/, '') : req.path;
+  const key = `${req.method.toUpperCase()} ${normalizedPath}`;
   if (!DESTRUCTIVE_HERMES_OPS.has(key)) {
     next();
     return;
