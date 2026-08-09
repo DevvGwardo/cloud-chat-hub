@@ -1,11 +1,16 @@
 
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, configure, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RepoIssueBrowser } from '@/components/github/RepoIssueBrowser';
 import { useChangesetStore } from '@/stores/changeset-store';
 import { usePanelStore } from '@/stores/panel-store';
 import { useSettingsStore } from '@/stores/settings-store';
 import { useUIStore } from '@/stores/ui-store';
+
+// The issues/PRs lists are fetched through mocked network hops; under CI load
+// the default 1s asyncUtilTimeout made findBy*/waitFor flake (observed:
+// "creates a new issue from the browser composer" timing out on main CI).
+configure({ asyncUtilTimeout: 5000 });
 
 const baseSettingsState = useSettingsStore.getState();
 const basePanelState = usePanelStore.getState();
