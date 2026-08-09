@@ -10,12 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Drive the real `hermes-agent` via the ACP transport; works on both supported ACP SDK versions and follows the hermes-desktop session model
 - Expose CLI custom `base_url` providers without requiring an empty OpenRouter pin
+- Hermes repo mode now auto-provisions a managed local checkout and always works on it when one is attached (hermes-desktop parity), keeping terminal/files build tools instead of GitHub-API-only tools
 
 ### Changed
 - Relicensed from PolyForm Shield to MIT
+- CI now runs the hermes-bridge Python test suite (327 tests) against a committed fake-agent fixture; previously only the JS suite and config-sync check ran
 
 ### Fixed
 - CI runs the Release workflow on Node 22 so Windows `better-sqlite3` prebuilds resolve
+- Cloudflared quick-tunnel auth bypass: requests with the public tunnel host in `X-Forwarded-Host` (Host rewritten to the local origin) now require the tunnel key
+- Repo verifier path escape: verification file paths that escape the workspace (`..`, absolute paths, symlink traversal) are rejected
+- Workspace context routes constrained to attached git checkouts — arbitrary filesystem roots (`root=/&file=etc/passwd` style) can no longer be read
+- Hermes repo tool registry race: overlapping repo runs serialize registration/deregistration so one run can't call another run's repo/GitHub handlers
+- hermes-bridge tests: httpx stub crash when `main` is imported fresh, process-global repo-tool registry lock leak in adapter tests, and brain-token patch targeting the wrong module namespace
 
 ## [1.0.0-beta.8] - 2026-07-20
 

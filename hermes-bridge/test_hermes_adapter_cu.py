@@ -151,6 +151,11 @@ class HermesAdapterRepoToolTests(unittest.TestCase):
                 github_repo_owner="octo",
                 github_repo_name="repo",
             )
+        # The adapter holds the process-global repo tool registry lock from
+        # __init__ until run_conversation's finally (or _cleanup_repo_tools).
+        # Tests that only inspect registration never run a conversation, so
+        # release the lock after each test or later repo adapters deadlock.
+        self.addCleanup(adapter._cleanup_repo_tools)
         return adapter, mock_real_agent
 
     def test_edit_tools_registered_even_without_edit_intent(self):
@@ -165,7 +170,7 @@ class HermesAdapterRepoToolTests(unittest.TestCase):
                         f"{tool_name} must be registered (edit_intent={edit_intent})",
                     )
             finally:
-                adapter._repo_provider._deregister_tools()
+                adapter._cleanup_repo_tools()
 
     def test_repo_toolset_enabled_in_agent_kwargs(self):
         import hermes_adapter as ha

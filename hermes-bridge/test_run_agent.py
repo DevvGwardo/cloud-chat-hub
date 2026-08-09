@@ -66,6 +66,15 @@ if not hasattr(httpx_stub, "Client"):
     httpx_stub.Client = _Client
 if not hasattr(httpx_stub, "TimeoutException"):
     httpx_stub.TimeoutException = TimeoutError
+# Import-time surface for third-party chains (mcp → httpx_sse) that run when
+# `main` is imported fresh (e.g. repo-mode brain memories): httpx_sse subclasses
+# httpx.TransportError at class-definition time and evaluates httpx.AsyncClient
+# in annotations. Without these, importing `main` crashed before the code under
+# test ran — previously masked in CI by import-order cache hits of `main`.
+if not hasattr(httpx_stub, "TransportError"):
+    httpx_stub.TransportError = _HTTPError
+if not hasattr(httpx_stub, "AsyncClient"):
+    httpx_stub.AsyncClient = _Client
 
 import run_agent
 from run_agent import AIAgent
@@ -1564,7 +1573,7 @@ class BrainMCPPooledCachingTests(unittest.TestCase):
     def test_hermes_adapter_brain_http_call_returns_none_on_failure(self):
         """_brain_http_call should return None when the HTTP call fails."""
         import hermes_adapter as ha
-        with patch.object(ha, '_get_brain_token', return_value="fake-token"):
+        with patch('brain_cache._get_brain_token', return_value="fake-token"):
             with patch('hermes_adapter.httpx.Client') as mock_client_class:
                 mock_client = MagicMock()
                 mock_client_class.return_value = mock_client
@@ -1577,7 +1586,7 @@ class BrainMCPPooledCachingTests(unittest.TestCase):
     def test_hermes_adapter_brain_http_call_returns_none_for_non_200(self):
         """_brain_http_call should return None when the response is not 200/201."""
         import hermes_adapter as ha
-        with patch.object(ha, '_get_brain_token', return_value="fake-token"):
+        with patch('brain_cache._get_brain_token', return_value="fake-token"):
             with patch('hermes_adapter.httpx.Client') as mock_client_class:
                 mock_response = MagicMock()
                 mock_response.status_code = 404
@@ -1592,7 +1601,7 @@ class BrainMCPPooledCachingTests(unittest.TestCase):
     def test_hermes_adapter_brain_http_call_success(self):
         """_brain_http_call should return parsed JSON on success."""
         import hermes_adapter as ha
-        with patch.object(ha, '_get_brain_token', return_value="fake-token"):
+        with patch('brain_cache._get_brain_token', return_value="fake-token"):
             with patch('hermes_adapter.httpx.Client') as mock_client_class:
                 mock_response = MagicMock()
                 mock_response.status_code = 200
@@ -1609,7 +1618,7 @@ class BrainMCPPooledCachingTests(unittest.TestCase):
     def test_hermes_adapter_brain_http_call_post_success(self):
         """_brain_http_call should handle POST requests correctly."""
         import hermes_adapter as ha
-        with patch.object(ha, '_get_brain_token', return_value="fake-token"):
+        with patch('brain_cache._get_brain_token', return_value="fake-token"):
             with patch('hermes_adapter.httpx.Client') as mock_client_class:
                 mock_response = MagicMock()
                 mock_response.status_code = 201

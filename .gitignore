@@ -105,5 +105,9 @@ hermes-bridge/data/*.json
 # Runtime team orchestration state
 data/teams-store.json
 
+# Runtime agent databases (legacy tracked copies removed; regenerated locally)
+data/*.sqlite3
+data/*.sqlite3-*
+
 # Local promo/video renders
 videos/

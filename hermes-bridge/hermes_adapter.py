@@ -1010,7 +1010,13 @@ class RepoToolProvider:
         memory store for repo-specific and global memories. Falls back to _brain_safe_get
         (HTTP-based) if the async call isn't available.
         """
-        import main as _main_mod
+        try:
+            import main as _main_mod
+        except Exception:
+            # main.py pulls in agent-tree modules (cron, skills_hub, mcp) that
+            # may be missing in standalone/test contexts. Brain memories are
+            # optional context — degrade to the HTTP brain-cache fallback.
+            _main_mod = None
         memories = []
 
         # Try brain_recall (proper brain MCP memory search) first

@@ -104,8 +104,27 @@ class CleanupTests(unittest.TestCase):
 
 
 class RunAgentWorktreeModeTests(unittest.TestCase):
+    def _local_run_agent(self):
+        """Load the repo's own run_agent.py by path.
+
+        Full-suite discovery imports hermes_adapter first, which puts the real
+        hermes-agent dir at sys.path[0] and caches its run_agent module — a
+        plain ``from run_agent import ...`` would bind that module, which has
+        no REPO_MODE_BLOCKED_TOOLSETS / worktree_mode support.
+        """
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "spark_run_agent_local",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_agent.py"),
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
     def test_repo_mode_blocks_local_toolsets_without_worktree(self):
-        from run_agent import AIAgent, REPO_MODE_BLOCKED_TOOLSETS
+        run_agent = self._local_run_agent()
+        AIAgent, REPO_MODE_BLOCKED_TOOLSETS = run_agent.AIAgent, run_agent.REPO_MODE_BLOCKED_TOOLSETS
 
         agent = AIAgent(
             base_url="http://localhost",
@@ -119,7 +138,8 @@ class RunAgentWorktreeModeTests(unittest.TestCase):
             self.assertNotIn(toolset, agent.enabled_toolsets)
 
     def test_worktree_mode_keeps_local_toolsets(self):
-        from run_agent import AIAgent
+        run_agent = self._local_run_agent()
+        AIAgent = run_agent.AIAgent
 
         agent = AIAgent(
             base_url="http://localhost",

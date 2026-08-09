@@ -67,3 +67,23 @@ jobs:
             echo "::error::Generated agent configs are out of sync. Run 'hatch gen -no-hatch-skill' and commit the result."
             exit 1
           }
+
+  hermes-bridge-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install bridge dependencies
+        run: pip install -r hermes-bridge/requirements.txt
+
+      - name: Provision fake hermes-agent fixture
+        run: python3 hermes-bridge/ci/fixture_agent.py
+
+      - name: Run hermes-bridge tests
+        run: |
+          cd hermes-bridge
+          python3 -m unittest discover -p "test_*.py"
