@@ -22,7 +22,6 @@ interface UIState {
   terminalOpen: boolean;
   terminalHeight: number;
   hermesTerminalOpen: boolean;
-  hermesTerminalHeight: number;
   activeTab: AppTab;
   activeSubTab: SubTab;
   miniBrowserOpen: boolean;
@@ -46,9 +45,7 @@ interface UIState {
   setTerminalOpen: (v: boolean) => void;
   toggleTerminal: () => void;
   setTerminalHeight: (h: number) => void;
-  setHermesTerminalOpen: (v: boolean) => void;
   toggleHermesTerminal: () => void;
-  setHermesTerminalHeight: (h: number) => void;
   setMiniBrowserOpen: (v: boolean) => void;
   setMiniBrowserUrl: (url: string) => void;
   setMiniBrowserDocked: (v: boolean) => void;
@@ -87,7 +84,6 @@ export const useUIStore = create<UIState>()(
       terminalOpen: false,
       terminalHeight: 300,
       hermesTerminalOpen: false,
-      hermesTerminalHeight: 300,
       activeTab: 'chat',
       activeSubTab: 'threads',
       miniBrowserOpen: false,
@@ -110,9 +106,7 @@ export const useUIStore = create<UIState>()(
       setTerminalOpen: (v) => set({ terminalOpen: v }),
       toggleTerminal: () => set((s) => ({ terminalOpen: !s.terminalOpen })),
       setTerminalHeight: (h) => set({ terminalHeight: Math.max(150, Math.min(600, h)) }),
-      setHermesTerminalOpen: (v) => set({ hermesTerminalOpen: v }),
       toggleHermesTerminal: () => set((s) => ({ hermesTerminalOpen: !s.hermesTerminalOpen })),
-      setHermesTerminalHeight: (h) => set({ hermesTerminalHeight: Math.max(150, Math.min(600, h)) }),
 
       setMiniBrowserOpen: (v) => set({ miniBrowserOpen: v }),
       setMiniBrowserUrl: (url) => set({ miniBrowserUrl: url }),
@@ -172,7 +166,6 @@ export const useUIStore = create<UIState>()(
         sidebarWidth: state.sidebarWidth,
         terminalHeight: state.terminalHeight,
         hermesTerminalOpen: state.hermesTerminalOpen,
-        hermesTerminalHeight: state.hermesTerminalHeight,
         hermesSessionViewMode: state.hermesSessionViewMode,
         tourSeen: state.tourSeen,
       }),

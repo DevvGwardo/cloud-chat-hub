@@ -1,6 +1,6 @@
 // @vitest-environment node
 import type { AddressInfo } from 'net';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   __resetHermesStreamBuffersForTests,
   appendHermesStreamEvent,
@@ -117,6 +117,46 @@ describe('Hermes SSE resume buffer', () => {
       const events = parseSseEventBlocks(await response.text());
       expect(events.map((e) => e.data)).toEqual(['a', 'b']);
     } finally {
+      await server.close();
+    }
+  });
+
+  it('evicts streams that are never finished after the idle TTL', () => {
+    vi.useFakeTimers();
+    try {
+      const entry = createHermesStreamBuffer();
+      expect(appendHermesStreamEvent(entry.id, { data: 'first' })).not.toBeNull();
+
+      // A never-finished stream (client minted a streamId and vanished) must
+      // be evicted so the map can't grow without bound.
+      vi.advanceTimersByTime(5 * 60 * 1000);
+
+      expect(appendHermesStreamEvent(entry.id, { data: 'second' })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      __resetHermesStreamBuffersForTests();
+    }
+  });
+
+  it('finishHermesStream swaps the idle timer for the post-done TTL', async () => {
+    vi.useFakeTimers();
+    const server = await createTestServer();
+    try {
+      const entry = createHermesStreamBuffer();
+      appendHermesStreamEvent(entry.id, { data: 'a' });
+      finishHermesStream(entry.id);
+
+      // 30s in: an idle eviction (5 min) would not have fired yet, and the
+      // finished buffer must still be replayable within its post-done TTL.
+      vi.advanceTimersByTime(30_000);
+
+      const response = await fetch(`${server.url}/api/hermes/chat/stream?id=${entry.id}`);
+      expect(response.status).toBe(200);
+      const events = parseSseEventBlocks(await response.text());
+      expect(events.map((e) => e.data)).toEqual(['a']);
+    } finally {
+      vi.useRealTimers();
+      __resetHermesStreamBuffersForTests();
       await server.close();
     }
   });

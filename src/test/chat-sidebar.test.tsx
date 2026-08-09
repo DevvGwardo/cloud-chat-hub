@@ -17,7 +17,6 @@ describe('ChatSidebar', () => {
       ...state,
       conversations: [],
       activeConversationId: null,
-      searchQuery: '',
       loadConversations: vi.fn().mockResolvedValue(undefined),
     }));
     useUIStore.setState((state) => ({

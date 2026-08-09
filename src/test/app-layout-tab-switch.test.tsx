@@ -43,10 +43,6 @@ vi.mock('@/components/github', () => ({
   GitHubAnalyzer: () => <div data-testid="github-analyzer" />,
 }));
 
-vi.mock('@/components/settings/KnowledgePanel', () => ({
-  KnowledgePanel: () => <div data-testid="knowledge-panel" />,
-}));
-
 vi.mock('@/components/github/CreatePRModal', () => ({
   CreatePRModal: () => null,
 }));
@@ -105,7 +101,6 @@ describe('AppLayout tab switching', () => {
     useChatStore.setState({
       conversations: [],
       activeConversationId: null,
-      searchQuery: '',
       loadConversations: async () => {},
     });
 

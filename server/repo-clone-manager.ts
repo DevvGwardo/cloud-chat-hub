@@ -32,6 +32,12 @@ const MANAGED_REPOS_ROOT = join(homedir(), '.cloudchat', 'repos')
 const CLONE_TIMEOUT_MS = 120_000
 const VALID_NAME_RE = /^[a-zA-Z0-9._-]+$/
 
+// In-flight clones keyed by repo dir, so two concurrent requests for the same
+// repo share one clone instead of racing (both seeing `exists === false` and
+// cloning into the same directory; ensureRepoDirectory may rm an in-flight
+// clone). Entries are removed when the clone settles.
+const inFlightClones = new Map<string, Promise<ManagedRepoClone>>()
+
 function validateRepoName(owner: string, repo: string): void {
   if (!VALID_NAME_RE.test(owner)) {
     throw new Error(`Invalid repository owner name: owner must match ${VALID_NAME_RE}`)
@@ -121,31 +127,54 @@ export async function getManagedRepoClone(owner: string, repo: string): Promise<
 export async function ensureRepoClone({ owner, repo, pat, branch }: EnsureRepoCloneInput): Promise<ManagedRepoClone> {
   validateRepoName(owner, repo)
 
+  const repoDir = getRepoDir(owner, repo)
+
+  // Check for an in-flight clone before the first await so concurrent callers
+  // can't both pass the filesystem check below (TOCTOU).
+  const alreadyRunning = inFlightClones.get(repoDir)
+  if (alreadyRunning) {
+    return alreadyRunning
+  }
+
   const existing = await getManagedRepoClone(owner, repo)
   if (existing.exists) {
     return existing
   }
 
-  const repoDir = await ensureRepoDirectory(owner, repo)
-  const cloneUrl = `https://github.com/${owner}/${repo}.git`
-  const authHeader = `Authorization: Basic ${Buffer.from(`x-access-token:${pat}`).toString('base64')}`
-  const cloneArgs = ['clone', '--depth', '1']
-  if (branch) {
-    cloneArgs.push('--branch', branch)
-  }
-  cloneArgs.push(cloneUrl, repoDir)
-
-  // Pass auth via environment variables to keep the PAT out of process args.
-  const gitEnv: NodeJS.ProcessEnv = {
-    ...process.env,
-    GIT_CONFIG_COUNT: '1',
-    GIT_CONFIG_KEY_0: 'http.extraHeader',
-    GIT_CONFIG_VALUE_0: authHeader,
+  // Re-check after the await — another request may have started cloning while
+  // we were stat'ing the directory.
+  const racing = inFlightClones.get(repoDir)
+  if (racing) {
+    return racing
   }
 
-  await runGit(cloneArgs, undefined, gitEnv)
+  const clone = (async (): Promise<ManagedRepoClone> => {
+    const dir = await ensureRepoDirectory(owner, repo)
+    const cloneUrl = `https://github.com/${owner}/${repo}.git`
+    const authHeader = `Authorization: Basic ${Buffer.from(`x-access-token:${pat}`).toString('base64')}`
+    const cloneArgs = ['clone', '--depth', '1']
+    if (branch) {
+      cloneArgs.push('--branch', branch)
+    }
+    cloneArgs.push(cloneUrl, dir)
 
-  return { exists: true, path: repoDir }
+    // Pass auth via environment variables to keep the PAT out of process args.
+    const gitEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'http.extraHeader',
+      GIT_CONFIG_VALUE_0: authHeader,
+    }
+
+    await runGit(cloneArgs, undefined, gitEnv)
+
+    return { exists: true, path: dir }
+  })().finally(() => {
+    inFlightClones.delete(repoDir)
+  })
+
+  inFlightClones.set(repoDir, clone)
+  return clone
 }
 
 export async function forkRepository({ owner, repo, pat, branch }: ForkRepositoryInput): Promise<ForkRepositoryResult> {

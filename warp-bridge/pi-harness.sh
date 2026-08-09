@@ -95,12 +95,13 @@ pi_build_cmd() {
     prompt_file=$(mktemp /tmp/oz_prompt_XXXXXX.txt)
     echo "$prompt" > "$prompt_file"
 
-    # Source the minimax env and build the command
-    # Following the proven pi pattern from memory
+    # Build the command against the zen provider config that pi_prepare_env
+    # wrote to ~/.config/pi/providers.yaml (free models) — the previous
+    # minimax provider/model pair and /tmp/minimax_env.sh source matched
+    # nothing this repo creates.
     local cmd
-    cmd="source /tmp/minimax_env.sh 2>/dev/null; "
-    cmd+="cd '$working_dir' && "
-    cmd+="pi --provider minimax --model MiniMax-M2.7 "
+    cmd="cd '$working_dir' && "
+    cmd+="pi --provider zen --model minimax-m2.5-free "
     cmd+="--session-id '$session_id' "
     cmd+="< '$prompt_file'"
 
@@ -119,7 +120,7 @@ pi_run() {
 
     pi_validate || return 1
     pi_prepare_env "$working_dir" "$system_prompt"
-    init_bridge "$session_id"
+    bridge_init ""
 
     local cmd
     cmd=$(pi_build_cmd "$prompt" "$session_id" "$working_dir")

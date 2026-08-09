@@ -38,7 +38,6 @@ describe('ChatSidebar tags', () => {
       conversations: [prod, scratch],
       archivedConversations: [],
       activeConversationId: null,
-      searchQuery: '',
       loadConversations: vi.fn().mockResolvedValue(undefined),
     }));
     useUIStore.setState((state) => ({

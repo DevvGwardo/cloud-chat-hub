@@ -37,7 +37,6 @@ describe('ChatSidebar archive group', () => {
       conversations: [active],
       archivedConversations: [archived],
       activeConversationId: null,
-      searchQuery: '',
       loadConversations: vi.fn().mockResolvedValue(undefined),
     }));
     useUIStore.setState((state) => ({

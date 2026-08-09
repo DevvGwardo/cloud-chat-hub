@@ -11,6 +11,7 @@ import { cn } from '@/lib/utils';
 import { AgentActivity, type ToolActivityEvent } from './AgentActivity';
 import { extractPseudoToolInvocations, extractTextFileEdits, getPseudoToolSourceText, stripPseudoToolInvocations } from '@/lib/pseudo-tool-calls';
 import { getLocalImageTarget } from '@/lib/local-images';
+import { getToolInvocationKey, parseToolActivityInput } from '@/lib/tool-activity';
 import '@shoelace-style/shoelace/dist/components/details/details.js';
 
 /**
@@ -162,21 +163,7 @@ interface MessageBubbleProps {
   allowPseudoRepoWrites?: boolean;
   onRegenerate?: () => void;
   onEdit?: (content: string) => void;
-  onRewind?: () => void;
-}
-
-function parseToolActivityArgs(input: string): Record<string, unknown> {
-  const trimmed = input.trim();
-  if (!trimmed) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(trimmed);
-    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : { input: trimmed };
-  } catch {
-    return { input: trimmed };
-  }
+  onRewind?: (messageId: string) => void;
 }
 
 function stripHermesActivityText(content: string): string {
@@ -378,26 +365,6 @@ const TOOL_STATE_PRIORITY: Record<ToolInvocation['state'], number> = {
   call: 1,
   result: 2,
 };
-
-function getToolInvocationKey(invocation: ToolInvocation, fallbackIndex: number): string {
-  if (invocation.toolCallId) {
-    return invocation.toolCallId;
-  }
-
-  const path = typeof invocation.args?.path === 'string' ? invocation.args.path : '';
-  const filename = typeof invocation.args?.filename === 'string' ? invocation.args.filename : '';
-  const batchPaths = Array.isArray(invocation.args?.changes)
-    ? invocation.args.changes
-        .map((change) =>
-          change && typeof change === 'object'
-            ? `${typeof change.action === 'string' ? change.action : ''}:${typeof change.path === 'string' ? change.path : ''}`
-            : '',
-        )
-        .join('|')
-    : '';
-
-  return `${invocation.toolName}:${path}:${filename}:${batchPaths || fallbackIndex}`;
-}
 
 function mergeToolInvocations(current: ToolInvocation, incoming: ToolInvocation): ToolInvocation {
   const currentPriority = TOOL_STATE_PRIORITY[current.state] ?? 0;
@@ -1275,7 +1242,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
     return toolActivity.map((event, index) => ({
       toolCallId: `activity-${message.id}-${index}`,
       toolName: event.tool,
-      args: parseToolActivityArgs(event.input),
+      args: parseToolActivityInput(event.input),
       state: event.status === 'completed' ? 'result' as const : 'call' as const,
       ...(event.status === 'completed'
         ? {
@@ -1624,7 +1591,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
             )}
             {!isUser && onRewind && (
               <button
-                onClick={onRewind}
+                onClick={() => onRewind(message.id)}
                 className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors duration-100"
                 title="Rewind to here"
                 aria-label="Rewind to here"

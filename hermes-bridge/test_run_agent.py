@@ -38,6 +38,17 @@ class _Response:
         return None
 
 
+class _Timeout:
+    # hermes_runs.py instantiates httpx.Timeout(connect=..., read=...) at
+    # import time; without this class collection order can crash (see
+    # test_main.py's stub for the same shape).
+    def __init__(self, *args, **kwargs):
+        self.connect = kwargs.get("connect")
+        self.read = kwargs.get("read")
+        self.write = kwargs.get("write")
+        self.pool = kwargs.get("pool")
+
+
 class _Client:
     def __init__(self, *args, **kwargs):
         pass
@@ -66,6 +77,8 @@ if not hasattr(httpx_stub, "Client"):
     httpx_stub.Client = _Client
 if not hasattr(httpx_stub, "TimeoutException"):
     httpx_stub.TimeoutException = TimeoutError
+if not hasattr(httpx_stub, "Timeout"):
+    httpx_stub.Timeout = _Timeout
 # Import-time surface for third-party chains (mcp → httpx_sse) that run when
 # `main` is imported fresh (e.g. repo-mode brain memories): httpx_sse subclasses
 # httpx.TransportError at class-definition time and evaluates httpx.AsyncClient

@@ -714,6 +714,26 @@ Provide a concise summary of what was accomplished.`;
 
   /** Remove a team from the store (cleanup). */
   removeTeam(teamId: string): boolean {
+    // Kill any still-running children and clear this team's timeout so no late
+    // completion signal re-persists a removed team.
+    const team = teams.get(teamId);
+    for (const subtask of team?.subtasks ?? []) {
+      const child = activeChildren.get(subtask.id);
+      if (child) {
+        try {
+          child.kill();
+        } catch {
+          // process already exited
+        }
+        activeChildren.delete(subtask.id);
+      }
+    }
+    const timeout = teamTimeouts.get(teamId);
+    if (timeout) {
+      clearTimeout(timeout);
+      teamTimeouts.delete(teamId);
+    }
+
     const ok = teams.delete(teamId);
     if (ok) persistTeams();
     return ok;
@@ -849,14 +869,36 @@ async function spawnTeamAgent(
   // Track the child process for cleanup on shutdown
   activeChildren.set(subtaskId, child);
 
+  // Cap buffered agent stderr (head/tail window) so a chatty agent can't
+  // accumulate unbounded strings in memory (mirrors appendCappedLog in
+  // task-orchestrator.ts).
+  const MAX_AGENT_LOG_BYTES = 64 * 1024;
+  function appendCappedLog(current: string, chunk: string, maxBytes: number): string {
+    if (current.length >= maxBytes) {
+      return current.slice(-(maxBytes / 2)) + chunk;
+    }
+    const next = current + chunk;
+    if (next.length <= maxBytes) return next;
+    const head = Math.floor(maxBytes / 2);
+    const tail = maxBytes - head - 64;
+    return `${next.slice(0, head)}\n...[truncated ${next.length - maxBytes} bytes]...\n${next.slice(-tail)}`;
+  }
+
   let stderr = '';
   child.stderr.on('data', (data: Buffer) => {
-    stderr += data.toString();
+    stderr = appendCappedLog(stderr, data.toString(), MAX_AGENT_LOG_BYTES);
   });
+
+  // Subtasks whose spawn failed (missing python, etc.). Node emits 'error'
+  // followed by 'close', and both handlers would otherwise try to transition
+  // the subtask — track so the 'close' handler doesn't overwrite the spawn
+  // failure with a bogus "exited with code null".
+  const spawnFailures = new Set<string>();
 
   child.on('close', (code: number | null) => {
     activeChildren.delete(subtaskId);
-    if (code !== 0) {
+    const wasSpawnFailure = spawnFailures.delete(subtaskId);
+    if (code !== 0 && !wasSpawnFailure) {
       const msg = `Agent process exited with code ${code}: ${stderr.slice(0, 200)}`;
       logger.error(`[team-coordinator] Team agent for ${agent.displayName} exited with code ${code}`);
       // Update team state machine: mark subtask as blocked on crash
@@ -866,7 +908,12 @@ async function spawnTeamAgent(
 
   child.on('error', (err: Error) => {
     activeChildren.delete(subtaskId);
+    spawnFailures.add(subtaskId);
     logger.error(`[team-coordinator] Failed to spawn team agent: ${err.message}`);
+    // 'close' never reports a failure reason — take the same blocked-transition
+    // path as a crash so the subtask and agent don't stay 'working' until the
+    // 30-minute team timeout.
+    teamCoordinator.handleBlocked(teamId, subtaskId, `Agent process failed to start: ${err.message}`).catch(() => {});
   });
 
   // Set a team-level timeout to prevent deadlock on agent crash/network loss
@@ -905,4 +952,9 @@ function _killActiveChildren(): void {
     clearTimeout(timeout);
   }
   teamTimeouts.clear();
+}
+
+/** Kill all live team-agent children and clear team timeouts (server shutdown). */
+export function shutdownTeamCoordinator(): void {
+  _killActiveChildren();
 }

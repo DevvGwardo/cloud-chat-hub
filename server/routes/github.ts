@@ -18,6 +18,11 @@ import { normalizeChatMessages } from '../message-normalization';
 
 // ─── GitHub route helper types and functions ─────────────────────────────────
 
+// Every upstream call is bounded — a hung GitHub (or AI) endpoint must not
+// hold the request (or the orchestrator tick) open indefinitely.
+const GITHUB_API_TIMEOUT_MS = 10_000;
+const GITHUB_LLM_TIMEOUT_MS = 30_000;
+
 interface FileChange {
   path: string;
   content: string;
@@ -136,7 +141,7 @@ async function fetchPullRequestStatus(
 ) {
   const prRes = await fetch(
     `https://api.github.com/repos/${owner}/${repo}/pulls/${number}`,
-    { headers },
+    { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) },
   );
 
   if (!prRes.ok) {
@@ -151,11 +156,11 @@ async function fetchPullRequestStatus(
     const [checkRunsRes, statusesRes] = await Promise.all([
       fetch(
         `https://api.github.com/repos/${owner}/${repo}/commits/${headSha}/check-runs?per_page=100`,
-        { headers },
+        { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) },
       ),
       fetch(
         `https://api.github.com/repos/${owner}/${repo}/commits/${headSha}/status`,
-        { headers },
+        { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) },
       ),
     ]);
 
@@ -220,7 +225,7 @@ async function fetchRepoContents(
   headers: Record<string, string>
 ): Promise<Array<{ path: string; type: 'dir'; children: [] } | { path: string; type: 'file'; size: number; sha: string }>> {
   const url = buildGitHubContentsUrl(owner, repo, path);
-  const response = await fetch(url, { headers });
+  const response = await fetch(url, { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) });
 
   if (!response.ok) {
     return [];
@@ -314,7 +319,7 @@ async function fetchAnalyzerRepoFiles(
 
   async function fetchContentsRecursive(path = ''): Promise<FileContent[]> {
     const url = buildGitHubContentsUrl(owner, repo, path);
-    const response = await fetch(url, { headers });
+    const response = await fetch(url, { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) });
 
     if (!response.ok) {
       throw new Error(`Failed to fetch contents: ${response.status}`);
@@ -329,6 +334,7 @@ async function fetchAnalyzerRepoFiles(
           try {
             const fileResponse = await fetch(item.download_url, {
               headers: { 'User-Agent': 'GitHub-Analyzer' },
+              signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
             });
             if (fileResponse.ok) {
               const content = await fileResponse.text();
@@ -421,6 +427,7 @@ Be specific about file names and line numbers when possible. Provide actionable 
         Authorization: `Bearer ${lovableApiKey}`,
         'Content-Type': 'application/json',
       },
+      signal: AbortSignal.timeout(GITHUB_LLM_TIMEOUT_MS),
       body: JSON.stringify({
         model: 'google/gemini-3-flash-preview',
         messages: analysisMessages,
@@ -504,7 +511,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
         let allRepos: Record<string, unknown>[] = [];
         let url: string | null = 'https://api.github.com/user/repos?sort=updated&per_page=100&affiliation=owner,collaborator,organization_member';
         while (url) {
-          const response: Response = await fetch(url, { headers });
+          const response: Response = await fetch(url, { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) });
           if (!response.ok) {
             const error = await response.text();
             return sendJson(res, response.status, { error: `GitHub API error: ${error}` });
@@ -530,7 +537,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
 
         const response = await fetch(
           `https://api.github.com/search/repositories?q=${encodeURIComponent(query.trim())}&per_page=25&page=${Number(page) || 1}`,
-          { headers },
+          { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) },
         );
         if (!response.ok) {
           const error = await response.text();
@@ -587,7 +594,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
 
         const response = await fetch(
           `https://api.github.com/search/issues?q=${encodeURIComponent(searchTerms)}&sort=${encodeURIComponent(sort)}&order=${encodeURIComponent(direction)}&per_page=25&page=${Number(page) || 1}`,
-          { headers },
+          { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) },
         );
         if (!response.ok) {
           const error = await response.text();
@@ -650,6 +657,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
           {
             method: 'POST',
             headers: { ...headers, 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
             body: JSON.stringify({
               title: title.trim(),
               ...(typeof body === 'string' && body.trim().length > 0 ? { body: body.trim() } : {}),
@@ -717,7 +725,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
 
         const response = await fetch(
           `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${Number(issueNumber)}/comments?per_page=50`,
-          { headers: { ...headers, Accept: 'application/vnd.github.squirrel-girl-preview+json' } },
+          { headers: { ...headers, Accept: 'application/vnd.github.squirrel-girl-preview+json' }, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) },
         );
         if (!response.ok) {
           const error = await response.text();
@@ -772,6 +780,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
           {
             method: 'POST',
             headers: { ...headers, 'Content-Type': 'application/json', Accept: 'application/vnd.github.squirrel-girl-preview+json' },
+            signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
             body: JSON.stringify({ content: reaction }),
           },
         );
@@ -797,6 +806,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
           {
             method: 'POST',
             headers: { ...headers, 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
             body: JSON.stringify({ body: commentBody }),
           },
         );
@@ -835,7 +845,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
         // Get the SHA of the base branch
         const refResponse = await fetch(
           `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/ref/heads/${encodeURIComponent(baseBranch)}`,
-          { headers },
+          { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) },
         );
         if (!refResponse.ok) {
           const error = await refResponse.text();
@@ -853,6 +863,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
           {
             method: 'POST',
             headers: { ...headers, 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
             body: JSON.stringify({ ref: `refs/heads/${newBranchName}`, sha }),
           },
         );
@@ -877,7 +888,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
         const q = `repo:${owner}/${repo} is:pr is:open ${issueNumber} in:body`;
         const response = await fetch(
           `https://api.github.com/search/issues?q=${encodeURIComponent(q)}&per_page=10`,
-          { headers },
+          { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) },
         );
         if (!response.ok) {
           const error = await response.text();
@@ -939,7 +950,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
 
         const response = await fetch(
           buildGitHubContentsUrl(owner, repo, path, typeof ref === 'string' && ref ? ref : undefined),
-          { headers }
+          { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) }
         );
 
         if (!response.ok) {
@@ -989,7 +1000,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
         // 1. Get the base branch's latest commit SHA
         const baseRefRes = await fetch(
           `https://api.github.com/repos/${headOwner}/${headRepo}/git/ref/heads/${baseBranch}`,
-          { headers }
+          { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) }
         );
         if (!baseRefRes.ok) {
           return sendJson(res, baseRefRes.status, {
@@ -1005,6 +1016,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
           {
             method: 'POST',
             headers: { ...headers, 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
             body: JSON.stringify({
               ref: `refs/heads/${branch}`,
               sha: baseSha,
@@ -1023,7 +1035,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
           let fileSha: string | undefined;
           const existingFileRes = await fetch(
             buildGitHubContentsUrl(headOwner, headRepo, file.path, branch),
-            { headers }
+            { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) }
           );
           if (existingFileRes.ok) {
             const existingFile = await existingFileRes.json();
@@ -1038,6 +1050,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
               {
                 method: 'DELETE',
                 headers: { ...headers, 'Content-Type': 'application/json' },
+                signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
                 body: JSON.stringify({
                   message: `Delete ${file.path}`,
                   branch,
@@ -1056,6 +1069,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
               {
                 method: 'PUT',
                 headers: { ...headers, 'Content-Type': 'application/json' },
+                signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
                 body: JSON.stringify({
                   message: `${file.action === 'create' ? 'Create' : 'Update'} ${file.path}`,
                   content: Buffer.from(file.content, 'utf-8').toString('base64'),
@@ -1079,6 +1093,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
           {
             method: 'POST',
             headers: { ...headers, 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
             body: JSON.stringify({
               title,
               body,
@@ -1286,6 +1301,7 @@ app.post('/functions/v1/github-integration', async (req, res) => {
           {
             method: 'PUT',
             headers: { ...headers, 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
             body: JSON.stringify({
               merge_method: method || 'squash',
               ...(commitTitle ? { commit_title: commitTitle } : {}),

@@ -638,13 +638,23 @@ class RepoToolProvider:
                 "User-Agent": "Hermes-Agent",
             }
             all_repos = []
+            rate_limit_retries = 0
             with httpx.Client(timeout=15) as client:
                 while url:
                     resp = client.get(url, headers=headers)
                     if resp.status_code == 401:
                         return "Error: GitHub token is invalid or expired."
                     if resp.status_code == 429:
-                        retry_after = int(resp.headers.get("Retry-After", "5"))
+                        rate_limit_retries += 1
+                        if rate_limit_retries > 3:
+                            raise RuntimeError(
+                                "GitHub API rate limited (429) after 3 retries — try again later."
+                            )
+                        raw_retry_after = resp.headers.get("Retry-After", "5")
+                        try:
+                            retry_after = min(max(int(raw_retry_after), 1), 30)
+                        except ValueError:
+                            retry_after = 5
                         time.sleep(retry_after)
                         continue
                     resp.raise_for_status()
@@ -1004,55 +1014,25 @@ class RepoToolProvider:
             return f"Error reading '{path}': {e}"
 
     def _load_brain_memories(self) -> str:
-        """Load relevant memories from brain via brain_recall for injection into system prompt.
+        """Load relevant memories from brain via the HTTP brain-cache fallback.
 
-        Uses brain_recall (via _brain_call_async RPC) to search the brain's persistent
-        memory store for repo-specific and global memories. Falls back to _brain_safe_get
-        (HTTP-based) if the async call isn't available.
+        (The previous brain_recall RPC path was dead code: it was gated on
+        ``_asyncio.get_event_loop().is_running()``, which is always False in
+        the worker threads this runs in, so ``_recall_async`` never executed.
+        The HTTP ``_brain_safe_get`` path below is the working one.)
         """
-        try:
-            import main as _main_mod
-        except Exception:
-            # main.py pulls in agent-tree modules (cron, skills_hub, mcp) that
-            # may be missing in standalone/test contexts. Brain memories are
-            # optional context — degrade to the HTTP brain-cache fallback.
-            _main_mod = None
         memories = []
-
-        # Try brain_recall (proper brain MCP memory search) first
-        try:
-            import asyncio as _asyncio
-
-            async def _recall_async():
-                if hasattr(_main_mod, "_brain_call_async"):
-                    return await _main_mod._brain_call_async("brain_recall", {"query": f"{self.owner}/{self.name}"})
-                return None
-
-            result = _asyncio.run(_recall_async()) if _asyncio.get_event_loop().is_running() else None
-            if result and isinstance(result, dict):
-                content = result.get("content") or ""
-                if isinstance(content, list):
-                    for item in content:
-                        if isinstance(item, dict) and item.get("type") == "text":
-                            memories.append(item.get("text", ""))
-                elif isinstance(content, str) and content.strip():
-                    memories.append(content.strip())
-        except Exception:
-            pass  # Fall back to _brain_safe_get
-
-        # Fallback: load known memory keys via HTTP brain cache
-        if not memories:
-            repo_prefix = f"memory:repo:{self.owner}/{self.name}:"
-            for topic in ["conventions", "gotchas", "preferences", "api-quirks"]:
-                key = f"{repo_prefix}{topic}"
-                val = _brain_safe_get(key)
-                if val:
-                    memories.append(f"- {topic}: {val}")
-            for topic in ["user-preferences", "coding-style"]:
-                key = f"memory:global:{topic}"
-                val = _brain_safe_get(key)
-                if val:
-                    memories.append(f"- {topic}: {val}")
+        repo_prefix = f"memory:repo:{self.owner}/{self.name}:"
+        for topic in ["conventions", "gotchas", "preferences", "api-quirks"]:
+            key = f"{repo_prefix}{topic}"
+            val = _brain_safe_get(key)
+            if val:
+                memories.append(f"- {topic}: {val}")
+        for topic in ["user-preferences", "coding-style"]:
+            key = f"memory:global:{topic}"
+            val = _brain_safe_get(key)
+            if val:
+                memories.append(f"- {topic}: {val}")
 
         if not memories:
             return ""
@@ -1099,8 +1079,6 @@ class RepoToolProvider:
                 f"{file_tree_section}"
                 f"{memories_section}"
             )
-
-        memories_section = self._load_brain_memories()
 
         return (
             f"You are working on the GitHub repository {repo_full}.\n"

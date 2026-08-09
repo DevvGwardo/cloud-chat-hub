@@ -102,7 +102,11 @@ export async function launchElectronApp(): Promise<ElectronAppFixture> {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spark-e2e-'))
 
   const app = await electron.launch({
-    args: [`--user-data-dir=${userDataDir}`, mainEntry],
+    // --no-sandbox: headless CI runners (GitHub Actions) deny unprivileged
+    // user namespaces, which can crash the renderer. The specs that matter
+    // (contextIsolation, webSecurity, CSP) are unaffected — the OS sandbox
+    // is not what they assert.
+    args: [`--user-data-dir=${userDataDir}`, '--no-sandbox', mainEntry],
     env: {
       ...process.env,
       NODE_ENV: 'test',
@@ -133,7 +137,21 @@ export async function launchElectronApp(): Promise<ElectronAppFixture> {
     windowErrors,
     cspHeader,
     async close() {
-      try { await app.close() } catch { /* already gone */ }
+      // app.close() waits for the app process to exit; on headless Linux the
+      // app can linger (quit-handler/tray quirks) and blow the worker's 60s
+      // teardown budget. Bound the wait, then hard-kill if still alive.
+      try {
+        await Promise.race([
+          app.close(),
+          new Promise((resolve) => setTimeout(resolve, 10_000)),
+        ])
+      } catch { /* already gone */ }
+      try {
+        const proc = app.process()
+        if (proc && proc.exitCode === null && !proc.killed) {
+          proc.kill('SIGKILL')
+        }
+      } catch { /* already exited */ }
       try { fs.rmSync(userDataDir, { recursive: true, force: true }) } catch { /* best effort */ }
     },
   }

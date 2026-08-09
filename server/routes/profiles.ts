@@ -1,4 +1,4 @@
-import type { Express, Request, Response } from 'express';
+import type { Express, NextFunction, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import {
@@ -8,7 +8,25 @@ import {
   validateProfileName,
   resolveHermesHome,
 } from '../lib/hermes-profiles';
-import { sendJson } from '../lib/helpers';
+import { isSocketLoopback, sendJson } from '../lib/helpers';
+import { logger } from '../lib/logger';
+
+/**
+ * Local/tunnel-only gate for profile config + .env access. config.yaml and
+ * .env hold provider API keys, so LAN clients must not read or write them.
+ * Tunnel traffic terminates on loopback after the Host-based token gate in
+ * createApp, so the loopback-socket check is the right boundary.
+ */
+function requireLocalProfileAccess(req: Request, res: Response, next: NextFunction): void {
+  if (isSocketLoopback(req)) {
+    next();
+    return;
+  }
+  logger.warn(`[profiles] blocked non-local profile config access: ${req.method} ${req.path}`);
+  sendJson(res, 403, {
+    error: 'Profile configuration is only available from the local app or an authenticated tunnel.',
+  });
+}
 
 function readYamlConfig(configPath: string): Record<string, unknown> {
   if (!fs.existsSync(configPath)) return {};
@@ -225,7 +243,7 @@ export function registerProfilesRoutes(app: Express) {
   });
 
   // GET /api/hermes/profiles/:name/config — return config.yaml content as raw text + parsed JSON
-  app.get('/api/hermes/profiles/:name/config', (req: Request, res: Response) => {
+  app.get('/api/hermes/profiles/:name/config', requireLocalProfileAccess, (req: Request, res: Response) => {
     try {
       const { name } = req.params;
 
@@ -254,7 +272,7 @@ export function registerProfilesRoutes(app: Express) {
   });
 
   // PUT /api/hermes/profiles/:name/config — write config.yaml from { content: string }
-  app.put('/api/hermes/profiles/:name/config', (req: Request, res: Response) => {
+  app.put('/api/hermes/profiles/:name/config', requireLocalProfileAccess, (req: Request, res: Response) => {
     try {
       const { name } = req.params;
       const { content } = req.body;
@@ -285,7 +303,7 @@ export function registerProfilesRoutes(app: Express) {
   });
 
   // GET /api/hermes/profiles/:name/env — return .env content or { exists: false }
-  app.get('/api/hermes/profiles/:name/env', (req: Request, res: Response) => {
+  app.get('/api/hermes/profiles/:name/env', requireLocalProfileAccess, (req: Request, res: Response) => {
     try {
       const { name } = req.params;
 
@@ -313,7 +331,7 @@ export function registerProfilesRoutes(app: Express) {
   });
 
   // PUT /api/hermes/profiles/:name/env — write .env content
-  app.put('/api/hermes/profiles/:name/env', (req: Request, res: Response) => {
+  app.put('/api/hermes/profiles/:name/env', requireLocalProfileAccess, (req: Request, res: Response) => {
     try {
       const { name } = req.params;
       const { content } = req.body;

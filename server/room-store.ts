@@ -127,6 +127,8 @@ function ensureParentDirectory(dbPath: string) {
 
 const SCHEMA_SQL = `
   PRAGMA foreign_keys = ON;
+  PRAGMA journal_mode = WAL;
+  PRAGMA busy_timeout = 5000;
 
   CREATE TABLE IF NOT EXISTS rooms (
     id TEXT PRIMARY KEY,
@@ -369,3 +371,23 @@ export function createRoomStore(dbPath = resolveDbPath()) {
 }
 
 export type RoomStore = ReturnType<typeof createRoomStore>;
+
+// Shared store instance so server-side code (room-coordinator agent triggers)
+// writes to the same SQLite connection as the HTTP routes — per-call
+// createRoomStore() connections were never closed (leak) and two connections
+// without WAL/busy_timeout caused "database is locked" under concurrency.
+let sharedRoomStore: RoomStore | null = null;
+let sharedRoomStorePath: string | null = null;
+export function getRoomStore(): RoomStore {
+  const dbPath = resolveDbPath();
+  // An in-memory DB (vitest default) must stay per-instance — sharing it
+  // would leak rows across test servers.
+  if (dbPath === ':memory:') {
+    return createRoomStore(dbPath);
+  }
+  if (!sharedRoomStore || sharedRoomStorePath !== dbPath) {
+    sharedRoomStore = createRoomStore(dbPath);
+    sharedRoomStorePath = dbPath;
+  }
+  return sharedRoomStore;
+}

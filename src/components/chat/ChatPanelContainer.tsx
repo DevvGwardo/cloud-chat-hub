@@ -152,8 +152,8 @@ export const ChatPanelContainer: React.FC<ChatPanelContainerProps> = ({ onOpenPR
               panelId={panel.id}
               conversationId={panel.conversationId}
               isFocused={panels.length === 1 || panel.id === focusedPanelId}
-              onFocus={() => focusPanel(panel.id)}
-              onClose={closable ? () => closePanel(panel.id) : undefined}
+              onFocus={focusPanel}
+              onClose={closable ? closePanel : undefined}
               onOpenPR={onOpenPR}
             />
           </div>

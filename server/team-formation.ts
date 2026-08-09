@@ -84,29 +84,6 @@ function matchAnyKeyword(tokens: string[], keywords: string[]): boolean {
   return keywords.some((k) => tokens.some((t) => tokenMatch(t, k)));
 }
 
-function _countDomainKeywords(tokens: string[], domains: string[][]): number {
-  return domains.reduce((count, domain) => {
-    return matchAnyKeyword(tokens, domain) ? count + 1 : count;
-  }, 0);
-}
-
-/**
- * Map expertise tags to a set of domain keywords an agent covers.
- * Tokenizes each tag and uses exact tokenMatch for consistency with
- * task-side domain detection.
- */
-function _inferAgentDomains(agent: AgentInfo): Set<string> {
-  const domains = new Set<string>();
-  for (const tag of agent.expertise.map((e) => e.toLowerCase())) {
-    const tokens = tokenize(tag);
-    if (FRONTEND_KEYWORDS.some((k) => tokens.some((t) => tokenMatch(t, k)))) domains.add('frontend');
-    if (BACKEND_KEYWORDS.some((k) => tokens.some((t) => tokenMatch(t, k)))) domains.add('backend');
-    if (TEST_KEYWORDS.some((k) => tokens.some((t) => tokenMatch(t, k)))) domains.add('test');
-    if (DEVOPS_KEYWORDS.some((k) => tokens.some((t) => tokenMatch(t, k)))) domains.add('devops');
-  }
-  return domains;
-}
-
 /**
  * Return agents that are best matched to a set of required domains.
  * Each required domain gets the best-scoring agent. An agent can cover

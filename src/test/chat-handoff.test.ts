@@ -106,9 +106,12 @@ describe('new thread handoff', () => {
         web: true,
         browser: true,
         vision: true,
+        computer: false,
         terminal: false,
         files: false,
         code_execution: false,
+        delegation: false,
+        clarify: false,
       },
     });
     useUIStore.setState({
@@ -537,9 +540,12 @@ describe('new thread handoff', () => {
         web: true,
         browser: true,
         vision: true,
+        computer: false,
         terminal: true,
         files: true,
         code_execution: true,
+        delegation: false,
+        clarify: false,
       },
     });
 

@@ -30,6 +30,7 @@ import {
   getPseudoToolSourceText,
 } from '@/lib/pseudo-tool-calls';
 import { isRepoWriteMessage } from '@/lib/repo-intent';
+import { getToolInvocationKey } from '@/lib/tool-activity';
 import {
   findPendingProposal,
   getProposalDigest,
@@ -116,30 +117,6 @@ function getToolActivityDigest(toolActivity: ToolActivityEvent[] = []) {
   return toolActivity
     .map((event) => `${event.tool}:${event.status}:${event.input}:${event.output ?? ''}`)
     .join('|');
-}
-
-function getToolInvocationKey(invocation: ProposalToolInvocationLike, fallbackIndex: number): string {
-  const path = typeof invocation.args?.path === 'string' ? invocation.args.path : '';
-  const filename = typeof invocation.args?.filename === 'string' ? invocation.args.filename : '';
-  const batchPaths = Array.isArray(invocation.args?.changes)
-    ? invocation.args.changes
-        .map((change) =>
-          change && typeof change === 'object'
-            ? `${typeof change.action === 'string' ? change.action : ''}:${typeof change.path === 'string' ? change.path : ''}`
-            : '',
-        )
-        .join('|')
-    : '';
-
-  if (invocation.toolName && (path || filename || batchPaths)) {
-    return `${invocation.toolName}:${path}:${filename}:${batchPaths}`;
-  }
-
-  if (invocation.toolCallId) {
-    return `${invocation.toolName ?? ''}:${invocation.toolCallId}`;
-  }
-
-  return `${invocation.toolName}:${JSON.stringify(invocation.args ?? {}) || fallbackIndex}`;
 }
 
 function getMessageToolInvocations(message?: ChatMessageLike | null): ProposalToolInvocationLike[] {
@@ -966,7 +943,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           }
           onRewind={
             msg.role === 'assistant' && !isLastAssistantStreaming && msg.id
-              ? () => handleRewind(msg.id)
+              ? handleRewind
               : undefined
           }
         />

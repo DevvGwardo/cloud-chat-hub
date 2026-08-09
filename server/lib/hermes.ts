@@ -1164,6 +1164,10 @@ export interface HermesStreamBufferEvent {
 
 const HERMES_STREAM_BUFFER_CAPACITY = 200;
 const HERMES_STREAM_BUFFER_TTL_MS = 60_000;
+// Idle TTL for streams that are never finished: a client can POST
+// /api/hermes/chat/start repeatedly without ever completing a chat, which
+// would otherwise grow hermesStreams without bound.
+const HERMES_STREAM_BUFFER_IDLE_TTL_MS = 5 * 60_000;
 
 interface HermesStreamEntry {
   id: string;
@@ -1203,6 +1207,19 @@ export function createHermesStreamBuffer(): HermesStreamEntry {
     evictionTimer: null,
   };
   hermesStreams.set(id, entry);
+  // Evict never-finished streams so an attacker (or buggy client) minting
+  // streamIds can't leak memory. finishHermesStream replaces this timer with
+  // the post-done GC timer.
+  entry.evictionTimer = setTimeout(() => {
+    const current = hermesStreams.get(id);
+    if (current && !current.done) {
+      hermesStreams.delete(id);
+    }
+  }, HERMES_STREAM_BUFFER_IDLE_TTL_MS);
+  // Don't keep the event loop alive solely for buffer GC.
+  if (typeof entry.evictionTimer === 'object' && entry.evictionTimer && 'unref' in entry.evictionTimer) {
+    (entry.evictionTimer as { unref: () => void }).unref();
+  }
   return entry;
 }
 
@@ -1236,6 +1253,11 @@ export function finishHermesStream(streamId: string): void {
   }
   entry.subscribers.clear();
   entry.expiresAt = Date.now() + HERMES_STREAM_BUFFER_TTL_MS;
+  // Cancel the idle-eviction timer from createHermesStreamBuffer; the post-done
+  // TTL below takes over as the single eviction authority.
+  if (entry.evictionTimer) {
+    clearTimeout(entry.evictionTimer);
+  }
   entry.evictionTimer = setTimeout(() => {
     hermesStreams.delete(streamId);
   }, HERMES_STREAM_BUFFER_TTL_MS);

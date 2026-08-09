@@ -16,9 +16,10 @@ function sendHtml(response: ServerResponse, statusCode: number, body: string) {
   response.end(body)
 }
 
-function getAuthorizationCode(request: IncomingMessage): { code?: string; error?: string } {
+function getAuthorizationCode(request: IncomingMessage, expectedState?: string): { code?: string; error?: string } {
   const requestUrl = new URL(request.url || '/', 'http://127.0.0.1')
   const code = requestUrl.searchParams.get('code')?.trim()
+  const state = requestUrl.searchParams.get('state')?.trim()
   const error = requestUrl.searchParams.get('error')?.trim()
   const errorDescription = requestUrl.searchParams.get('error_description')?.trim()
 
@@ -26,6 +27,12 @@ function getAuthorizationCode(request: IncomingMessage): { code?: string; error?
     return {
       error: errorDescription ? `${error}: ${errorDescription}` : error,
     }
+  }
+
+  // CSRF defense: the callback must echo the state we put into the auth URL.
+  // A mismatch means this request did not come from the flow we started.
+  if (expectedState && state !== expectedState) {
+    return { error: 'OAuth state mismatch — callback request rejected.' }
   }
 
   if (!code) {
@@ -70,6 +77,9 @@ export async function startOpenRouterOAuth(): Promise<string> {
 
   const codeVerifier = randomBytes(64).toString('base64url')
   const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url')
+  // Random CSRF token echoed back in the callback so only our own redirect
+  // (never a forged request to the loopback server) can complete the flow.
+  const state = randomBytes(16).toString('base64url')
 
   return new Promise<string>((resolve, reject) => {
     let settled = false
@@ -93,7 +103,7 @@ export async function startOpenRouterOAuth(): Promise<string> {
     }
 
     const server = createServer((request, response) => {
-      const { code, error } = getAuthorizationCode(request)
+      const { code, error } = getAuthorizationCode(request, state)
       if (error) {
         sendHtml(response, 400, '<!doctype html><title>OpenRouter Sign-In Failed</title><body style="margin:0;background:#090909;color:#f4f4f5;font:13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;display:grid;place-items:center;min-height:100vh;">Authentication failed. Return to Spark.</body>')
         finish(() => reject(new Error(error)))
@@ -131,6 +141,7 @@ export async function startOpenRouterOAuth(): Promise<string> {
       const callbackUrl = `http://localhost:${address.port}/oauth/openrouter/callback`
       const authUrl = new URL(OPENROUTER_AUTH_URL)
       authUrl.searchParams.set('callback_url', callbackUrl)
+      authUrl.searchParams.set('state', state)
       authUrl.searchParams.set('code_challenge', codeChallenge)
       authUrl.searchParams.set('code_challenge_method', 'S256')
 

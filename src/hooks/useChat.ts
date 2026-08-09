@@ -648,20 +648,6 @@ When the user asks you to make changes:
     });
   }, [scopeId]);
 
-  const activeRepoKey = activeRepo ? `${activeRepo.owner}/${activeRepo.name}` : null;
-  const previousActiveRepoKeyRef = useRef<string | null>(activeRepoKey);
-
-  useEffect(() => {
-    const previousRepoKey = previousActiveRepoKeyRef.current;
-    previousActiveRepoKeyRef.current = activeRepoKey;
-
-    if (previousRepoKey === activeRepoKey) {
-      return;
-    }
-
-
-  }, [activeRepoKey]);
-
   const [draftInput, setDraftInput] = useState('');
   const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false);
   const [providerUnavailableOpen, setProviderUnavailableOpen] = useState(false);
@@ -702,14 +688,15 @@ When the user asks you to make changes:
   const [sessionLock, setSessionLock] = useState<string | null>(null);
   const derivedSessionId = `${conversationId ?? `draft-${draftEpochRef.current}`}:${panelId}`;
   const chatSessionId = sessionLock ?? derivedSessionId;
-  // Use useMemo so aiChatSessionId tracks conversationId synchronously.
-  // The previous useState + useLayoutEffect pattern caused a race condition:
-  // when the user switched conversations mid-stream, aiChatSessionId stayed stale
-  // (blocked by isStreaming guard in useLayoutEffect), which also blocked the
-  // conversation-switch effect (guarded on aiChatSessionId !== chatSessionId).
-  // This meant hydrateConversationMessages was never called and the UI kept
-  // showing the old conversation's messages.
-  const aiChatSessionId = useMemo(() => chatSessionId, [chatSessionId]);
+  // Derive aiChatSessionId directly from chatSessionId so it tracks
+  // conversationId synchronously. The previous useState + useLayoutEffect
+  // pattern caused a race condition: when the user switched conversations
+  // mid-stream, aiChatSessionId stayed stale (blocked by isStreaming guard in
+  // useLayoutEffect), which also blocked the conversation-switch effect
+  // (guarded on aiChatSessionId !== chatSessionId). This meant
+  // hydrateConversationMessages was never called and the UI kept showing the
+  // old conversation's messages.
+  const aiChatSessionId = chatSessionId;
   const isStreamingRef = useRef(false);
   const shouldRetainRequestConversationId =
     conversationId === null && (isStreamingRef.current || pendingConversationIdRef.current !== null);
@@ -2756,7 +2743,6 @@ When the user asks you to make changes:
       setSessionLock(`draft-${draftEpochRef.current}:${panelId}`);
       try {
         convId = await createConversation(effectiveProvider, effectiveModel, defaultSystemPrompt);
-        pendingConversationIdRef.current = convId;
         pendingConversationIdRef.current = convId;
         convIdRef.current = convId;
         requestConversationIdRef.current = convId;
