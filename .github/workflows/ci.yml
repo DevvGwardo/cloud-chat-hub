@@ -117,3 +117,9 @@ jobs:
 
       - name: Run Playwright e2e tests
         run: xvfb-run -a npx playwright test --config playwright-electron.config.ts
+        env:
+          DEBUG: pw:browser
+
+      - name: Dump lingering processes (diagnostic)
+        if: always()
+        run: ps -ef | grep -E 'electron|main.py|python' | grep -v grep || true
