@@ -509,6 +509,10 @@ export async function proxyHermesAgentLoopToDataStream(input: {
   hermesUseRuns?: boolean;
   /** Bridge execution mode: agent-loop (legacy in-process loop) or acp (real hermes-agent). */
   executionMode?: 'agent-loop' | 'acp';
+  /** Run the agent in an isolated git worktree of the local checkout. */
+  hermesWorktree?: boolean;
+  /** Local checkout path the bridge uses as the worktree repo root / ACP cwd. */
+  repoRoot?: string | null;
 }) {
   const bridgeUrl = `${OPENAI_COMPATIBLE.hermes}/chat/completions`;
   const abortController = new AbortController();
@@ -577,6 +581,8 @@ export async function proxyHermesAgentLoopToDataStream(input: {
             }
           : {}),
         ...(input.githubPAT ? { 'X-Hermes-Github-PAT': input.githubPAT } : {}),
+        ...(input.hermesWorktree ? { 'X-Hermes-Worktree': '1' } : {}),
+        ...(input.repoRoot ? { 'X-Hermes-Repo-Root': input.repoRoot } : {}),
         ...(input.hermesMiniMaxKey ? { 'X-Hermes-Minimax-Key': input.hermesMiniMaxKey } : {}),
         ...(input.conversationId ? { 'X-Hermes-Conversation-Id': input.conversationId } : {}),
       },
@@ -847,6 +853,10 @@ export async function proxyHermesLoopToDataStream(input: {
   customTools?: unknown[];
   activeProfile?: string;
   conversationId?: string;
+  /** Run the agent in an isolated git worktree of the local checkout. */
+  hermesWorktree?: boolean;
+  /** Local checkout path the bridge uses as the worktree repo root / ACP cwd. */
+  repoRoot?: string | null;
 }) {
   const maxIterations = Math.max(1, Math.min(LOOP_MAX_ITERATIONS_CAP, Math.floor(input.loop.maxIterations) || 1));
   const deadline = input.loop.timeBudgetMinutes && input.loop.timeBudgetMinutes > 0
@@ -916,6 +926,8 @@ export async function proxyHermesLoopToDataStream(input: {
               }
             : {}),
           ...(input.githubPAT ? { 'X-Hermes-Github-PAT': input.githubPAT } : {}),
+          ...(input.hermesWorktree ? { 'X-Hermes-Worktree': '1' } : {}),
+          ...(input.repoRoot ? { 'X-Hermes-Repo-Root': input.repoRoot } : {}),
           ...(input.hermesMiniMaxKey ? { 'X-Hermes-Minimax-Key': input.hermesMiniMaxKey } : {}),
           ...(input.conversationId ? { 'X-Hermes-Conversation-Id': input.conversationId } : {}),
         },

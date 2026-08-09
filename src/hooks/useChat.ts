@@ -1191,8 +1191,11 @@ When the user asks you to make changes:
 
     // Compute effective hermes toolsets from fresh store state to avoid stale memo values mid-stream
     const currentHermesUsesLocalCloneFallback = currentIsRepoMode && !!currentActiveRepo?.localPath && !currentGithubPAT;
+    // Auto-use the local checkout when one is attached (hermes-desktop parity):
+    // the agent keeps its terminal/files toolsets and works on the checkout via
+    // the bridge's worktree isolation instead of being reduced to GitHub-API-only
+    // tools with no build ability. No toggle required.
     const currentHermesWorktreeMode = effectiveProvider === 'hermes'
-      && useHermesStore.getState().useWorktree
       && currentIsRepoMode
       && !!currentActiveRepo?.localPath;
     const currentEffectiveHermesToolsets = currentIsRepoMode
@@ -1253,10 +1256,6 @@ When the user asks you to make changes:
       ...(currentIsRepoMode && repoFileTreeForRequest.length > 0 ? { repo_file_tree: repoFileTreeForRequest } : {}),
       ...(currentIsRepoMode && Object.keys(repoFileCacheForRequest).length > 0
         ? { repo_file_cache: repoFileCacheForRequest }
-        : {}),
-      ...(effectiveProvider === 'hermes' && useHermesStore.getState().useWorktree
-        && currentIsRepoMode && currentActiveRepo?.localPath
-        ? { hermes_worktree: true }
         : {}),
       ...(effectiveProvider === 'hermes' && useHermesStore.getState().useRuns
         ? { hermes_use_runs: true }

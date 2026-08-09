@@ -19,6 +19,11 @@ const hermesProfileMocks = vi.hoisted(() => ({
   getHubSelectedProfileName: vi.fn(() => 'agent-two'),
 }))
 
+const repoCloneMocks = vi.hoisted(() => ({
+  ensureRepoClone: vi.fn(),
+  getManagedRepoClone: vi.fn(),
+}))
+
 vi.mock('ai', async () => {
   const actual = await vi.importActual<typeof import('ai')>('ai')
   return {
@@ -42,6 +47,16 @@ vi.mock('../lib/hermes-profiles', async () => {
   return {
     ...actual,
     getHubSelectedProfileName: hermesProfileMocks.getHubSelectedProfileName,
+  }
+})
+
+// Managed clones must never hit the real filesystem/network in tests.
+vi.mock('../repo-clone-manager', async () => {
+  const actual = await vi.importActual<typeof import('../repo-clone-manager')>('../repo-clone-manager')
+  return {
+    ...actual,
+    ensureRepoClone: repoCloneMocks.ensureRepoClone,
+    getManagedRepoClone: repoCloneMocks.getManagedRepoClone,
   }
 })
 
@@ -91,6 +106,9 @@ describe('Hermes chat route', () => {
         res.end('')
       },
     }))
+    // Hermes auto-provisioning of a managed clone fails by default; tests that
+    // need a checkout opt in by resolving ensureRepoClone.
+    repoCloneMocks.ensureRepoClone.mockRejectedValue(new Error('clone unavailable'))
   })
 
   afterEach(() => {
@@ -270,6 +288,10 @@ describe('Hermes chat route', () => {
       expect(headers['X-Hermes-Repo-Owner']).toBeUndefined()
       expect(headers['X-Hermes-Repo-Name']).toBeUndefined()
       expect(headers['X-Hermes-Github-PAT']).toBeUndefined()
+      // Attached local checkout → worktree headers so the bridge re-enables
+      // terminal/files tools on the checkout (build/audit capability).
+      expect(headers['X-Hermes-Worktree']).toBe('1')
+      expect(headers['X-Hermes-Repo-Root']).toBe(repoDir)
 
       return new Response(bridgeStream, {
         status: 200,
@@ -308,6 +330,163 @@ describe('Hermes chat route', () => {
       expect(body).toContain('Inspecting the local checkout')
       expect(providerConfigMocks.createProviderModel).not.toHaveBeenCalled()
       expect(aiMocks.streamText).not.toHaveBeenCalled()
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('auto-provisions a managed local checkout for Hermes repo mode and forwards worktree headers', async () => {
+    repoCloneMocks.ensureRepoClone.mockResolvedValue({
+      exists: true,
+      path: '/tmp/cloudchat-managed/octo/cloudchat',
+    })
+
+    const bridgeStream = [
+      'data: {"id":"chatcmpl-hermes-clone","choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n',
+      'data: {"id":"chatcmpl-hermes-clone","choices":[{"index":0,"delta":{"content":"Running npm run build on the checkout"}}]}\n\n',
+      'data: {"id":"chatcmpl-hermes-clone","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":6,"completion_tokens":5,"total_tokens":11}}\n\n',
+      'data: [DONE]\n\n',
+    ].join('')
+
+    let capturedHeaders: Record<string, string> = {}
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as { url: string }).url
+      if (url.includes('/functions/v1/chat')) {
+        return actualFetch(input, init)
+      }
+
+      if (url.includes('api.github.com/repos/')) {
+        return new Response(null, { status: 200 })
+      }
+
+      const raw = init?.headers
+      capturedHeaders = raw instanceof Headers
+        ? Object.fromEntries(raw.entries())
+        : { ...(raw as Record<string, string> | undefined) }
+
+      return new Response(bridgeStream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    }))
+
+    const server = await createTestServer()
+
+    try {
+      const response = await actualFetch(`${server.url}/functions/v1/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          provider: 'hermes',
+          model: 'meta-llama/llama-4-maverick',
+          api_key: 'or-key',
+          github_pat: 'ghp_test',
+          activeRepo: {
+            owner: 'octo',
+            name: 'cloudchat',
+            default_branch: 'main',
+          },
+          messages: [
+            { role: 'user', content: 'Run a type-safety audit' },
+          ],
+        }),
+      })
+
+      const body = await response.text()
+
+      expect(response.ok).toBe(true)
+      expect(body).toContain('Running npm run build on the checkout')
+
+      // The bridge gets worktree headers pointing at the auto-provisioned clone
+      expect(capturedHeaders['X-Hermes-Worktree']).toBe('1')
+      expect(capturedHeaders['X-Hermes-Repo-Root']).toBe('/tmp/cloudchat-managed/octo/cloudchat')
+
+      expect(repoCloneMocks.ensureRepoClone).toHaveBeenCalledWith({
+        owner: 'octo',
+        repo: 'cloudchat',
+        pat: 'ghp_test',
+        branch: 'main',
+      })
+      expect(providerConfigMocks.createProviderModel).not.toHaveBeenCalled()
+      expect(aiMocks.streamText).not.toHaveBeenCalled()
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('tells the agent it has no build tools when Hermes repo mode has no local checkout', async () => {
+    // ensureRepoClone rejects (default) — repo mode falls back to GitHub-API tools.
+    const bridgeStream = [
+      'data: {"id":"chatcmpl-hermes-noclone","choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n',
+      'data: {"id":"chatcmpl-hermes-noclone","choices":[{"index":0,"delta":{"content":"Static review only"}}]}\n\n',
+      'data: {"id":"chatcmpl-hermes-noclone","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":3,"total_tokens":7}}\n\n',
+      'data: [DONE]\n\n',
+    ].join('')
+
+    let capturedBody: Record<string, unknown> = {}
+    let capturedHeaders: Record<string, string> = {}
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as { url: string }).url
+      if (url.includes('/functions/v1/chat')) {
+        return actualFetch(input, init)
+      }
+
+      if (url.includes('api.github.com/repos/')) {
+        return new Response(null, { status: 200 })
+      }
+
+      capturedBody = JSON.parse(String(init?.body ?? '{}'))
+      const raw = init?.headers
+      capturedHeaders = raw instanceof Headers
+        ? Object.fromEntries(raw.entries())
+        : { ...(raw as Record<string, string> | undefined) }
+      return new Response(bridgeStream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    }))
+
+    const server = await createTestServer()
+
+    try {
+      const response = await actualFetch(`${server.url}/functions/v1/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          provider: 'hermes',
+          model: 'meta-llama/llama-4-maverick',
+          api_key: 'or-key',
+          github_pat: 'ghp_test',
+          activeRepo: {
+            owner: 'octo',
+            name: 'cloudchat',
+            default_branch: 'main',
+          },
+          messages: [
+            { role: 'user', content: 'Run a type-safety audit' },
+          ],
+        }),
+      })
+
+      const body = await response.text()
+
+      expect(response.ok).toBe(true)
+      expect(body).toContain('Static review only')
+
+      // No checkout → no worktree headers, and the system prompt tells the
+      // agent to fall back to a static review instead of "can't run a build".
+      // (The prompt rides in the normalized "Application instructions" message.)
+      expect(capturedHeaders['X-Hermes-Worktree']).toBeUndefined()
+      expect(capturedHeaders['X-Hermes-Repo-Root']).toBeUndefined()
+      const allText = (capturedBody.messages as Array<{ role: string; content: string }>)
+        .map((m) => typeof m.content === 'string' ? m.content : '')
+        .join('\n')
+      expect(allText).toContain('no terminal or build tools')
+      expect(allText).toContain('static review')
     } finally {
       await server.close()
     }

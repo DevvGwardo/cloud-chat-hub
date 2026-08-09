@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useCallback, useState } from 'react';
-import { ArrowUp, Square, Plus, ChevronDown, Mic, MicOff, CornerDownLeft, Bot, ClipboardList, Loader2, Repeat, X, GitBranch, Flag } from 'lucide-react';
+import { ArrowUp, Square, Plus, ChevronDown, Mic, MicOff, CornerDownLeft, Bot, ClipboardList, Loader2, Repeat, X, Flag } from 'lucide-react';
 import { useHermesStore, DEFAULT_LOOP_STATE } from '@/stores/hermes-store';
 import { usePanelId, useChatScopeId } from '@/contexts/PanelContext';
 import { useChangesetStore } from '@/stores/changeset-store';
@@ -144,9 +144,6 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
   const scopeId = useChatScopeId();
   const activeRepo = useChangesetStore((s) => s.getChangeset(scopeId).activeRepo);
   const repoFileTree = useChangesetStore((s) => s.getChangeset(scopeId).repoFileTree);
-  const useWorktree = useHermesStore((s) => s.useWorktree);
-  const setUseWorktree = useHermesStore((s) => s.setUseWorktree);
-  const worktreeAvailable = selectedProvider === 'hermes' && !!activeRepo?.localPath;
   const loop = useHermesStore((s) => s.loops[panelId]) ?? DEFAULT_LOOP_STATE;
   const setLoopEnabled = useHermesStore((s) => s.setLoopEnabled);
   const setLoopConfig = useHermesStore((s) => s.setLoopConfig);
@@ -745,23 +742,6 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
               <>
                 <HermesModelPicker />
                 <HermesEffortSlider />
-                {worktreeAvailable && (
-                  <button
-                    type="button"
-                    onClick={() => setUseWorktree(!useWorktree)}
-                    title="Isolated git worktree for this agent run"
-                    aria-pressed={useWorktree}
-                    className={cn(
-                      'flex shrink-0 items-center gap-1 rounded-[6px] px-2 py-1 text-[11px] font-medium transition-colors duration-100',
-                      useWorktree
-                        ? 'bg-primary/15 text-primary'
-                        : 'text-muted-foreground hover:bg-muted hover:text-foreground',
-                    )}
-                  >
-                    <GitBranch className="h-3 w-3 shrink-0" />
-                    <span>Worktree</span>
-                  </button>
-                )}
               </>
             ) : (
             <DropdownMenu>

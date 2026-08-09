@@ -313,7 +313,6 @@ app.post('/functions/v1/chat', async (req, res) => {
       repo_file_tree,
       agent_toolsets,
       custom_tools,
-      hermes_worktree,
       hermes_use_runs,
     } = req.body;
 
@@ -412,6 +411,33 @@ app.post('/functions/v1/chat', async (req, res) => {
       }
     }
 
+    // Hermes repo mode: give the agent a real local checkout so it can run
+    // builds/tests/audits (hermes-desktop parity). With a checkout present the
+    // agent keeps terminal/files toolsets and works in a bridge git worktree of
+    // this clone; without one it is reduced to GitHub-API-only tools and cannot
+    // run a build. The clone is a managed shallow clone, cached across requests.
+    if (
+      provider === 'hermes'
+      && activeRepo && githubPAT && activeRepo.owner && activeRepo.name
+      && !resolvedLocalRepoPath
+    ) {
+      try {
+        const clone = await ensureRepoClone({
+          owner: activeRepo.owner,
+          repo: activeRepo.name,
+          pat: githubPAT,
+          branch: activeRepo.default_branch || 'main',
+        });
+        resolvedLocalRepoPath = clone.path;
+      } catch (error) {
+        // Fall back to GitHub-API repo tools; the system prompt below tells
+        // the agent it has no build capability rather than letting it guess.
+        logger.warn(
+          `[chat] Hermes local checkout unavailable for ${activeRepo.owner}/${activeRepo.name}: ${error instanceof Error ? error.message : String(error)} — falling back to GitHub repo tools`,
+        );
+      }
+    }
+
     const hermesUsesLocalCloneFallback = provider === 'hermes' && !!activeRepo && !githubPAT && !!resolvedLocalRepoPath;
 
     if (activeRepo && !githubPAT && !resolvedLocalRepoPath) {
@@ -490,6 +516,16 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
       effectiveSystemPrompt = effectiveSystemPrompt
         ? `${effectiveSystemPrompt}\n\n${limitedContext}`
         : limitedContext;
+    }
+
+    // Repo mode with no local checkout: the agent has GitHub repo tools but no
+    // terminal/build tools. Tell it explicitly so audit-style requests (e.g. a
+    // type-safety audit) produce a static review instead of "can't run a build".
+    if (provider === 'hermes' && activeRepo && hasRepoAccess && !resolvedLocalRepoPath) {
+      const noBuildNote = `No local checkout is available in this session, so you have no terminal or build tools. For requests that require running a build (type-safety audits, tests, lint, etc.), perform a static review of the relevant files instead and clearly note that the build could not be executed.`;
+      effectiveSystemPrompt = effectiveSystemPrompt
+        ? `${effectiveSystemPrompt}\n\n${noBuildNote}`
+        : noBuildNote;
     }
 
     // STEP 4: Prepend plan mode system prompt when active
@@ -735,6 +771,8 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
         repoEditIntent: !!repo_edit_intent,
         activeRepo: shouldForwardHermesRepoContext ? activeRepo : undefined,
         githubPAT: shouldForwardHermesRepoContext ? githubPAT : undefined,
+        hermesWorktree: !!resolvedLocalRepoPath,
+        repoRoot: resolvedLocalRepoPath ?? undefined,
         hermesMiniMaxKey: hermes_minimax_key,
         repoFileTree: shouldForwardHermesRepoContext ? sanitizeFileTree(repo_file_tree) : undefined,
         customTools: Array.isArray(custom_tools) ? custom_tools : undefined,
@@ -787,6 +825,8 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
         repoEditIntent: !!repo_edit_intent,
         activeRepo: shouldForwardHermesRepoContext ? activeRepo : undefined,
         githubPAT: shouldForwardHermesRepoContext ? githubPAT : undefined,
+        hermesWorktree: !!resolvedLocalRepoPath,
+        repoRoot: resolvedLocalRepoPath ?? undefined,
         hermesMiniMaxKey: hermes_minimax_key,
         repoFileTree: shouldForwardHermesRepoContext ? sanitizeFileTree(repo_file_tree) : undefined,
         customTools: Array.isArray(custom_tools) ? custom_tools : undefined,
@@ -839,15 +879,6 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
               ...(hermesExecutionMode === 'agent-loop' && activeRepo && githubPAT ? {
                 'X-Hermes-Github-PAT': githubPAT,
               } : {}),
-              ...(
-                hermesExecutionMode === 'agent-loop'
-                && (hermes_worktree === true || hermes_worktree === 'true')
-                ? {
-                    'X-Hermes-Worktree': '1',
-                    ...(resolvedLocalRepoPath ? { 'X-Hermes-Repo-Root': resolvedLocalRepoPath } : {}),
-                  }
-                : {}
-              ),
             }
           : undefined,
       });
