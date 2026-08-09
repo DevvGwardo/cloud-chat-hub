@@ -1,9 +1,9 @@
 import { logger } from './lib/logger';
 import { spawn } from 'child_process';
 import { existsSync, rmSync } from 'fs';
-import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from 'fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
-import { dirname, join } from 'path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { generateObject, generateText } from 'ai';
 import { z } from 'zod';
 import { createProviderModel, resolveReviewCapableProvider, VALIDATION_MODELS } from './provider-config';
@@ -243,6 +243,48 @@ function installCommandFor(packageManager: string, workspaceRelativePath = '.'):
   return withWorkspaceDisplay(spec, workspaceRelativePath);
 }
 
+export function resolveVerificationFilePath(rootDir: string, filePath: string): string {
+  if (typeof filePath !== 'string' || filePath.length === 0) {
+    throw new Error('Verification file path must be a non-empty repository-relative path.');
+  }
+
+  if (isAbsolute(filePath)) {
+    throw new Error(`Verification file path must be relative to the repository: ${filePath}`);
+  }
+
+  const resolvedRoot = resolve(rootDir);
+  const targetPath = resolve(resolvedRoot, filePath);
+  const relativePath = relative(resolvedRoot, targetPath);
+
+  if (relativePath === '' || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+    throw new Error(`Verification file path escapes the repository workspace: ${filePath}`);
+  }
+
+  return targetPath;
+}
+
+async function assertNoSymlinkInPath(rootDir: string, targetPath: string) {
+  const resolvedRoot = resolve(rootDir);
+  const relativePath = relative(resolvedRoot, targetPath);
+  const segments = relativePath.split(/[\\/]+/).filter(Boolean);
+  let currentPath = resolvedRoot;
+
+  for (const segment of segments) {
+    currentPath = join(currentPath, segment);
+    try {
+      const stat = await lstat(currentPath);
+      if (stat.isSymbolicLink()) {
+        throw new Error(`Verification file path traverses a symbolic link: ${relativePath}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return;
+      }
+      throw error;
+    }
+  }
+}
+
 async function runCommand(
   spec: ValidationCommandSpec,
   cwd: string,
@@ -294,7 +336,8 @@ async function runCommand(
 async function applyFileChanges(dir: string, files: VerificationFileChange[]) {
   for (const file of files) {
     const action = file.action || 'edit';
-    const targetPath = join(dir, file.path);
+    const targetPath = resolveVerificationFilePath(dir, file.path);
+    await assertNoSymlinkInPath(dir, targetPath);
 
     if (action === 'delete') {
       if (existsSync(targetPath)) {
