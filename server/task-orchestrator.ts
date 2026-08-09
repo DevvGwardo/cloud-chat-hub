@@ -12,6 +12,7 @@ import {
   type ExecutionBackend,
   type ExecutionRoute,
 } from './team-formation-routing';
+import { getApiBase } from './lib/api-base';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -60,8 +61,6 @@ interface CardRecord {
 }
 
 // ─── Orchestrator Singleton ─────────────────────────────────────────────────
-
-const API_BASE = process.env.CLOUDCHAT_API_BASE || 'http://localhost:3001';
 
 // ─── Agent lifecycle limits ────────────────────────────────────────────────
 
@@ -129,7 +128,7 @@ function appendCappedLog(current: string, chunk: string, maxBytes: number): stri
 
 async function fetchCards(status: string): Promise<CardRecord[]> {
   try {
-    const res = await fetch(`${API_BASE}/api/hermes/kanban?status=${encodeURIComponent(status)}`);
+    const res = await fetch(`${getApiBase()}/api/hermes/kanban?status=${encodeURIComponent(status)}`);
     if (!res.ok) return [];
     const data = await res.json() as { cards?: CardRecord[] };
     return data.cards ?? [];
@@ -140,7 +139,7 @@ async function fetchCards(status: string): Promise<CardRecord[]> {
 
 async function updateCardStatus(cardId: string, status: string): Promise<boolean> {
   try {
-    const res = await fetch(`${API_BASE}/api/hermes/kanban/${cardId}`, {
+    const res = await fetch(`${getApiBase()}/api/hermes/kanban/${cardId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status }),
@@ -164,7 +163,7 @@ async function createConversation(title: string, systemPrompt?: string, tags?: s
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    const res = await fetch(`${API_BASE}/functions/v1/chat-store/conversations`, {
+    const res = await fetch(`${getApiBase()}/functions/v1/chat-store/conversations`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -434,7 +433,7 @@ async function spawnKanbanAgent(cardId: string, options: SpawnKanbanAgentOptions
     env: {
       ...process.env,
       KANBAN_CARD_ID: cardId,
-      CLOUDCHAT_API_BASE: API_BASE,
+      CLOUDCHAT_API_BASE: getApiBase(),
       ...(useWorktree || process.env.HERMES_WORKTREE === '1' ? { HERMES_WORKTREE: '1' } : {}),
       ...(executionBackend ? { FORMATION_EXECUTION_BACKEND: executionBackend } : {}),
       ...(executionBackend === 'review_pipeline' ? { HERMES_EXECUTION_MODE: 'swarm' } : {}),
@@ -533,7 +532,7 @@ async function dispatchAsFleetSwarm(card: CardRecord, formation: ReturnType<type
     `[orchestrator] Routing card "${card.title}" (${card.id.slice(0, 12)}...) → fleet_swarm`,
   );
 
-  const res = await fetch(`${API_BASE}/api/hermes/kanban/swarm`, {
+  const res = await fetch(`${getApiBase()}/api/hermes/kanban/swarm`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -544,7 +543,7 @@ async function dispatchAsFleetSwarm(card: CardRecord, formation: ReturnType<type
     throw new Error(data.error || `Fleet swarm create failed (${res.status})`);
   }
 
-  await fetch(`${API_BASE}/api/hermes/kanban/${card.id}`, {
+  await fetch(`${getApiBase()}/api/hermes/kanban/${card.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -766,7 +765,7 @@ export const taskOrchestrator = {
     // Fetch all kanban cards
     let allCards: unknown[] = [];
     try {
-      const res = await fetch(`${API_BASE}/api/hermes/kanban`);
+      const res = await fetch(`${getApiBase()}/api/hermes/kanban`);
       if (res.ok) {
         const data = await res.json();
         allCards = data.cards ?? [];
