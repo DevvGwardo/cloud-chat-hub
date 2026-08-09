@@ -105,6 +105,42 @@ export interface LoopState {
   stopReason: string | null;
 }
 
+// ─── Structured tool-call records (frontend) ────────────────────────────────
+// Per-call execution state reduced from the tool_call_begin/delta/end custom
+// fields the bridge and server emit. Keyed by call_id. Mirrored into this
+// store (per panel) so chat components can render enriched cards without
+// prop-drilling through the panel runtime.
+
+export type ToolCallStatus = 'running' | 'completed' | 'failed';
+
+export interface ToolCallRecord {
+  callId: string;
+  name: string;
+  status: ToolCallStatus;
+  /** Append-only output chunks, in arrival order. */
+  outputChunks: string[];
+  /** Joined output so far. */
+  output: string;
+  exitCode: number | null;
+  durationMs: number | null;
+  outputTruncated: boolean;
+  outputTruncatedLines: number;
+}
+
+export type ToolCallRecords = Record<string, ToolCallRecord>;
+
+/** Per-message tool-call records: 'current' while streaming, message id after
+ *  the stream finishes (mirrors the toolActivityRef shape in useChat). */
+export type ToolCallRecordsByMessage = Record<string, ToolCallRecords>;
+
+/** One-shot UI → useChat runtime action (panel-scoped). The chat components
+ *  (tool cards, edit affordance, approval banner) enqueue these; the active
+ *  useChat instance consumes them through an effect, like pendingPanelPrompts. */
+export type ChatActionRequest =
+  | { kind: 'retry_tool'; toolName: string; callId?: string }
+  | { kind: 'edit_message'; content: string }
+  | { kind: 'approval_audit'; tool: string; command?: string; approved: boolean };
+
 /** Reasoning effort levels accepted by the Hermes agent (hermes_constants.parse_reasoning_effort). */
 export type HermesReasoningEffort =
   | 'none'
@@ -204,6 +240,15 @@ interface HermesState {
   /** Session-scope approval policies — in-memory only, cleared on panel close. */
   addSessionApprovalPolicy: (policy: ApprovalPolicy) => void;
   clearSessionApprovalPolicies: () => void;
+
+  /** Structured tool-call records per panel (non-persisted runtime mirror). */
+  toolCallRecordsByPanel: Record<string, ToolCallRecordsByMessage>;
+  setToolCallRecords: (panelId: string, records: ToolCallRecordsByMessage) => void;
+
+  /** One-shot chat UI → useChat action requests per panel (non-persisted). */
+  pendingChatActions: Record<string, ChatActionRequest[]>;
+  requestChatAction: (panelId: string, action: ChatActionRequest) => void;
+  setPendingChatActions: (panelId: string, actions: ChatActionRequest[]) => void;
 }
 
 const defaultToolsets: HermesToolsets = {
@@ -247,6 +292,8 @@ export const useHermesStore = create<HermesState>()(
       loops: {},
       sessionApprovalPolicies: [],
       pendingAcpApproval: null,
+      toolCallRecordsByPanel: {},
+      pendingChatActions: {},
       underlyingProvider: '',
       followAgentModel: true,
       reasoningEffort: 'medium',
@@ -468,6 +515,34 @@ export const useHermesStore = create<HermesState>()(
 
       setPendingAcpApproval: (approval) =>
         set(() => ({ pendingAcpApproval: approval })),
+
+      setToolCallRecords: (panelId, records) =>
+        set((state) => {
+          const prev = state.toolCallRecordsByPanel[panelId];
+          if (prev === records) return state;
+          return {
+            toolCallRecordsByPanel: {
+              ...state.toolCallRecordsByPanel,
+              [panelId]: records,
+            },
+          };
+        }),
+
+      requestChatAction: (panelId, action) =>
+        set((state) => ({
+          pendingChatActions: {
+            ...state.pendingChatActions,
+            [panelId]: [...(state.pendingChatActions[panelId] ?? []), action],
+          },
+        })),
+
+      setPendingChatActions: (panelId, actions) =>
+        set((state) => ({
+          pendingChatActions: {
+            ...state.pendingChatActions,
+            [panelId]: actions,
+          },
+        })),
     }),
     {
       name: 'cloudchat-hermes',
@@ -493,6 +568,10 @@ export const useHermesStore = create<HermesState>()(
         // state is now per-panel under `loops`).
         delete (merged as Record<string, unknown>).loop;
         if (!merged.loops) merged.loops = {};
+        // Transient runtime slices — never persisted, but ensure they exist
+        // when rehydrating from an older persisted snapshot.
+        if (!merged.toolCallRecordsByPanel) merged.toolCallRecordsByPanel = {};
+        if (!merged.pendingChatActions) merged.pendingChatActions = {};
         // Ensure new toolset keys default on for existing installs
         merged.toolsets = { ...defaultToolsets, ...(merged.toolsets || {}) };
         // Backward compatibility: ensure MCP servers have new required fields

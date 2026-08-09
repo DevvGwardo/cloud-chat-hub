@@ -29,3 +29,6 @@ export const MAX_PAGE_LIMIT = 200;
 
 // Output limits
 export const MAX_COMMAND_OUTPUT_CHARS = 12_000;
+
+// Approval engine (server-side per-tool approval gates)
+export const APPROVAL_TIMEOUT_MS = Number(process.env.APPROVAL_TIMEOUT_MS) || 300_000; // 5 minutes

@@ -37,6 +37,16 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
+from bridge_events import (
+    PLAN_MODE_PROMPT_SUFFIX,
+    build_approval_request_event,
+    extract_approval_command,
+    extract_exit_code,
+    stream_retry_event,
+    tool_call_begin_event,
+    tool_call_delta_event,
+    tool_call_end_event,
+)
 
 logger = logging.getLogger("acp_transport")
 
@@ -78,6 +88,11 @@ def _block_text(block: Any) -> str:
     """Extract text from an ACP content block (any nesting level)."""
     if block is None:
         return ""
+    # A bare list at any level (e.g. ``update.content`` itself) is a container
+    # of blocks — flatten it before looking at ``type``/``content`` attributes.
+    if isinstance(block, (list, tuple)):
+        parts = [_block_text(b) for b in block]
+        return "\n".join(p for p in parts if p)
     # Discriminated by ``type``: text / image / audio / resource / content / diff / terminal
     btype = getattr(block, "type", None)
     if btype == "text":
@@ -137,10 +152,15 @@ class BridgeAcpClient:
         self,
         emit: Callable[[str, Any], None],
         approvals: dict[str, asyncio.Future],
+        cwd: Optional[str] = None,
     ) -> None:
         self.emit = emit
         self._approvals = approvals
-        self._pending_tools: dict[str, tuple[str, str]] = {}  # tool_call_id -> (display title, input)
+        self._cwd = cwd
+        # tool_call_id -> {"title", "input", "ts"} for the structured
+        # tool_call_begin/delta/end envelopes (started on ``tool_call``,
+        # completed on ``tool_call_update`` with status completed/failed).
+        self._tool_meta: dict[str, dict] = {}
 
     def on_connect(self, conn: Any) -> None:
         self._conn = conn
@@ -182,15 +202,18 @@ class BridgeAcpClient:
 
         self.emit(
             "approval_request",
-            {
-                "approval_id": approval_id,
-                "session_id": session_id,
-                "tool": title,
-                "kind": str(getattr(tool_call, "kind", "") or "other"),
-                "summary": title,
-                "excerpt": detail,
-                "options": options_clean,
-            },
+            build_approval_request_event(
+                approval_id=approval_id,
+                session_id=session_id,
+                tool=title,
+                kind=str(getattr(tool_call, "kind", "") or "other"),
+                summary=title,
+                excerpt=detail,
+                options=options_clean,
+                command=extract_approval_command(tool_call),
+                cwd=self._cwd,
+                reason=None,  # not present in the ACP request_permission payload
+            ),
         )
 
         future: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -234,28 +257,60 @@ class BridgeAcpClient:
                 self.emit("reasoning", text)
         elif kind == "tool_call":
             # New tool call started.
-            call_id = str(getattr(update, "tool_call_id", ""))
+            call_id = str(getattr(update, "tool_call_id", "") or "")
             title = str(getattr(update, "title", "") or "tool")
             tool_input = _tool_input_for_display(update)
-            self._pending_tools[call_id] = (title, tool_input)
+            self._tool_meta[call_id] = {
+                "title": title,
+                "input": tool_input,
+                "ts": time.time(),
+            }
+            self.emit("tool_call_begin", tool_call_begin_event(call_id, title))
             self.emit("tool_start", title, tool_input)
         elif kind == "tool_call_update":
-            call_id = str(getattr(update, "tool_call_id", ""))
-            pending = self._pending_tools.pop(call_id, None)
-            title = (pending[0] if pending else None) or str(
-                getattr(update, "title", "") or "tool"
-            )
-            tool_input = pending[1] if pending else ""
+            call_id = str(getattr(update, "tool_call_id", "") or "")
+            meta = self._tool_meta.get(call_id)
+            title = (meta or {}).get("title") or str(getattr(update, "title", "") or "tool")
+            tool_input = (meta or {}).get("input") or ""
             status = getattr(update, "status", None)
             if status in ("completed", "failed"):
+                self._tool_meta.pop(call_id, None)
+                started_ts = (meta or {}).get("ts")
+                duration_ms = int((time.time() - started_ts) * 1000) if started_ts else 0
+                self.emit(
+                    "tool_call_end",
+                    tool_call_end_event(
+                        call_id,
+                        title,
+                        success=status == "completed",
+                        exit_code=extract_exit_code(update),
+                        duration_ms=duration_ms,
+                    ),
+                )
                 self.emit("tool_end", title, tool_input, _tool_output(update))
+            else:
+                # In-progress update — stream the output chunk as a delta.
+                output = _tool_output(update)
+                if output:
+                    self.emit("tool_call_delta", tool_call_delta_event(call_id, output))
         elif kind == "plan_update":
             # The SDK nests entries under ``plan`` (PlanUpdate.plan.entries);
-            # tolerate a top-level ``entries`` shape too.
+            # tolerate a top-level ``entries`` shape too. Markdown plans carry
+            # ``content`` instead of entries — forward the raw text so the
+            # bridge can still surface a structured checklist.
             plan = getattr(update, "plan", None) or update
             entries = getattr(plan, "entries", None) or getattr(update, "entries", None)
             if isinstance(entries, list) and entries:
                 self.emit("plan", entries)
+            else:
+                # Markdown plans carry a plain-string ``content`` (no entries).
+                raw_content = getattr(plan, "content", None)
+                if isinstance(raw_content, str):
+                    text = raw_content
+                else:
+                    text = _block_text(raw_content) or _block_text(getattr(update, "content", None))
+                if text:
+                    self.emit("plan", text)
         # usage_update / session_info_update / config_option_update /
         # current_mode_update / available_commands_update are not rendered
         # in CloudChat's chat stream — ignored.
@@ -352,6 +407,11 @@ APPROVAL_TIMEOUT_SECONDS = _env_float("HERMES_ACP_APPROVAL_TIMEOUT", 3600)
 IDLE_TIMEOUT_SECONDS = _env_float("HERMES_ACP_IDLE_TIMEOUT", 1800)
 PROMPT_TIMEOUT_SECONDS = _env_float("HERMES_ACP_PROMPT_TIMEOUT", 3600)
 
+# Spawn resilience: how many times ensure_session retries starting hermes-acp
+# before giving up, and the base backoff between attempts (doubles each time).
+ACP_SPAWN_MAX_ATTEMPTS = max(1, int(os.environ.get("HERMES_ACP_SPAWN_MAX_ATTEMPTS", "3")))
+ACP_SPAWN_BACKOFF_BASE_MS = max(0, int(os.environ.get("HERMES_ACP_SPAWN_BACKOFF_BASE_MS", "250")))
+
 # Client-controlled conversation ids must be scrubbed before they end up in a
 # filename (they can carry path separators / traversal sequences).
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
@@ -371,8 +431,16 @@ async def ensure_session(
     emit: Callable[[str, Any], None],
     provider: Optional[str] = None,
     model: Optional[str] = None,
+    plan_mode: bool = False,
 ) -> _AcpHandle:
-    """Return a live ACP session for this conversation, spawning hermes-acp on first use."""
+    """Return a live ACP session for this conversation, spawning hermes-acp on first use.
+
+    Spawns are retried with backoff (each retry surfaces a ``stream_retry``
+    SSE event); a respawn over a dead process also emits one ``stream_retry``
+    so the UI can explain the hiccup. ``plan_mode`` is passed to hermes-acp as
+    an environment hint (``HERMES_ACP_PLAN_MODE=1``) — best-effort, never
+    blocks spawning.
+    """
     import acp
     from acp.schema import ClientCapabilities, Implementation
 
@@ -386,100 +454,171 @@ async def ensure_session(
             # release its stderr log fd in the background before respawning.
             _sessions.pop(conversation_id, None)
             loop.create_task(_close_handle_quietly(handle))
+            emit(
+                "stream_retry",
+                stream_retry_event(
+                    attempt=1,
+                    max_attempts=ACP_SPAWN_MAX_ATTEMPTS,
+                    reason="acp-transport-reconnect",
+                    delay_ms=0,
+                ),
+            )
 
         cmd = _acp_command()
         if cmd is None:
             raise RuntimeError("hermes-acp binary not found on PATH")
 
-        client = BridgeAcpClient(emit=emit, approvals={})
-        # Drain stderr to a per-conversation log file so a chatty agent can
-        # never deadlock the stdio pipe, and failures are debuggable. The
-        # conversation id is client-controlled — sanitize it before it goes
-        # into a filename.
-        import tempfile
+        spawn_env = None
+        if plan_mode:
+            spawn_env = dict(os.environ)
+            spawn_env["HERMES_ACP_PLAN_MODE"] = "1"
 
-        stderr_path = os.path.join(
-            tempfile.gettempdir(),
-            f"hermes-acp-{_safe_conversation_id(conversation_id)}.log",
+        last_error: Optional[BaseException] = None
+        for spawn_attempt in range(1, ACP_SPAWN_MAX_ATTEMPTS + 1):
+            try:
+                handle = await _spawn_session(
+                    loop=loop,
+                    conversation_id=conversation_id,
+                    cwd=cwd,
+                    cmd=cmd,
+                    emit=emit,
+                    provider=provider,
+                    model=model,
+                    plan_mode=plan_mode,
+                    spawn_env=spawn_env,
+                )
+                _sessions[conversation_id] = handle
+                logger.info(
+                    "acp session %s ready for conversation %s (cwd=%s)",
+                    handle.session_id,
+                    conversation_id,
+                    cwd,
+                )
+                return handle
+            except BaseException as exc:  # noqa: BLE001 - spawn must be retried
+                last_error = exc
+                if spawn_attempt >= ACP_SPAWN_MAX_ATTEMPTS:
+                    raise
+                delay_ms = ACP_SPAWN_BACKOFF_BASE_MS * (2 ** (spawn_attempt - 1))
+                emit(
+                    "stream_retry",
+                    stream_retry_event(
+                        attempt=spawn_attempt,
+                        max_attempts=ACP_SPAWN_MAX_ATTEMPTS,
+                        reason=f"acp-spawn-failed:{exc.__class__.__name__}",
+                        delay_ms=delay_ms,
+                    ),
+                )
+                if delay_ms > 0:
+                    await asyncio.sleep(delay_ms / 1000)
+
+        # Should not reach here — the loop either returns or re-raises.
+        raise RuntimeError("hermes-acp spawn failed") from last_error
+
+
+async def _spawn_session(
+    *,
+    loop: asyncio.AbstractEventLoop,
+    conversation_id: str,
+    cwd: str,
+    cmd: list[str],
+    emit: Callable[[str, Any], None],
+    provider: Optional[str],
+    model: Optional[str],
+    plan_mode: bool,
+    spawn_env: Optional[dict],
+) -> _AcpHandle:
+    """Spawn hermes-acp and initialize a session (single attempt; raises on failure)."""
+    import acp
+    from acp.schema import ClientCapabilities, Implementation
+
+    client = BridgeAcpClient(emit=emit, approvals={}, cwd=cwd)
+    # Drain stderr to a per-conversation log file so a chatty agent can
+    # never deadlock the stdio pipe, and failures are debuggable. The
+    # conversation id is client-controlled — sanitize it before it goes
+    # into a filename.
+    import tempfile
+
+    stderr_path = os.path.join(
+        tempfile.gettempdir(),
+        f"hermes-acp-{_safe_conversation_id(conversation_id)}.log",
+    )
+    stderr_file = None
+    proc = None
+    try:
+        stderr_file = open(stderr_path, "ab", buffering=0)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=cwd or None,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=stderr_file,
+            env=spawn_env,
+            # hermes-acp emits large JSON-RPC lines (initialize/new_session
+            # payloads can carry the full provider catalog + MCP tool lists).
+            # The default 64KB StreamReader limit makes the acp SDK's readline
+            # receive loop raise "Separator is not found" on them.
+            limit=4 * 1024 * 1024,
         )
-        stderr_file = None
-        proc = None
-        try:
-            stderr_file = open(stderr_path, "ab", buffering=0)
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=cwd or None,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=stderr_file,
-                # hermes-acp emits large JSON-RPC lines (initialize/new_session
-                # payloads can carry the full provider catalog + MCP tool lists).
-                # The default 64KB StreamReader limit makes the acp SDK's readline
-                # receive loop raise "Separator is not found" on them.
-                limit=4 * 1024 * 1024,
-            )
-            conn = acp.connect_to_agent(client, proc.stdin, proc.stdout, use_unstable_protocol=True)
+        conn = acp.connect_to_agent(client, proc.stdin, proc.stdout, use_unstable_protocol=True)
 
-            init = await conn.initialize(
-                protocol_version=acp.PROTOCOL_VERSION,
-                client_info=Implementation(name="cloud-chat-hub", version="1.0.0"),
-                client_capabilities=ClientCapabilities(),
-            )
-            auth_methods = getattr(init, "auth_methods", None) or []
-            if auth_methods:
-                first = auth_methods[0]
-                method_id = str(getattr(first, "method_id", "") or "").strip()
-                if method_id:
-                    try:
-                        await conn.authenticate(method_id)
-                    except Exception as exc:
-                        logger.warning("acp authenticate(%s) failed: %s", method_id, exc)
-
-            ns = await conn.new_session(cwd=cwd or ".")
-            session_id = str(getattr(ns, "session_id", "") or "")
-            if not session_id:
-                raise RuntimeError("hermes-acp returned no session id")
-
-            if provider and provider not in ("auto", "default"):
-                model_id = f"{provider}:{model}" if model else provider
+        init = await conn.initialize(
+            protocol_version=acp.PROTOCOL_VERSION,
+            client_info=Implementation(name="cloud-chat-hub", version="1.0.0"),
+            client_capabilities=ClientCapabilities(),
+        )
+        auth_methods = getattr(init, "auth_methods", None) or []
+        if auth_methods:
+            first = auth_methods[0]
+            method_id = str(getattr(first, "method_id", "") or "").strip()
+            if method_id:
                 try:
-                    await conn.set_session_model(model_id, session_id)
+                    await conn.authenticate(method_id)
                 except Exception as exc:
-                    logger.warning("acp set_session_model(%s) failed: %s", model_id, exc)
-        except BaseException:
-            # Setup failed partway — never leave an orphaned hermes-acp or a
-            # leaked stderr log fd behind. Kill + reap, close the log, re-raise.
-            if proc is not None:
-                try:
-                    if proc.returncode is None:
-                        proc.kill()
-                except Exception:
-                    pass
-                try:
-                    await proc.wait()
-                except Exception:
-                    pass
-            if stderr_file is not None:
-                try:
-                    stderr_file.close()
-                except Exception:
-                    pass
-            raise
+                    logger.warning("acp authenticate(%s) failed: %s", method_id, exc)
 
-        handle = _AcpHandle(
-            conversation_id=conversation_id,
-            cwd=cwd,
-            proc=proc,
-            conn=conn,
-            session_id=session_id,
-            client=client,
-            loop=loop,
-            approvals=client._approvals,
-            stderr_file=stderr_file,
-        )
-        _sessions[conversation_id] = handle
-        logger.info("acp session %s ready for conversation %s (cwd=%s)", session_id, conversation_id, cwd)
-        return handle
+        ns = await conn.new_session(cwd=cwd or ".")
+        session_id = str(getattr(ns, "session_id", "") or "")
+        if not session_id:
+            raise RuntimeError("hermes-acp returned no session id")
+
+        if provider and provider not in ("auto", "default"):
+            model_id = f"{provider}:{model}" if model else provider
+            try:
+                await conn.set_session_model(model_id, session_id)
+            except Exception as exc:
+                logger.warning("acp set_session_model(%s) failed: %s", model_id, exc)
+    except BaseException:
+        # Setup failed partway — never leave an orphaned hermes-acp or a
+        # leaked stderr log fd behind. Kill + reap, close the log, re-raise.
+        if proc is not None:
+            try:
+                if proc.returncode is None:
+                    proc.kill()
+            except Exception:
+                pass
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+        if stderr_file is not None:
+            try:
+                stderr_file.close()
+            except Exception:
+                pass
+        raise
+
+    return _AcpHandle(
+        conversation_id=conversation_id,
+        cwd=cwd,
+        proc=proc,
+        conn=conn,
+        session_id=session_id,
+        client=client,
+        loop=loop,
+        approvals=client._approvals,
+        stderr_file=stderr_file,
+    )
 
 
 async def _close_handle_quietly(handle: _AcpHandle) -> None:
@@ -500,6 +639,7 @@ def run_prompt_blocking(
     provider: Optional[str] = None,
     model: Optional[str] = None,
     timeout: Optional[float] = None,
+    plan_mode: bool = False,
 ) -> None:
     """Blocking bridge used from the worker thread (mirrors the agent-loop transport)."""
     import acp
@@ -515,6 +655,7 @@ def run_prompt_blocking(
             emit=emit,
             provider=provider,
             model=model,
+            plan_mode=plan_mode,
         )
         # Mark the handle busy for the whole turn so the idle reaper never
         # SIGKILLs a session mid-prompt (a long stream can legitimately
@@ -526,7 +667,10 @@ def run_prompt_blocking(
             # callback for the duration of this prompt.
             handle.client.emit = emit
             handle.touch()
-            blocks = [acp.text_block(user_message)]
+            prompt_text = user_message
+            if plan_mode:
+                prompt_text = prompt_text + PLAN_MODE_PROMPT_SUFFIX
+            blocks = [acp.text_block(prompt_text)]
             # The `prompt` arg order changed between SDK versions: 0.9.0 is
             # `prompt(prompt, session_id)`, 0.11+ is `prompt(session_id, prompt)`.
             # Inspect the bound method so the transport works on whichever venv

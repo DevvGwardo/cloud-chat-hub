@@ -703,3 +703,167 @@ export async function exportConversationMarkdown(id: string): Promise<Blob> {
   const body = formatConversationMarkdown(conversation, messages);
   return new Blob([body], { type: 'text/markdown' });
 }
+
+// ---------------------------------------------------------------------------
+// Conversation search
+// ---------------------------------------------------------------------------
+
+export interface SearchResult {
+  conversationId: string;
+  messageId: string;
+  role: string;
+  text: string;
+  snippet: string;
+  timestamp: string;
+}
+
+/** Cap on messages scanned from the local IndexedDB message store per search. */
+const SEARCH_LEGACY_SCAN_CAP = 5_000;
+/** Cap on most-recent conversations pulled from the server per search. */
+const SEARCH_SERVER_CONVERSATION_CAP = 25;
+/** Cap on messages fetched from the server per search. */
+const SEARCH_SERVER_MESSAGE_CAP = 3_000;
+/** Characters of context kept on each side of the first match in a snippet. */
+const SEARCH_SNIPPET_RADIUS = 45;
+
+/**
+ * Pure snippet builder: returns a ~`radius`-char window of `text` around the
+ * first case-insensitive occurrence of `query`, with ellipses when truncated.
+ * Returns null when there is no match.
+ */
+export function buildSearchSnippet(text: string, query: string, radius: number = SEARCH_SNIPPET_RADIUS): string | null {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery || !text) return null;
+  const idx = text.toLowerCase().indexOf(normalizedQuery);
+  if (idx === -1) return null;
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(text.length, idx + normalizedQuery.length + radius);
+  let snippet = text.slice(start, end).replace(/\s+/g, ' ').trim();
+  if (start > 0) snippet = `…${snippet}`;
+  if (end < text.length) snippet = `${snippet}…`;
+  return snippet;
+}
+
+/**
+ * Pure ranking + projection over candidate messages. Messages whose content
+ * does not contain the query (case-insensitive) are dropped; survivors are
+ * ranked by earliest match position, then most recent, then limited.
+ */
+export function buildSearchResults(
+  messages: Message[],
+  query: string,
+  limit = 20,
+): SearchResult[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery || messages.length === 0) return [];
+
+  const hits: Array<{ message: Message; matchIndex: number }> = [];
+  for (const message of messages) {
+    if (message.role !== 'user' && message.role !== 'assistant') continue;
+    const text = (message.content ?? '').trim();
+    if (!text) continue;
+    const matchIndex = text.toLowerCase().indexOf(normalizedQuery);
+    if (matchIndex === -1) continue;
+    hits.push({ message, matchIndex });
+  }
+
+  hits.sort((a, b) => {
+    if (a.matchIndex !== b.matchIndex) return a.matchIndex - b.matchIndex;
+    return new Date(b.message.timestamp).getTime() - new Date(a.message.timestamp).getTime();
+  });
+
+  return hits.slice(0, Math.max(1, limit)).map(({ message }) => ({
+    conversationId: message.conversationId,
+    messageId: message.id,
+    role: message.role,
+    text: message.content,
+    snippet: buildSearchSnippet(message.content, normalizedQuery) ?? message.content.slice(0, 90),
+    timestamp: message.timestamp,
+  }));
+}
+
+/**
+ * Scan the local IndexedDB `messages` store with a chunked cursor, yielding to
+ * the event loop every batch so a large store doesn't stall the UI thread.
+ * Stops early once `max` records have been collected.
+ */
+async function scanLegacyMessages(max: number): Promise<Message[]> {
+  if (typeof indexedDB === 'undefined') return [];
+  const { store, complete } = await getLegacyTx('messages', 'readonly');
+  const messages: Message[] = [];
+  await new Promise<void>((resolve, reject) => {
+    const request = store.openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor || messages.length >= max) {
+        resolve();
+        return;
+      }
+      messages.push(cursor.value as Message);
+      if (messages.length % 200 === 0) {
+        // Yield one macrotask per batch to keep the UI responsive.
+        setTimeout(() => cursor.continue(), 0);
+      } else {
+        cursor.continue();
+      }
+    };
+    request.onerror = () => reject(request.error);
+  });
+  await complete;
+  return messages;
+}
+
+/**
+ * Search all conversations' messages for `query` and return the best matches,
+ * newest-first tie-broken, each with a short snippet around the match.
+ *
+ * Sources, merged by message id:
+ *  - the local IndexedDB message store (chunked scan, capped), and
+ *  - when the server backend is active, the most recent conversations' message
+ *    lists (capped) so server-only messages are found too.
+ */
+export async function searchConversations(query: string, limit = 20): Promise<SearchResult[]> {
+  const normalizedQuery = query.trim();
+  if (!normalizedQuery) return [];
+
+  const [legacyMessages, backend] = await Promise.all([
+    scanLegacyMessages(SEARCH_LEGACY_SCAN_CAP).catch(() => [] as Message[]),
+    detectBackendMode().catch(() => 'legacy' as BackendMode),
+  ]);
+
+  const merged = new Map<string, Message>();
+  for (const message of legacyMessages) {
+    merged.set(message.id, message);
+  }
+
+  if (backend === 'server') {
+    try {
+      const conversations = await db.conversations.getAll({ includeArchived: true });
+      const recent = conversations
+        .slice()
+        .sort((a, b) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime())
+        .slice(0, SEARCH_SERVER_CONVERSATION_CAP);
+
+      let fetched = 0;
+      for (let i = 0; i < recent.length && fetched < SEARCH_SERVER_MESSAGE_CAP; i += 5) {
+        const batch = recent.slice(i, i + 5);
+        const batches = await Promise.all(
+          batch.map((conversation) =>
+            db.messages.getByConversation(conversation.id).catch(() => [] as Message[]),
+          ),
+        );
+        for (const messages of batches) {
+          for (const message of messages) {
+            if (fetched >= SEARCH_SERVER_MESSAGE_CAP) break;
+            merged.set(message.id, message);
+            fetched++;
+          }
+        }
+      }
+    } catch {
+      // Server search is best-effort; fall through to whatever is local.
+    }
+  }
+
+  return buildSearchResults(Array.from(merged.values()), normalizedQuery, limit);
+}

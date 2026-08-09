@@ -15,6 +15,8 @@ import { ChangeApprovalModal } from './ChangeApprovalModal';
 import { AcpApprovalBanner } from './AcpApprovalBanner';
 import { ChatErrorBanner } from './ChatErrorBanner';
 import { ChatSurfaceBackground } from './ChatSurfaceBackground';
+import { PlanChecklist } from './PlanChecklist';
+import { ImplementPlanGate } from './ImplementPlanGate';
 import { BuddyComparisonPanel, type BuddyResponse } from './BuddyComparisonPanel';
 import { getProviderLabel } from '@/lib/providers';
 import type { Provider } from '@/stores/settings-store';
@@ -49,6 +51,7 @@ import { useContextUsageStore } from '@/stores/context-usage-store';
 import { useUIStore } from '@/stores/ui-store';
 import { useChangesetStore } from '@/stores/changeset-store';
 import { useHermesStore } from '@/stores/hermes-store';
+import type { ToolCallRecordsByMessage } from '@/stores/hermes-store';
 import { useChatScopeId, usePanelId } from '@/contexts/PanelContext';
 import {
   getProposalApprovalKey,
@@ -460,12 +463,24 @@ interface ChatAreaProps {
   onComputerUseDockCollapse?: () => void;
   conversationAutoApproveEnabled?: boolean;
   setConversationAutoApprove?: (value: boolean) => void;
+  /** Structured tool-call records per message (mirrored via the hermes store
+   *  per panel when the panel runtime doesn't forward them). */
+  toolCallRecords?: ToolCallRecordsByMessage;
+  /** Explicit retry for a failed tool card. */
+  onRetryTool?: (toolName: string, callId?: string) => void;
+  /** Edit the last user message and resend (falls back to the chat runtime
+   *  action channel when not provided). */
+  onEditMessage?: (content: string) => void;
   /** Buddy/secondary model response for comparison after Hermes completes */
   buddyResponse?: BuddyResponse | null;
   /** Callback when user wants to use the buddy response */
   onUseBuddyResponse?: (content: string) => void;
   /** Disable @file:/@folder:/@diff/@url: autocomplete (room chat). */
   contextRefsEnabled?: boolean;
+  /** Plan gate decision (clearContext = start a new conversation first).
+   *  Provided by the standard chat runtime; falls back to sending in the
+   *  current conversation for runtimes without a sendMessage path. */
+  onImplementPlan?: (clearContext: boolean) => void;
 }
 
 export const ChatArea: React.FC<ChatAreaProps> = ({
@@ -495,9 +510,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onComputerUseDockCollapse,
   conversationAutoApproveEnabled = false,
   setConversationAutoApprove,
+  toolCallRecords: toolCallRecordsProp,
+  onRetryTool,
+  onEditMessage,
   buddyResponse,
   onUseBuddyResponse,
   contextRefsEnabled = true,
+  onImplementPlan,
 }) => {
   const panelId = usePanelId();
   const scopeId = useChatScopeId();
@@ -534,11 +553,18 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const queuePanelPrompt = useUIStore((state) => state.queuePanelPrompt);
   const changeset = useChangesetStore((state) => state.getChangeset(scopeId));
   const planMode = useChatStore((state) => state.planMode);
+  const planSteps = useChatStore((state) => state.planSteps);
+  const planGatePrompt = useChatStore((state) => state.planGatePrompt);
   const alwaysApprovalPolicies = useSettingsStore((state) => state.approvalPolicies);
   const addAlwaysApprovalPolicy = useSettingsStore((state) => state.addApprovalPolicy);
   const sessionApprovalPolicies = useHermesStore((state) => state.sessionApprovalPolicies);
   const addSessionApprovalPolicy = useHermesStore((state) => state.addSessionApprovalPolicy);
   const clearSessionApprovalPolicies = useHermesStore((state) => state.clearSessionApprovalPolicies);
+  // Structured tool-call records: the panel runtime may not forward the prop
+  // (ChatRuntimeArea only passes the props it knows) — the hermes store
+  // mirror set by useChat covers that case.
+  const recordsMirror = useHermesStore((state) => state.toolCallRecordsByPanel[panelId]);
+  const effectiveToolCallRecords = toolCallRecordsProp ?? recordsMirror;
   const repoComposerLocked = changeset.isRepoMode && changeset.repoFileTreeStatus === 'loading';
   const disabledPlaceholder = repoComposerLocked
     ? `Loading ${changeset.activeRepo?.fullName || 'repository'} files...`
@@ -849,6 +875,52 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     }
   }, [conversationId]);
 
+  // Retry/edit actions: prefer the prop callback when the panel runtime
+  // forwards it, else enqueue through the hermes store — the active useChat
+  // runtime consumes those and applies the action (retry injection /
+  // edit-and-resend).
+  const handleRetryToolAction = useCallback((toolName: string, callId?: string) => {
+    if (onRetryTool) {
+      onRetryTool(toolName, callId);
+      return;
+    }
+    useHermesStore.getState().requestChatAction(panelId, { kind: 'retry_tool', toolName, callId });
+  }, [onRetryTool, panelId]);
+
+  const handleEditAction = useCallback((content: string) => {
+    if (onEditMessage) {
+      onEditMessage(content);
+      return;
+    }
+    useHermesStore.getState().requestChatAction(panelId, { kind: 'edit_message', content });
+  }, [onEditMessage, panelId]);
+
+  // Plan gate: prefer the runtime's implementation path (it can start a new
+  // conversation race-free); fall back to sending into the current
+  // conversation for runtimes that don't forward the callback (room chat).
+  const handlePlanImplement = useCallback((clearContext: boolean) => {
+    if (onImplementPlan) {
+      onImplementPlan(clearContext);
+      return;
+    }
+    const prompt = useChatStore.getState().planGatePrompt;
+    if (!prompt) return;
+    const content = `Here is the approved plan — implement it now:\n\n${prompt}`;
+    useChatStore.getState().setPlanGatePrompt(null);
+    useChatStore.getState().setPlanSteps(null);
+    if (handleQuickSend) {
+      void handleQuickSend(content);
+    } else {
+      setInput(content);
+      handleSend();
+    }
+  }, [handleQuickSend, handleSend, onImplementPlan, setInput]);
+
+  const handlePlanGateCancel = useCallback(() => {
+    // Stay in plan mode: dismiss the gate, keep the checklist as the record.
+    useChatStore.getState().setPlanGatePrompt(null);
+  }, []);
+
   const handleIssueFix = useCallback(() => {
     const activeRepo = useChangesetStore.getState().getChangeset(scopeId).activeRepo;
     if (!activeRepo?.issue) {
@@ -894,6 +966,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     const toolActivityMap = toolActivityMapRef.current;
     const isLastAssistantStreaming =
       isStreaming && msg.role === 'assistant' && index === messages.length - 1;
+    const lastUserMessageId = messages.findLast((m) => m.role === 'user')?.id;
     const allowPseudoRepoWrites = msg.role === 'assistant'
       ? allowPseudoRepoWritesForAssistant(messages, index)
       : false;
@@ -917,8 +990,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     const messageToolActivity = toolActivityMap?.[msg.id]
       || (isLastAssistantStreaming ? toolActivityMap?.['current'] : undefined);
 
+    // Structured records for this message (or the live stream).
+    const messageToolCallRecords = msg.role === 'assistant'
+      ? (effectiveToolCallRecords?.[msg.id] ??
+        (isLastAssistantStreaming ? effectiveToolCallRecords?.current : undefined))
+      : undefined;
+
     return (
-      <div className="max-w-[720px] mx-auto px-4 md:px-20 py-3">
+      <div className="max-w-[720px] mx-auto px-4 md:px-20 py-2.5">
         <MessageBubble
           key={msg.id}
           message={{
@@ -935,10 +1014,17 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           isReasoningStreaming={isReasoningStreaming}
           toolInvocations={toolInvocations as React.ComponentProps<typeof MessageBubble>['toolInvocations']}
           toolActivity={messageToolActivity}
+          toolCallRecords={messageToolCallRecords}
+          onRetryTool={handleRetryToolAction}
           allowPseudoRepoWrites={allowPseudoRepoWrites}
           onRegenerate={
             msg.role === 'assistant' && index === messages.length - 1 && !isStreaming
               ? handleRegenerate
+              : undefined
+          }
+          onEdit={
+            msg.role === 'user' && msg.id === lastUserMessageId && !isStreaming
+              ? handleEditAction
               : undefined
           }
           onRewind={
@@ -949,7 +1035,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         />
       </div>
     );
-  }, [handleRegenerate, handleRewind]);
+  }, [effectiveToolCallRecords, handleEditAction, handleRegenerate, handleRetryToolAction, handleRewind]);
 
   const virtuosoContext = useMemo<ChatVirtuosoContext>(() => ({
     footer: {
@@ -1080,6 +1166,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <div className="mx-auto w-full max-w-[720px] px-3 md:px-20">
               <AgentTaskPanel events={panelToolActivity} />
             </div>
+            {planSteps !== null && (
+              <div className="mx-auto w-full max-w-[720px] px-3 md:px-20 pb-2">
+                <PlanChecklist />
+              </div>
+            )}
+            {planGatePrompt !== null && (
+              <div className="mx-auto w-full max-w-[720px] px-3 md:px-20 pb-2">
+                <ImplementPlanGate onImplement={handlePlanImplement} onCancel={handlePlanGateCancel} />
+              </div>
+            )}
             <ChatInput
               value={input}
               onChange={setInput}
@@ -1172,6 +1268,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           ) : null}
           <AgentTaskPanel events={panelToolActivity} />
         </div>
+        {planSteps !== null && (
+          <div className="mx-auto w-full max-w-[720px] px-3 md:px-20 pb-2">
+            <PlanChecklist />
+          </div>
+        )}
+        {planGatePrompt !== null && (
+          <div className="mx-auto w-full max-w-[720px] px-3 md:px-20 pb-2">
+            <ImplementPlanGate onImplement={handlePlanImplement} onCancel={handlePlanGateCancel} />
+          </div>
+        )}
         <ChatInput
           value={input}
           onChange={setInput}

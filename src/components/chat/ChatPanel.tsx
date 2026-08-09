@@ -63,6 +63,7 @@ function ChatRuntimeArea({
       onComputerUseDockCollapse={'handleComputerUseDockCollapse' in chat ? chat.handleComputerUseDockCollapse : undefined}
       conversationAutoApproveEnabled={'conversationAutoApproveEnabled' in chat ? (chat.conversationAutoApproveEnabled as boolean) : false}
       setConversationAutoApprove={'setConversationAutoApprove' in chat ? (chat.setConversationAutoApprove as (value: boolean) => void) : undefined}
+      onImplementPlan={'handleImplementPlan' in chat ? (chat.handleImplementPlan as (clearContext: boolean) => void) : undefined}
     />
   );
 }

@@ -1,5 +1,5 @@
 import type { Express } from 'express';
-import { StreamData, streamText, tool, type CoreMessage, type JSONValue } from 'ai';
+import { StreamData, streamText, tool, type CoreMessage, type CoreTool, type JSONValue } from 'ai';
 import { z } from 'zod';
 import { buildServerRepoTools, type ServerToolEvent } from '../agent-loop';
 import {
@@ -34,11 +34,86 @@ import {
   getActiveHermesRuns,
   getHermesRunPartialText,
 } from '../lib/hermes';
-import { buildLocalExecutionTools, parseAgentToolsets, getLocalToolsSystemPromptFragment } from '../local-tools';
+import { buildLocalExecutionTools, parseAgentToolsets, getLocalToolsSystemPromptFragment, type ToolExecutionInfo } from '../local-tools';
 import { MAX_AGENT_STEPS } from '../config';
 import { ensureProfileExists, getProfileFromRequest } from '../lib/hermes-profiles';
+import { approvalPolicyStore } from '../approval-engine';
+import { buildUsageEvent } from '../lib/usage-events';
+import { coreToolsToOpenAiFunctions } from '../lib/tool-schema';
 
 // ─── /functions/v1/chat ──────────────────────────────────────────────────────
+
+// ─── Server tool-call event synthesis ───────────────────────────────────────
+// The fixed event contract (B1 emits these on the bridge paths; the server
+// synthesizes them for server-executed tools on the streamText path):
+//   tool_call_begin {type, call_id, name, ts}
+//   tool_call_delta {type, call_id, output}
+//   tool_call_end   {type, call_id, name, success, exit_code, duration_ms,
+//                    output_truncated, output_truncated_lines}
+// Structured execution info (real exit codes for shell tools) is reported by
+// local-tools.ts via the onExecuted hook and keyed by toolCallId.
+
+const TOOL_CALL_OUTPUT_MAX_CHARS = 15_000;
+
+function truncateToolCallOutput(output: string): string {
+  if (output.length <= TOOL_CALL_OUTPUT_MAX_CHARS) {
+    return output;
+  }
+  return `${output.slice(0, TOOL_CALL_OUTPUT_MAX_CHARS)}\n… [output truncated]`;
+}
+
+function wrapToolWithCallEvents(
+  name: string,
+  coreTool: CoreTool,
+  emit: (event: ServerToolEvent) => void,
+  executionInfo: Map<string, Pick<ToolExecutionInfo, 'exitCode' | 'outputTruncated' | 'outputTruncatedLines'>>,
+): CoreTool {
+  const originalExecute = coreTool.execute;
+  // Client-executed tools (artifact creators) have no server execute handler —
+  // nothing to synthesize.
+  if (!originalExecute) {
+    return coreTool;
+  }
+
+  return {
+    ...coreTool,
+    execute: async (args, options) => {
+      const callId = options?.toolCallId ?? `${name}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+      const ts = Date.now();
+      emit({ type: 'tool_call_begin', call_id: callId, name, ts });
+
+      const startedAt = Date.now();
+      let success = true;
+      let output = '';
+      let _thrown: unknown = null;
+      try {
+        const result = await originalExecute(args, options);
+        output = typeof result === 'string' ? result : JSON.stringify(result ?? '');
+        return result;
+      } catch (error) {
+        success = false;
+        _thrown = error;
+        output = error instanceof Error ? error.message : String(error);
+        throw error;
+      } finally {
+        const durationMs = Date.now() - startedAt;
+        const info = executionInfo.get(callId);
+        emit({ type: 'tool_call_delta', call_id: callId, output: truncateToolCallOutput(output) });
+        emit({
+          type: 'tool_call_end',
+          call_id: callId,
+          name,
+          success,
+          exit_code: info?.exitCode ?? null,
+          duration_ms: durationMs,
+          output_truncated: info?.outputTruncated ?? false,
+          output_truncated_lines: info?.outputTruncatedLines ?? 0,
+        });
+        executionInfo.delete(callId);
+      }
+    },
+  };
+}
 
 const PLAN_MODE_SYSTEM_PROMPT = `You are operating in PLAN MODE (read-only exploration).
 
@@ -239,6 +314,27 @@ function formatCachedFilesForPrompt(cache: Record<string, unknown>): string {
 
 export function registerChatRoute(app: Express) {
 
+// Resolve a pending server-side tool approval (approval-engine). Mirrors the
+// bridge's /v1/approvals/{id} contract so the client can use one flow for
+// both ACP approvals (bridge) and streamText-path tool approvals (server).
+app.post('/api/hermes/approvals/:id', (req, res) => {
+  const { id } = req.params;
+  const body = (req.body ?? {}) as { decision?: unknown; reason?: unknown };
+  const decision = body.decision;
+  if (decision !== 'approved' && decision !== 'approved_for_session' && decision !== 'denied') {
+    return sendJson(res, 400, {
+      error: 'decision must be one of: "approved", "approved_for_session", "denied"',
+    });
+  }
+  const reason = typeof body.reason === 'string' && body.reason.length > 0 ? body.reason : undefined;
+  const delivered = approvalPolicyStore.resolveApproval(id, decision, reason);
+  if (!delivered) {
+    return sendJson(res, 404, { error: `Unknown or expired approval: ${id}` });
+  }
+  logger.info(`[approvals] Resolved approval ${id} decision=${decision}`);
+  sendJson(res, 200, { ok: true, approval_id: id, decision });
+});
+
 // Explicit cancel for a background-capable hermes run. The UI Stop button
 // calls this — a plain client disconnect (window closed) intentionally does
 // NOT stop the run; it continues server-side and persists its result.
@@ -314,9 +410,24 @@ app.post('/functions/v1/chat', async (req, res) => {
       agent_toolsets,
       custom_tools,
       hermes_use_runs,
+      auto_approve: rawAutoApprove,
+      continuing_approved_proposal: rawContinuingApprovedProposal,
     } = req.body;
 
     const planMode = rawPlanMode === true || rawPlanMode === 'true';
+    // Per-conversation auto-approve for server-side approval gates (additive;
+    // the client settings UI sends this when the user opts into auto-approve).
+    const autoApprove = rawAutoApprove === true || rawAutoApprove === 'true';
+    // The client only sends this after the user approved a repo proposal, so
+    // the repo edits in this turn are sanctioned.
+    const continuingApprovedProposal = rawContinuingApprovedProposal === true;
+    const conversationKey =
+      typeof conversation_id === 'string' && conversation_id.trim().length > 0
+        ? conversation_id.trim()
+        : 'default';
+    if (autoApprove) {
+      approvalPolicyStore.setAutoApprove(conversationKey, true);
+    }
 
     const sanitizeFileTree = (tree: unknown): string[] =>
       Array.isArray(tree)
@@ -664,15 +775,86 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
           })
         : false;
 
-    // Collect server tool events to inject into the data stream
+    // Collect server tool events to inject into the data stream. Unlike the
+    // old code (which drained an empty array before piping), the StreamData is
+    // created up front and events are appended IN REAL TIME — tool execute
+    // handlers run lazily during piping, so events emitted mid-stream now
+    // actually reach the client as `data` parts.
     const serverToolEvents: ServerToolEvent[] = [];
+    const streamData = new StreamData();
+    let streamDataClosed = false;
+    const closeStreamData = () => {
+      if (streamDataClosed) {
+        return;
+      }
+      streamDataClosed = true;
+      try {
+        streamData.close();
+      } catch {
+        // Already closed via another path.
+      }
+    };
     const emitToolEvent = (event: ServerToolEvent) => {
       serverToolEvents.push(event);
+      if (!streamDataClosed) {
+        try {
+          // `data` part (code 2) — the client pre-scanner collects custom
+          // fields from these; message_annotations (code 8) is NOT scanned.
+          streamData.append(event as unknown as JSONValue);
+        } catch {
+          // Stream already closed (e.g. error during teardown) — drop.
+        }
+      }
+    };
+
+    // Structured execution info (exit codes etc.) reported by local-tools.ts,
+    // keyed by toolCallId so the tool_call_end synthesizer can use it.
+    const toolExecutionInfo = new Map<
+      string,
+      Pick<ToolExecutionInfo, 'exitCode' | 'outputTruncated' | 'outputTruncatedLines'>
+    >();
+    const onToolExecuted = (info: ToolExecutionInfo) => {
+      toolExecutionInfo.set(info.toolCallId, {
+        exitCode: info.exitCode,
+        outputTruncated: info.outputTruncated,
+        outputTruncatedLines: info.outputTruncatedLines,
+      });
+    };
+
+    // Approval gate for server-executed tools (run_command, execute_python,
+    // repo write tools). Safe commands and matching policy rules are allowed
+    // silently by the engine; anything else parks the execution and emits an
+    // approval_request custom field the client renders as a modal.
+    const requestApproval = async (input: {
+      tool: string;
+      command?: string;
+      cwd?: string;
+      reason: string;
+    }): Promise<'approved' | 'denied' | 'timed_out' | 'abort'> => {
+      const isRepoWriteTool =
+        input.tool === 'edit_repo_file' ||
+        input.tool === 'create_repo_file' ||
+        input.tool === 'delete_repo_file' ||
+        input.tool === 'batch_edit_repo_files';
+      return approvalPolicyStore.authorize({
+        conversationId: conversationKey,
+        tool: input.tool,
+        command: input.command,
+        cwd: input.cwd,
+        reason: input.reason,
+        // Repo writes are additionally auto-approved for the turn following an
+        // approved proposal (the client's proposal modal already gated them).
+        autoApprove: continuingApprovedProposal && isRepoWriteTool,
+        emit: (payload) => emitToolEvent(payload as unknown as ServerToolEvent),
+      });
     };
 
     // Build local execution tools (terminal, files, code_execution) for any provider
     const localToolsets = parseAgentToolsets(agent_toolsets);
-    let localTools = buildLocalExecutionTools(localToolsets);
+    let localTools = buildLocalExecutionTools(localToolsets, {
+      requestApproval,
+      onExecuted: onToolExecuted,
+    });
     const planModeFileTools = planMode
       ? { create_html_file: fileTools.create_html_file }
       : fileTools;
@@ -715,6 +897,7 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
             repoEditIntent: !!repo_edit_intent,
           },
           emitToolEvent,
+          { requestApproval },
         )
       : {};
     const filteredRepoTools = planMode
@@ -835,12 +1018,15 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
         reasoningEffort: typeof reasoning_effort === 'string' ? reasoning_effort : undefined,
         hermesUseRuns,
         executionMode: hermesExecutionMode,
+        // Plan mode: the bridge restricts itself to read-only exploration and
+        // the server strips mutating tools from forwarded definitions.
+        planMode,
       });
       return;
     }
 
-    if (shouldDirectProxyCompatibleProvider(provider, hasServerRepoContext) && !hasLocalTools && !planMode) {
-      logger.info(`[chat] Proxying ${provider} directly to AI SDK data stream. model=${model}`);
+    if (shouldDirectProxyCompatibleProvider(provider, hasServerRepoContext) && !hasLocalTools) {
+      logger.info(`[chat] Proxying ${provider} directly to AI SDK data stream. model=${model} planMode=${planMode ? '1' : '0'}`);
       await proxyCompatibleProviderToDataStream({
         req,
         res,
@@ -851,6 +1037,14 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
         temperature,
         topP: top_p,
         maxTokens: max_tokens,
+        // Plan mode: forward only the read-only tool set (artifact creators)
+        // upstream; mutating/terminal tools are never defined.
+        ...(planMode
+          ? {
+              planMode: true,
+              planModeTools: coreToolsToOpenAiFunctions(planModeFileTools as Record<string, CoreTool>),
+            }
+          : {}),
       });
       return;
     }
@@ -919,6 +1113,14 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
       ...filteredRepoTools,
       ...localTools,
     };
+    // Synthesize tool_call_begin/delta/end for every server-executed tool
+    // (repo tools + local execution tools; artifact creators have no server
+    // execute handler and are skipped). Real exit codes come from
+    // local-tools.ts via toolExecutionInfo.
+    const wrappedTools: Record<string, CoreTool> = {};
+    for (const [name, coreTool] of Object.entries(allTools)) {
+      wrappedTools[name] = wrapToolWithCallEvents(name, coreTool, emitToolEvent, toolExecutionInfo);
+    }
     const useServerAgentLoop = hasServerRepoContext || hasLocalTools;
     const hasTools = Object.keys(allTools).length > 0;
     logger.info(`[chat] Starting streamText. maxTokens=${max_tokens ?? defaultMaxTokens} maxSteps=${useServerAgentLoop ? MAX_AGENT_STEPS : 1} tools=${hasTools ? Object.keys(allTools).join(',') : '(none)'} toolSafe=${isToolSafeProvider} localTools=${hasLocalTools}`);
@@ -930,7 +1132,7 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
       maxTokens: max_tokens ?? defaultMaxTokens,
       abortSignal: abortController.signal,
       ...(providerOptions ? { providerOptions } : {}),
-      ...(hasTools ? { tools: allTools, toolCallStreaming: true } : {}),
+      ...(hasTools ? { tools: wrappedTools, toolCallStreaming: true } : {}),
       // Bound agent steps to prevent runaway tool-call loops. The cap is
       // configurable via the MAX_AGENT_STEPS env var (default 50).
       ...(hasTools && useServerAgentLoop ? { maxSteps: MAX_AGENT_STEPS } : {}),
@@ -945,21 +1147,26 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
             completionTokens: finishResult.usage.completionTokens,
             totalTokens: finishResult.usage.totalTokens,
           }));
+          // Trailing `usage` custom field (contract: once at stream end).
+          const usageEvent = buildUsageEvent(
+            {
+              inputTokens: finishResult.usage.promptTokens,
+              outputTokens: finishResult.usage.completionTokens,
+            },
+            model,
+          );
+          emitToolEvent(usageEvent as unknown as ServerToolEvent);
         }
+        // All tool execute handlers have run by now — the StreamData carries
+        // every event appended during execution; closing it ends the merged
+        // data stream after the main stream completes.
+        closeStreamData();
       },
     });
 
     // Use pipeDataStreamToResponse for proper Node.js streaming.
     // This avoids issues with toDataStreamResponse where the finish
     // message can be emitted before content for some providers.
-    let streamData: StreamData | undefined;
-    if (serverToolEvents.length > 0) {
-      streamData = new StreamData();
-      for (const event of serverToolEvents) {
-        streamData.appendMessageAnnotation(event as unknown as JSONValue);
-      }
-      streamData.close();
-    }
     result.pipeDataStreamToResponse(res, {
       headers: buildCorsHeaders(req.headers.origin),
       sendReasoning: true,
@@ -967,6 +1174,7 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
       getErrorMessage: (error: unknown) => {
         const msg = error instanceof Error ? error.message : String(error);
         logger.error(`[chat] Stream error: ${msg}`);
+        closeStreamData();
         return msg;
       },
     });

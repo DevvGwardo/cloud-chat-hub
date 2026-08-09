@@ -17,6 +17,15 @@ import httpx
 import pricing
 import mcp_telemetry
 import delegation_live
+from bridge_events import (
+    build_plan_update_event,
+    filter_toolsets_for_plan_mode,
+    output_truncation_info,
+    stream_retry_event,
+    todo_plan_steps,
+    tool_call_begin_event,
+    tool_call_end_event,
+)
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -4590,6 +4599,11 @@ def _finalize_tracked_session(
 async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
     toolsets_header = request.headers.get("x-hermes-toolsets", DEFAULT_TOOLSETS)
     enabled_toolsets = [t.strip() for t in toolsets_header.split(",") if t.strip()]
+    # Plan mode: mutating tools are stripped before the agent is built (the
+    # server sends this in the request extra fields for the streamText path).
+    plan_mode = bool((body.model_extra or {}).get("plan_mode"))
+    if plan_mode:
+        print(f"[hermes-bridge] plan_mode: stripping mutating toolsets from {enabled_toolsets}", flush=True)
     execution_mode = request.headers.get("x-hermes-execution-mode", "agent-loop").strip().lower() or "agent-loop"
     request_profile = _resolve_profile_name(request)
     repo_owner = request.headers.get("x-hermes-repo-owner", "")
@@ -5314,9 +5328,24 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             resources.append(resource)
         return resources
 
-    def on_tool_start(tool_name: str, tool_input: str):
+    # Structured tool-call state for the agent-loop transport (worker-thread
+    # callbacks may fire from parallel tool execution, hence the lock).
+    tool_state_lock = threading.Lock()
+    _active_tool_state: dict = {}  # call_id -> {"ts": monotonic, "name": tool}
+    _pending_tool_ids: dict[str, list] = {}  # tool_name -> [call_ids] (FIFO fallback)
+
+    def on_tool_start(tool_name: str, tool_input: str, call_id: Optional[str] = None):
         # Record MCP tool activity for the MCP dashboard (no-op for non-mcp_ tools).
         mcp_telemetry.record_tool_start(tool_name, tool_input)
+        # Structured tool_call_begin: stable call_id across begin/delta/end.
+        # Agents that know the provider's tool_call id pass it through; the
+        # bridge generates one otherwise and pairs begin/end FIFO per tool.
+        with tool_state_lock:
+            if call_id is None:
+                call_id = f"hermes-{uuid.uuid4().hex[:16]}"
+                _pending_tool_ids.setdefault(tool_name, []).append(call_id)
+            _active_tool_state[call_id] = {"ts": time.monotonic(), "name": tool_name}
+        _qput(("tool_call_begin", tool_call_begin_event(call_id, tool_name)))
         # Emit tool start as visible text so user sees activity
         _qput(("tool_start", tool_name, tool_input))
         _append_session_chat_chunk(
@@ -5329,13 +5358,41 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             for resource in _repo_claim_resources(tool_name, tool_input):
                 _brain_claim(resource, ttl=120)
 
-    def on_tool_end(tool_name: str, tool_input: str, tool_output: str):
+    def on_tool_end(
+        tool_name: str,
+        tool_input: str,
+        tool_output: str,
+        call_id: Optional[str] = None,
+        exit_code: Optional[int] = None,
+        output_truncated: bool = False,
+        output_truncated_lines: int = 0,
+    ):
         # The composer task panel parses these tools' JSON output (todo lists,
         # subagent results, background process previews) — a 500-char cap
         # truncates the JSON mid-document, so give them more headroom.
         cap = 4000 if tool_name in ("todo", "delegate_task", "process", "terminal") else 500
         # Record MCP tool completion (latency, ok/err) for the MCP dashboard.
         mcp_telemetry.record_tool_end(tool_name, tool_output)
+        # Pair the end with the matching begin (agent-provided id wins).
+        with tool_state_lock:
+            if call_id is None:
+                pending = _pending_tool_ids.get(tool_name) or []
+                call_id = pending.pop(0) if pending else f"hermes-{uuid.uuid4().hex[:16]}"
+            state = _active_tool_state.pop(call_id, {})
+        started_ts = state.get("ts")
+        duration_ms = int((time.monotonic() - started_ts) * 1000) if started_ts else 0
+        if not output_truncated:
+            output_truncated, output_truncated_lines = output_truncation_info(tool_output, cap)
+        success = not (tool_output or "").strip().lower().startswith(("error:", "failed:"))
+        _qput(("tool_call_end", tool_call_end_event(
+            call_id,
+            tool_name,
+            success=success,
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            output_truncated=output_truncated,
+            output_truncated_lines=output_truncated_lines,
+        )))
         _qput(("tool_end", tool_name, tool_output[:cap]))
         _append_session_chat_chunk(
             session_id,
@@ -5346,6 +5403,12 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
         if tool_name in REPO_EDIT_TOOL_NAMES:
             for resource in _repo_claim_resources(tool_name, tool_input):
                 _brain_release(resource)
+        # Plan mode-ish: the hermes ``todo`` tool carries a checklist — surface
+        # it as a structured plan_update when parseable (agent-loop path).
+        if tool_name == "todo":
+            steps = todo_plan_steps(tool_output)
+            if steps:
+                _qput(("plan_update", {"type": "plan_update", "steps": steps}))
 
     def on_text(text: str):
         _append_session_chat_chunk(session_id, "assistant", text)
@@ -5377,6 +5440,10 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
         if reason:
             event["reason"] = reason
         _qput(("transport_status", event))
+
+    def on_stream_retry(attempt: int, max_attempts: int, reason: str, delay_ms: int):
+        # The agent-loop retried an upstream stream — surface it once per retry.
+        _qput(("stream_retry", stream_retry_event(attempt, max_attempts, reason, delay_ms)))
 
     def on_computer_use_frame(frame: dict):
         _qput(("computer_use_frame", frame))
@@ -5486,6 +5553,8 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                 if worktree_active
                 else enabled_toolsets
             )
+            if plan_mode:
+                agent_toolsets = filter_toolsets_for_plan_mode(agent_toolsets)
             agent_repo_mode = has_repo_tools and not worktree_active
             if worktree_active and has_repo_tools:
                 print(
@@ -5643,10 +5712,12 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                 "custom_tools": custom_tools,
                 "workspace_id": workspace_id,
                 "reasoning_effort": reasoning_effort,
+                "plan_mode": plan_mode,
                 "on_tool_start": on_tool_start,
                 "on_tool_end": on_tool_end,
                 "on_text": on_text,
                 "on_server_tool_event": on_server_tool_event,
+                "on_stream_retry": on_stream_retry,
             }
             if _using_real_agent:
                 agent_kwargs["on_fallback_switch"] = on_fallback_switch
@@ -5748,6 +5819,16 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                     yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
                         "tool_activity": {"tool": tool_name, "status": "completed", "input": "", "output": tool_output}
                     }))
+                elif event[0] == "tool_call_begin":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"tool_call_begin": event[1]}))
+                elif event[0] == "tool_call_delta":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"tool_call_delta": event[1]}))
+                elif event[0] == "tool_call_end":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"tool_call_end": event[1]}))
+                elif event[0] == "stream_retry":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"stream_retry": event[1]}))
+                elif event[0] == "plan_update":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"plan_update": event[1]}))
                 elif event[0] == "thinking":
                     iteration = event[1]
                     status_label = (
@@ -5967,6 +6048,9 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
     workspace_id = _resolve_workspace_id(request, body)
     session_id = workspace_id
     cwd = repo_root_header or os.getcwd()
+    # Plan mode: passed to hermes-acp as an env hint + prompt suffix (the real
+    # agent owns its tool registration; this is best-effort enforcement).
+    plan_mode = bool((body.model_extra or {}).get("plan_mode"))
 
     request_messages = _normalize_chat_messages(body.messages, model=body.model, strip_images=True)
     last_user_idx = None
@@ -6055,6 +6139,14 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
             on_approval_request(payload[0])
         elif kind == "plan":
             _qput(("plan", payload[0]))
+        elif kind == "tool_call_begin":
+            _qput(("tool_call_begin", payload[0]))
+        elif kind == "tool_call_delta":
+            _qput(("tool_call_delta", payload[0]))
+        elif kind == "tool_call_end":
+            _qput(("tool_call_end", payload[0]))
+        elif kind == "stream_retry":
+            _qput(("stream_retry", payload[0]))
 
     request_outcome = {"success": True, "error": None}
 
@@ -6068,6 +6160,7 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
                 emit=_acp_emit,
                 provider=provider,
                 model=body.model,
+                plan_mode=plan_mode,
             )
             print(f"[hermes-bridge] ACP conversation completed. conversation={workspace_id}", flush=True)
             _finalize_session(True)
@@ -6122,6 +6215,16 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
                     yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
                         "tool_activity": {"tool": tool_name, "status": "completed", "input": tool_input, "output": tool_output}
                     }))
+                elif event[0] == "tool_call_begin":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"tool_call_begin": event[1]}))
+                elif event[0] == "tool_call_delta":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"tool_call_delta": event[1]}))
+                elif event[0] == "tool_call_end":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"tool_call_end": event[1]}))
+                elif event[0] == "stream_retry":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"stream_retry": event[1]}))
+                elif event[0] == "plan_update":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"plan_update": event[1]}))
                 elif event[0] == "reasoning":
                     yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"reasoning": event[1]}))
                 elif event[0] == "thinking":
@@ -6136,9 +6239,16 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
                 elif event[0] == "approval_request":
                     yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"approval_request": event[1]}))
                 elif event[0] == "plan":
-                    plan_text = _format_plan_text(event[1])
+                    # Keep the legacy markdown flattening (backward compat) and
+                    # ALSO emit the structured checklist for the UI.
+                    source = event[1]
+                    entries = source if isinstance(source, list) else []
+                    plan_text = _format_plan_text(entries)
                     if plan_text:
                         yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"content": plan_text}))
+                    plan_update = build_plan_update_event(source)
+                    if plan_update:
+                        yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"plan_update": plan_update}))
 
             if not done_event.is_set():
                 now = time.monotonic()

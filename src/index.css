@@ -47,6 +47,7 @@
     --sidebar-active: 0 0% 92%;
 
     --code-bg: 220 5% 96%;
+    --text-dim: 0 0% 45%;
 
     --sidebar-background: 0 0% 98%;
     --sidebar-primary: 31 100% 50%;
@@ -224,6 +225,17 @@ code, pre, .font-mono {
   font-family: 'Geist Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
 }
 
+/* User message chip — Codex TUI treatment: a subtle elevation of the surface
+   (bg + 4% black in light, bg + 12% white in dark) instead of a boxed bubble.
+   Computed from --background so it follows every theme (Default, Ayu, …). */
+.chat-user-chip {
+  background: color-mix(in srgb, hsl(var(--background)) 96%, black);
+}
+
+.dark .chat-user-chip {
+  background: color-mix(in srgb, hsl(var(--background)) 88%, white);
+}
+
 .chat-code-block {
   position: relative;
   overflow: hidden;
@@ -318,7 +330,7 @@ code, pre, .font-mono {
 }
 
 .chat-code-block__line-count {
-  color: #4b5563;
+  color: #6b7280;
   font-size: 10px;
   font-family: 'Geist Mono', ui-monospace, SFMono-Regular, monospace;
 }
@@ -385,7 +397,7 @@ code, pre, .font-mono {
 
 .chat-code-block__line-num {
   padding: 0 0.75rem;
-  color: #4b5563;
+  color: #6b7280;
   text-align: right;
   font-size: 12px;
   /* Fixed px height (not a unitless multiplier) so the 12px gutter rows match

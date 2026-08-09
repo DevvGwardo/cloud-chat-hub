@@ -19,6 +19,12 @@ import time
 import httpx
 from typing import Any, Optional, Callable
 from urllib.parse import quote
+from bridge_events import (
+    PLAN_MODE_PROMPT_SUFFIX,
+    callback_accepts_kwarg,
+    filter_toolsets_for_plan_mode,
+    output_truncation_info,
+)
 
 # ---------------------------------------------------------------------------
 # Brain HTTP cache — imported from standalone module
@@ -1339,12 +1345,16 @@ class HermesAgentAdapter:
         workspace_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         provider_override: Optional[str] = None,
+        # Plan mode: drop mutating toolsets (terminal, code_execution, shell)
+        # so the real agent can only research / plan.
+        plan_mode: bool = False,
         on_tool_start: Optional[Callable] = None,
         on_tool_end: Optional[Callable] = None,
         on_text: Optional[Callable] = None,
         on_server_tool_event: Optional[Callable] = None,
         on_fallback_switch: Optional[Callable[[str, str], None]] = None,
         on_computer_use_frame: Optional[Callable[[dict], None]] = None,
+        on_stream_retry: Optional[Callable] = None,
     ):
         self.on_tool_start = on_tool_start
         self.on_tool_end = on_tool_end
@@ -1352,6 +1362,9 @@ class HermesAgentAdapter:
         self.on_server_tool_event = on_server_tool_event
         self.on_fallback_switch = on_fallback_switch
         self.on_computer_use_frame = on_computer_use_frame
+        # Accepted for parity with the bridge's agent_kwargs; the real agent
+        # retries its upstream calls internally (no callback to hook).
+        self.on_stream_retry = on_stream_retry
         self.workspace_id = workspace_id or None
         self.on_thinking: Optional[Callable] = None
         self.on_reasoning: Optional[Callable] = None
@@ -1363,6 +1376,7 @@ class HermesAgentAdapter:
         self.repo_mode = repo_mode
         self.worktree_mode = worktree_mode
         self.repo_edit_intent = repo_edit_intent
+        self.plan_mode = bool(plan_mode)
 
         # Map CloudChat toolset names to real agent toolset names
         real_toolsets = []
@@ -1380,6 +1394,20 @@ class HermesAgentAdapter:
             if key in enabled or mapped in enabled:
                 if mapped not in real_toolsets:
                     real_toolsets.append(mapped)
+
+        # Plan mode: never register pure mutation/execution toolsets. Mixed
+        # toolsets (e.g. ``file`` with read_file + write_file) keep their
+        # read-only tools; the plan-mode prompt suffix below reinforces the
+        # read-only constraint at the instruction level.
+        if self.plan_mode:
+            filtered = filter_toolsets_for_plan_mode(real_toolsets)
+            if filtered != real_toolsets:
+                print(
+                    f"[hermes-adapter] plan_mode: dropped mutating toolset(s) "
+                    f"{sorted(set(real_toolsets) - set(filtered))}",
+                    flush=True,
+                )
+                real_toolsets = filtered
 
         # Set up repo tool provider.
         # IMPORTANT: Tools must be registered BEFORE creating the agent because
@@ -1452,6 +1480,8 @@ class HermesAgentAdapter:
                 os.environ["SPARK_KEEP_CU_SCREENSHOTS"] = "1"
                 install_spark_keep_cu_screenshots_patch()
                 prompt_parts.append(COMPUTER_USE_CAPTURE_HINT)
+            if self.plan_mode:
+                prompt_parts.append(PLAN_MODE_PROMPT_SUFFIX.strip())
             self._ephemeral_system_prompt = "\n\n".join(prompt_parts).strip()
 
             # Determine provider from base_url or hermes config.
@@ -1591,7 +1621,11 @@ class HermesAgentAdapter:
         self._start_cu_frame_poller(name, args)
         self._emit_computer_use_frame(name, args, None, status="running")
         if self.on_tool_start:
-            self.on_tool_start(name, json.dumps(args) if args else "")
+            tool_input = json.dumps(args) if args else ""
+            if callback_accepts_kwarg(self.on_tool_start, "call_id"):
+                self.on_tool_start(name, tool_input, call_id=tc_id)
+            else:
+                self.on_tool_start(name, tool_input)
 
     def _emit_lsp_diagnostic_event(self, path_hint: str, diag_text: str, source_tool: str) -> None:
         """Surface Hermes post-write LSP diagnostics as structured tool_activity."""
@@ -1697,9 +1731,23 @@ class HermesAgentAdapter:
 
             if is_computer_use_tool(name):
                 output = computer_use_text_summary(result)
+                truncated, truncated_lines = output_truncation_info(result, len(output))
             else:
-                output = (result or "")[:4000 if name in ("todo", "delegate_task", "process", "terminal") else 500]
-            self.on_tool_end(name, json.dumps(args) if args else "", output)
+                cap = 4000 if name in ("todo", "delegate_task", "process", "terminal") else 500
+                output = (result or "")[:cap]
+                truncated, truncated_lines = output_truncation_info(result, cap)
+            tool_input = json.dumps(args) if args else ""
+            if callback_accepts_kwarg(self.on_tool_end, "call_id"):
+                self.on_tool_end(
+                    name,
+                    tool_input,
+                    output,
+                    call_id=tc_id,
+                    output_truncated=truncated,
+                    output_truncated_lines=truncated_lines,
+                )
+            else:
+                self.on_tool_end(name, tool_input, output)
 
     def _on_reasoning(self, text: str):
         """Forward reasoning deltas."""

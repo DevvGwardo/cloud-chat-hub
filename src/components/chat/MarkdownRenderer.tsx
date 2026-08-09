@@ -181,7 +181,7 @@ const CodeBlock = React.forwardRef<HTMLElement, React.HTMLAttributes<HTMLElement
     const lineNumbers = Array.from({ length: lineCount }, (_, i) => i + 1);
 
     return (
-      <div className="chat-code-block group my-3">
+      <div className="chat-code-block group my-2.5">
         {/* Header */}
         <div className="chat-code-block__header">
           <div className="flex items-center gap-2 min-w-0">
@@ -362,7 +362,7 @@ const MARKDOWN_COMPONENTS: React.ComponentProps<typeof ReactMarkdown>['component
     if (openableUrl) {
       return (
         <span className="inline-flex items-center gap-1 align-baseline">
-          <code className="px-1.5 py-0.5 rounded bg-muted/60 text-[13px] font-mono border border-border/30 text-foreground/90" {...props}>
+          <code className="px-1.5 py-0.5 rounded bg-muted/60 text-[12.5px] font-mono border border-border/30 text-foreground/90" {...props}>
             {children}
           </code>
           <button
@@ -378,7 +378,7 @@ const MARKDOWN_COMPONENTS: React.ComponentProps<typeof ReactMarkdown>['component
       );
     }
     return (
-      <code className="px-1.5 py-0.5 rounded bg-muted/60 text-[13px] font-mono border border-border/30 text-foreground/90" {...props}>
+      <code className="px-1.5 py-0.5 rounded bg-muted/60 text-[12.5px] font-mono border border-border/30 text-foreground/90" {...props}>
         {children}
       </code>
     );
@@ -501,7 +501,7 @@ const MarkdownRendererInner = React.forwardRef<HTMLDivElement, MarkdownRendererP
     const blocks = useMemo(() => splitMarkdownBlocks(renderedContent), [renderedContent]);
 
     return (
-      <div ref={ref} className="prose prose-sm dark:prose-invert max-w-none overflow-hidden prose-pre:p-0 prose-pre:bg-transparent prose-pre:border-0 prose-code:before:content-none prose-code:after:content-none prose-headings:font-semibold prose-p:text-sm prose-p:leading-relaxed">
+      <div ref={ref} className="prose prose-sm dark:prose-invert max-w-none overflow-hidden text-[13px] prose-pre:p-0 prose-pre:bg-transparent prose-pre:border-0 prose-code:before:content-none prose-code:after:content-none prose-headings:font-semibold">
         {/* Index keys (not content keys) are intentional: the last block must
             stay mounted as it grows so its CodeBlock/Shiki state survives. */}
         {blocks.map((block, index) => (

@@ -51,6 +51,7 @@ import { useChatQueueStore } from '@/stores/chat-queue-store';
 import { useRoomStore } from '@/stores/room-store';
 import { CreateRoomDialog } from '@/components/rooms/CreateRoomDialog';
 import { useProfilesStore } from '@/stores/profiles-store';
+import { ConversationSearchBar } from '@/components/sidebar/ConversationSearchBar';
 
 interface ConversationGroup {
   label: string;
@@ -697,6 +698,12 @@ export const ChatSidebar: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Full-text conversation search */}
+      <ConversationSearchBar
+        className="px-4 pb-2"
+        onSelect={(result) => handleSelectConversation(result.conversationId)}
+      />
 
       {/* Tag filter bar */}
       {allTags.length > 0 && (

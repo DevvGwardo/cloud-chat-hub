@@ -159,12 +159,12 @@ export const WelcomeScreen = React.forwardRef<HTMLDivElement, WelcomeScreenProps
 
         {/* Title block */}
         <StaggerItem>
-          <h1 className="text-[20px] md:text-[22px] font-semibold tracking-[-0.02em] text-foreground">
+          <h1 className="text-[18px] md:text-[20px] font-semibold tracking-[-0.02em] text-foreground">
             What do you want to build?
           </h1>
         </StaggerItem>
         <StaggerItem>
-          <p className="mt-1.5 text-[13px] md:text-[14px] text-muted-foreground">
+          <p className="mt-1.5 text-[13px] text-muted-foreground">
             {activeProvider === 'hermes'
               ? 'Chat, or hand off a task to your Hermes agent — it can browse, run code, and manage your repos.'
               : 'Start a conversation or pick a suggestion to get going.'}

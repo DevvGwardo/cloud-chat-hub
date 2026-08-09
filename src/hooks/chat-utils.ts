@@ -433,11 +433,20 @@ export function synthesizeToolInvocationsForPersistence(
     state: event.status === 'completed' ? 'result' : 'call',
     ...(event.status === 'completed'
       ? {
-          result: event.output
-            ? (/^(error|failed)[:\s]/i.test(event.output.trim())
-                ? { error: event.output.trim() }
-                : { output: event.output })
-            : { ok: true },
+          result: {
+            ...(event.output
+              ? (/^(error|failed)[:\s]/i.test(event.output.trim())
+                  ? { error: event.output.trim() }
+                  : { output: event.output })
+              : { ok: true }),
+            // Carry the structured tool_call_end enrichment (exit code,
+            // duration, success) through persistence so reloaded messages
+            // keep the enriched lifecycle rendering. Additive — legacy
+            // streams without the fields simply omit them.
+            ...(typeof event.exitCode === 'number' ? { exitCode: event.exitCode } : {}),
+            ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
+            ...(typeof event.success === 'boolean' ? { success: event.success } : {}),
+          },
         }
       : {}),
     ...(typeof event.textOffset === 'number' ? { textOffset: event.textOffset } : {}),
@@ -591,6 +600,10 @@ export interface AutoContinueRequest {
 export interface SendMessageOptions {
   clearDraft?: boolean;
   repoEditIntentOverride?: boolean;
+  /** Start a brand-new conversation for this message (plan-gate "clear
+   *  context & implement"): sendMessage creates a fresh conversation and
+   *  binds the panel to it instead of reusing the current one. */
+  forceNewConversation?: boolean;
 }
 
 export function summarizeContentForLog(content: string, limit = 220): string {

@@ -18,6 +18,7 @@ import { toolbarPopoverAlignment } from '@/hooks/chat-utils';
 import { PROVIDERS, REASONING_EFFORTS, getVisibleModelOptions, supportsReasoningEffort } from '@/lib/providers';
 import type { QueuedMessage } from '@/lib/chat-queue';
 import { StreamingStatusBar } from './StreamingStatusBar';
+import { ContextMeter } from './ContextMeter';
 import { useChatStore } from '@/stores/chat-store';
 import { QueuedMessageTray } from './QueuedMessageTray';
 import { CommandSuggestions, commandTakesArgs } from './CommandSuggestions';
@@ -140,6 +141,7 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
   const reasoningLabel = REASONING_EFFORT_LABELS[config.reasoningEffort];
   const planMode = useChatStore((s) => s.planMode);
   const setPlanMode = useChatStore((s) => s.setPlanMode);
+  const streamRetry = useChatStore((s) => s.streamRetry);
   const panelId = usePanelId();
   const scopeId = useChatScopeId();
   const activeRepo = useChangesetStore((s) => s.getChangeset(scopeId).activeRepo);
@@ -660,10 +662,24 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
           <StreamingStatusBar
             isStreaming={isStreaming}
             toolCallCount={toolCallCount}
-            statusLabel={agentStatusLabel}
+            statusLabel={agentStatusLabel ?? 'Working'}
             startedAt={streamStartedAt}
             embedded
+            onStop={onStop}
           />
+
+          {/* Secondary stream-retry line (auto-cleared by the store on the
+              next stream event): ⟳ Reconnecting… 2/5 */}
+          {isStreaming && streamRetry && (
+            <div className="flex items-center justify-center gap-1.5 border-b border-amber-500/15 bg-amber-500/[0.04] px-3 py-1 text-[11px] font-mono text-amber-400/90">
+              <span>
+                ⟳ Reconnecting… {streamRetry.attempt}/{streamRetry.maxAttempts}
+              </span>
+              {streamRetry.reason ? (
+                <span className="truncate text-muted-foreground/60">· {streamRetry.reason}</span>
+              ) : null}
+            </div>
+          )}
 
           {showContextRefSuggestions && contextRefQuery && (
             <div className="px-3 relative">
@@ -1024,6 +1040,10 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
             )}
 
             </div>
+
+            {/* Live context meter — renders nothing until the backend
+                reports usage, so the toolbar never shifts. */}
+            <ContextMeter />
 
             {contextRefsActive && hasContextRefs(safeValue) && (
               <span
