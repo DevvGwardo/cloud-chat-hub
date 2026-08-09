@@ -1,6 +1,7 @@
 """Hermes adapter computer-use frame + aux-vision integration tests."""
 
 import os
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -52,6 +53,28 @@ class HermesAdapterComputerUseTests(unittest.TestCase):
         self.assertEqual(started, [("computer_use", {"action": "click", "element": 1})])
         self.assertEqual(len(frames), 1)
         self.assertEqual(frames[0]["status"], "running")
+
+    def test_start_cu_frame_poller_replaces_existing_poller_without_deadlock(self):
+        frames = []
+        adapter = self._make_adapter(on_computer_use_frame=frames.append)
+        previous_poller = MagicMock()
+        adapter._cu_poller = previous_poller
+
+        with patch("computer_use_frames.ComputerUseFramePoller") as poller_cls:
+            next_poller = MagicMock()
+            poller_cls.return_value = next_poller
+            worker = threading.Thread(
+                target=adapter._start_cu_frame_poller,
+                args=("computer_use", {"action": "click"}),
+                daemon=True,
+            )
+            worker.start()
+            worker.join(timeout=1)
+
+        self.assertFalse(worker.is_alive(), "starting the poller deadlocked")
+        previous_poller.stop.assert_called_once()
+        next_poller.start.assert_called_once()
+        self.assertIs(adapter._cu_poller, next_poller)
 
     def test_tool_complete_stops_poller_and_supplements_missing_image(self):
         frames = []
