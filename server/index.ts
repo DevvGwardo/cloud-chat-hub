@@ -546,8 +546,15 @@ export function startServer(port?: number) {
   });
 }
 
-// ─── Auto-start when run directly (npm run server)
-const isEntry = process.argv[1] && import.meta.url.includes(process.argv[1].replace(/\\/g, '/'));
+// ─── Auto-start when run directly (npm run server) ─────────────────────────
+// Never auto-start inside Electron (dev or packaged): the main process starts
+// the embedded server itself via startEmbeddedServerOnce(). The old argv[1]
+// check matched Electron dev (argv[1] = '.') and spawned a second Express
+// instance squatting :3001 — two servers sharing the same SQLite files, plus a
+// port clash with any unrelated service that wants :3001.
+const isEntry = !process.versions.electron &&
+  !!process.argv[1] &&
+  import.meta.url.includes(process.argv[1].replace(/\\/g, '/'));
 if (isEntry) {
   startServer();
 

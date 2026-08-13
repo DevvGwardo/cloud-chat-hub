@@ -1,4 +1,5 @@
 import { logger } from './lib/logger';
+import { getApiBase } from './lib/api-base';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -62,7 +63,6 @@ interface CardLike {
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const API_BASE = process.env.CLOUDCHAT_API_BASE || 'http://localhost:3001';
 const HERMES_BRIDGE_BASE = process.env.HERMES_BRIDGE_URL || 'http://localhost:3002/v1';
 
 const PLANNER_SYSTEM_PROMPT = `You are a task decomposition planner for a multi-agent team.
@@ -197,7 +197,7 @@ interface HermesProfile {
 
 async function discoverAvailableAgents(): Promise<HermesProfile[]> {
   try {
-    const res = await fetch(`${API_BASE}/api/hermes/profiles`, {
+    const res = await fetch(`${getApiBase()}/api/hermes/profiles`, {
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) {
@@ -649,7 +649,7 @@ Provide a concise summary of what was accomplished.`;
 
     // Mark the original card as done if this is a kanban task
     try {
-      await fetch(`${API_BASE}/api/hermes/kanban/${team.taskId}`, {
+      await fetch(`${getApiBase()}/api/hermes/kanban/${team.taskId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -854,7 +854,7 @@ async function spawnTeamAgent(
     env: {
       ...process.env,
       KANBAN_CARD_ID: kanbanCardId,
-      CLOUDCHAT_API_BASE: API_BASE,
+      CLOUDCHAT_API_BASE: getApiBase(),
       TEAM_ID: teamId,
       TEAM_SUBTASK_ID: subtaskId,
       TEAM_AGENT_PROFILE: agent.profileName,
