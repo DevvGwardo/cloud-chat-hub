@@ -1,11 +1,12 @@
 // @vitest-environment node
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ApprovalPolicyStore,
   isSafeCommand,
   isSafeCommandString,
   tokenizeShellCommand,
 } from '../approval-engine';
+import { APPROVAL_TIMEOUT_MS } from '../config';
 
 describe('approval engine: read-only command allowlist', () => {
   it('allows read-only commands', () => {
@@ -404,4 +405,138 @@ describe('approval engine: policy store', () => {
     const settled = await Promise.all(outcomes);
     expect(settled.every((outcome) => outcome === 'abort')).toBe(true);
   });
+  it('consumes a "once" rule on first use and parks the second call', async () => {
+    store.addRule('conv-1', { kind: 'once', tool: 'edit_repo_file' });
+    const emitted1: unknown[] = [];
+    await expect(
+      store.authorize({
+        conversationId: 'conv-1',
+        tool: 'edit_repo_file',
+        command: 'src/App.tsx',
+        reason: 'edit',
+        emit: (payload) => emitted1.push(payload),
+      }),
+    ).resolves.toBe('approved');
+    expect(emitted1).toHaveLength(0);
+
+    // Rule was consumed — the next call must park.
+    const emitted2: unknown[] = [];
+    const parked = store.authorize({
+      conversationId: 'conv-1',
+      tool: 'edit_repo_file',
+      command: 'src/App.tsx',
+      reason: 'edit',
+      emit: (payload) => emitted2.push(payload),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(emitted2).toHaveLength(1);
+    store.resetForTests();
+    await expect(parked).resolves.toBe('abort');
+  });
+
+  it('ignores and prunes expired rules', async () => {
+    store.addRule('conv-1', {
+      kind: 'session',
+      tool: 'edit_repo_file',
+      expiresAt: Date.now() - 1000, // already expired
+    });
+    const emitted: unknown[] = [];
+    const parked = store.authorize({
+      conversationId: 'conv-1',
+      tool: 'edit_repo_file',
+      command: 'src/App.tsx',
+      reason: 'edit',
+      emit: (payload) => emitted.push(payload),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // Expired rule must not auto-approve — the call is parked instead.
+    expect(emitted).toHaveLength(1);
+    store.resetForTests();
+    await expect(parked).resolves.toBe('abort');
+  });
+
+  it('does not match a prefix rule when the command is missing', async () => {
+    store.addRule('conv-1', { kind: 'prefix', tool: 'edit_repo_file', commandPrefix: 'src/' });
+    const emitted: unknown[] = [];
+    const parked = store.authorize({
+      conversationId: 'conv-1',
+      tool: 'edit_repo_file',
+      // no command → prefix rule can't match
+      reason: 'edit',
+      emit: (payload) => emitted.push(payload),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(emitted).toHaveLength(1);
+    store.resetForTests();
+    await expect(parked).resolves.toBe('abort');
+  });
+
+  it('settles a parked approval as timed_out when APPROVAL_TIMEOUT_MS elapses', async () => {
+    vi.useFakeTimers();
+    try {
+      const outcomePromise = store.authorize({
+        conversationId: 'conv-1',
+        tool: 'execute_python',
+        command: 'python3 -c "print(1)"',
+        reason: 'run',
+        emit: noopEmit,
+      });
+      const assertion = expect(outcomePromise).resolves.toBe('timed_out');
+      await vi.advanceTimersByTimeAsync(APPROVAL_TIMEOUT_MS + 10);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('settles as abort (not hang) when the emit callback throws (closed stream)', async () => {
+    await expect(
+      store.authorize({
+        conversationId: 'conv-1',
+        tool: 'execute_python',
+        command: 'python3 -c "print(1)"',
+        reason: 'run',
+        emit: () => {
+          throw new Error('stream closed');
+        },
+      }),
+    ).resolves.toBe('abort');
+  });
+
+  it('is idempotent: resolving an approval twice only settles once', async () => {
+    let approvalId = '';
+    const outcomePromise = store.authorize({
+      conversationId: 'conv-1',
+      tool: 'execute_python',
+      command: 'python3 -c "print(1)"',
+      reason: 'run',
+      emit: (payload) => {
+        approvalId = payload.approval_id;
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(store.resolveApproval(approvalId, 'approved')).toBe(true);
+    // Already settled — second resolve must report unknown/expired…
+    expect(store.resolveApproval(approvalId, 'denied')).toBe(false);
+    // …and must NOT override the first decision.
+    await expect(outcomePromise).resolves.toBe('approved');
+  });
+
+  it('scopes rules per conversation: a session rule in conv-1 does not approve in conv-2', async () => {
+    store.addRule('conv-1', { kind: 'session', tool: 'edit_repo_file' });
+    const emitted2: unknown[] = [];
+    const parked = store.authorize({
+      conversationId: 'conv-2',
+      tool: 'edit_repo_file',
+      command: 'src/App.tsx',
+      reason: 'edit',
+      emit: (payload) => emitted2.push(payload),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(emitted2).toHaveLength(1);
+    store.resetForTests();
+    await expect(parked).resolves.toBe('abort');
+  });
+
 });
