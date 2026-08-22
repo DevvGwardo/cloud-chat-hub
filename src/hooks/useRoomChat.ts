@@ -34,7 +34,7 @@ export function useRoomChat(roomId: string | null) {
   const [sending, setSending] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const members = activeRoom?.members ?? [];
+  const members = useMemo(() => activeRoom?.members ?? [], [activeRoom]);
   const messages = roomMessages.map(toChatMessage);
   const isStreaming = pendingAgents.length > 0;
 
