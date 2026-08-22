@@ -1,47 +1,55 @@
-# SLICE 1 — Stabilize `members` array identity (kill per-render memo invalidation)
+# SLICE 2 — Fix same-class stale-dep warnings in the three MCP panels (`toolIndex.reload`)
 
 ## Problem
-`const members = activeRoom?.members ?? []` allocates a new array on every render in two
-components. Because `members` is a dependency of downstream `useMemo`s, those memos recompute
-on **every render**, defeating memoization entirely. ESLint confirms this:
+Three components call `useHermesMcpToolIndex()` into an object named `toolIndex`, then pass
+`[toolIndex.reload]` as the useCallback dependency. ESLint flags these as missing-dependency
+warnings because it wants `toolIndex` itself — but adding the whole object would make the
+callback change identity every render (the hook returns a fresh object literal each render,
+see src/hooks/useHermesMcpToolIndex.ts:72-85). The correct minimal fix is to destructure
+`reload` at the call site so the dependency is a stable value, not a property access on a
+per-render object:
 
-- `src/components/chat/SwarmRoomPanel.tsx:83` — 3 warnings (`mentionedMembers`, `unknownMentions`, `filteredMentions`)
-- `src/hooks/useRoomChat.ts:37` — 1 warning (useMemo at line ~79)
-
-This is a real perf smell in hot chat-rendering code, not a style nit.
+- `src/components/mcp/McpStoreView.tsx:213,234`
+- `src/components/settings/HermesMcpSettingsPanel.tsx` (~line 209)
+- `src/components/sidebar/HermesMCPPanel.tsx` (~line 207)
 
 ## Change
-Wrap the initialization in its own `useMemo`, exactly as the lint message prescribes:
+In each of the three files, replace:
 ```ts
-const members = useMemo(() => activeRoom?.members ?? [], [activeRoom]);
+const toolIndex = useHermesMcpToolIndex();
 ```
-Apply to both locations. No other changes.
+with:
+```ts
+const { reload: reloadToolIndex, ...rest } = useHermesMcpToolIndex();
+```
+(keep every other property the component uses, named exactly as before so downstream code is
+untouched), then update the callback body to `await reloadToolIndex()` and its dep array to
+`[reloadToolIndex]`. No behavior change — `reload` was already stable (useCallback over
+`[enabled]`).
 
 ## Out of scope
-- Any other lint warning (react-refresh, other exhaustive-deps in useChat.ts / useVoiceInput.ts / McpStoreView.tsx etc.)
-- The unused eslint-disable directive in `server/lib/tool-schema.ts`
-- Any refactor of the surrounding components, stores, or mention logic
-- Any behavior change beyond array identity stability
+- Any other lint warning (useChat.ts, ContextualSuggestions.tsx, HermesMcpSettingsPanel's
+  OTHER warnings if any, react-refresh warnings, etc.)
+- Changing `useHermesMcpToolIndex` itself or its return shape
+- Any refactor of the panels' rendering logic
 
-## Builder pre-flight (mandatory)
-Before coding, verify against the repo:
-1. Read both files and confirm `activeRoom` is the only input needed for `members`
-   (i.e., `activeRoom.members` is not mutated elsewhere after this line).
-2. Confirm the exact warning lines still exist as described; if they've moved, update line refs in RESULTS.
-3. Confirm `useMemo` is already imported in both files.
+## Builder pre-flight
+1. Confirm all three warning sites still exist at the listed lines (update refs if moved).
+2. Confirm each file only consumes `toolIndex.<prop>` accesses that survive the destructure.
+3. Confirm `reload` in useHermesMcpToolIndex.ts is still `useCallback([enabled])` (stable).
 
 ## Acceptance gates (frozen before results)
 1. `npm run typecheck` → exit 0.
-2. `npm run lint` → the 4 warnings above are gone; **no new warnings or errors** anywhere (total warnings ≤ 38).
+2. `npm run lint` → the 3 `toolIndex` warnings gone; **no NEW warnings** anywhere (total ≤ 35).
 3. `npm test` → all tests pass (baseline: 134 files / 820 tests).
-4. Diff touches ONLY `src/components/chat/SwarmRoomPanel.tsx` and `src/hooks/useRoomChat.ts`.
-5. RESULTS section in HANDOFF.md contains raw numbers only.
+4. Diff touches ONLY the three named component files.
+5. One conventional commit (`fix:`) pushed to the current feat branch.
 
 ## Verify commands
 ```
 npm run typecheck && npm run lint && npm test
-npm run lint 2>&1 | grep -c "SwarmRoomPanel\|useRoomChat"   # expect 0 matches for exhaustive-deps members warnings
+npm run lint 2>&1 | grep -c "missing dependency: 'toolIndex'"   # expect 0
 ```
 
-## Commit
-One commit: `fix: stabilize members array identity so mention memos don't invalidate every render`
+## Commit message
+`fix: destructure stable reload from MCP tool index hook to clear exhaustive-deps warnings`

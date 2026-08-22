@@ -23,6 +23,7 @@
 ## Decision log
 <!-- architect rulings: date — decision — one-line why -->
 - 2026-08-22 — Loop initialized; baseline gate run recorded below — establishes green starting point before first slice.
+- 2026-08-22 — Slice 1 landed: `members` array wrapped in `useMemo` in SwarmRoomPanel.tsx + useRoomChat.ts — kills 4 per-render memo invalidations in chat mention paths; lint backlog 42→38.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -33,6 +34,15 @@
 | typecheck | pass |
 | lint | 0 errors, 42 warnings |
 | unit tests | 134 files, 820 tests passed (~16s) |
+
+### Slice 1 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 38 warnings (was 42; 4 exhaustive-deps `members` warnings gone) |
+| unit tests | 134 files, 820 tests passed |
+| diff | only SwarmRoomPanel.tsx + useRoomChat.ts, 2 insertions / 2 deletions |
+| commit | 19f6d10 pushed to feat/codex-function-calling |
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->
