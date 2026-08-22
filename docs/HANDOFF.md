@@ -46,6 +46,7 @@
 - 2026-08-22 — Slice 21 landed: new test_delegation_live.py (18 tests) — path parsing (deleg id + task index), _safe_delegation_dir traversal/symlink escape rejection (resolve+relative_to guard works), manifest read (delegation_id injected, FileNotFoundError), list_recent_manifests (invalid JSON skipped, newest-first, limit clamped ≤20), tail_task_log (full read, offset paging with done-detection, missing log → empty not-done, task_index bounds −1/65 rejected). Traversal guard confirmed solid. Tests 499→515; lint held at zero.
 - 2026-08-22 — Slice 22 landed: new test_cursor_composer_bridge.py (8 tests) — probe_bridge_health outcomes (healthy ok / 200-but-wrong-status-field → degraded / connection-refused URLError → down with truncated detail / unexpected exception → error / invalid JSON body → error) and bridge_status aggregate (no skills + unreachable → disconnected, one SKILL.md installed → skills_ready, envelope fields present). Tests 515→523; lint held at zero.
 - 2026-08-22 — Slice 23 landed: new test_messaging_platforms.py (14 tests) — env-file helpers (missing→empty, comment/quote parsing, in-place update preserving comments + removing dropped keys, append), nested config get/set (missing→default, intermediate dict creation, overwrite), OAuth URL builders (discord client_id/scope/callback, slack/teams shape), gateway_state (missing/corrupt → empty platforms, valid read). Tests 523→537; lint held at zero.
+- 2026-08-22 — Slice 24 landed: new test_kanban_tools.py (18 tests) — _active_card_ids env parsing (single/comma/missing), _find_current_card (explicit id preferred → first running fallback → None on fetch fail), kanban_read_current_card full/minimal render + no-card error, update_status PATCH body with reportPath + unreachable error + no-card error, alias mapping (show→read, complete→done+summary, block→blocked+reason), comment requires body, heartbeat timestamped note. Tests 537→555; lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -337,6 +338,16 @@ Security-relevant positive finding: the _safe_delegation_dir traversal/symlink g
 
 Note: HERMES_HOME must be set to a temp dir BEFORE importing the module — paths pin
 at import time. The env-file writer preserves comments and drops removed keys, verified.
+
+### Slice 24 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **555 passed, 5 skipped** (kanban_tools 0→18) |
+| diff | new hermes-bridge/test_kanban_tools.py, +187 |
+| commit | 230599d pushed to feat/codex-function-calling |
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->
