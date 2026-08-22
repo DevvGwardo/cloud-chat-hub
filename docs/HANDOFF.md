@@ -54,6 +54,7 @@
 - 2026-08-22 — Slice 29 landed: new test_challenge_script.py (18 tests) for the second exercise module — module crashes on plain import (register returns None → stacked decorators TypeError; pinned + worked around with a tolerant registry shim returning a no-op decorator), closure workers share final loop value, shared default buffer across instances, counter lock leak on negative increment, singleton class-attr clobber (instance attr shadows it — corrected my initial wrong assumption), silent None after exhausted retries, float bounds accepted, generator close termination despite swallowed GeneratorExit (corrected: Python forces the close). Tests 622→640; lint held at zero.
 - 2026-08-22 — Slice 30 landed: new test_pricing_edges.py (19 tests) — rule precedence (free suffix beats opus/gpt rules, opus > sonnet, gemini-flash-lite < flash, bare "flash" NOT gemini so deepseek-v4-flash hits the deepseek rule, model rules beat provider defaults), resolve_provider edges (billing provider authoritative over model name, "custom:..." aggregator → unknown without a model, openai-codex/kimi-coding aliases, model-name inference fallback, unknown when nothing matches), cache-rate defaults (10% read / 125% write of input, explicit rates win, deepseek's explicit 0.014), cost math (zero tokens, reasoning at output rate, mixed bundle exact math). Tests 640→659; lint held at zero.
 - 2026-08-22 — Slice 31 landed: new test_mcp_tool_loop_check.py (7 integration tests) — tool_def frontend contract, MockMCPServer success/failure payloads, run_round register→dispatch→deregister hygiene across multiple rounds. SEVENTH REAL DEFECT + fix: importing hermes_adapter clobbers sys.modules["run_agent"] unconditionally, breaking test_run_agent in shared runs; fixed with a _pin_bridge_run_agent() helper re-asserting the bridge-local module after each clobbering import. Tests 659→666; lint held at zero.
+- 2026-08-22 — Slice 32 landed: new test_computer_use_frames.py (21 tests) — is_computer_use_tool detection (computer_use/computer only, case/whitespace-insensitive), SPARK_KEEP_CU_SCREENSHOTS env flag truthiness, _data_url_from_capture_b64 mime defaults/prefixing, _image_url_from_part dict+string forms and blank rejection, extract_image_data_url across shapes (plain data URL, JSON-encoded, _multimodal content list, structuredContent nesting, b64 keys wrapped as png, long base64 heuristic, regex fallback on prose, no-image → None). Patch/capture paths out of scope (need hermes-agent pkg + cua-driver). Tests 666→687; lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -429,6 +430,20 @@ so the fallback can't silently regress.
 | pytest hermes-bridge | **666 passed, 5 skipped** (mcp_tool_loop_check 0→7, real threaded server) |
 | diff | new hermes-bridge/test_mcp_tool_loop_check.py, +129 |
 | commit | 739eec4 pushed to feat/codex-function-calling |
+
+### Slice 32 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **687 passed, 5 skipped** (computer_use_frames 0→21) |
+| diff | new hermes-bridge/test_computer_use_frames.py, +125 |
+| commit | ec3ba90 pushed to feat/codex-function-calling |
+
+Scope note: the monkey-patch install/restore and try_supplemental_capture paths need
+the hermes-agent package and cua-driver respectively — intentionally untested here.
+One subtest corrected against source: only "computer_use"/"computer" are CU tools.
 
 Seventh real defect: hermes_adapter's import unconditionally overwrites
 sys.modules["run_agent"], breaking test_run_agent in any shared-process run that
