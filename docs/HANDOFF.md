@@ -28,6 +28,7 @@
 - 2026-08-22 — Slice 3 landed: added missing stable deps in useRoomChat.handleSend (`setInput`), ContextualSuggestions effect (`lastAssistant`/`lastUser`, narrowed optional chains), useVoiceInput unmount cleanup (`cleanupStream`), useChat.buildRequestBody (`panelId`) — lint backlog 35→31; only remaining exhaustive-deps is useChat.ts:3213 `stop` (verified safe-add candidate for slice 4).
 - 2026-08-22 — Slice 4 landed: added `stop` to the conversation-switch effect deps (useChat.ts:3213) — exhaustive-deps class fully cleared, zero remaining; lint backlog 31→30. Next class: react-refresh warnings (~29) and misc single-file warnings.
 - 2026-08-22 — Slice 5 landed: pre-flight found `allowConstantExport` already enabled, so pivoted per spec fallback — moved motion presets into motion-presets.ts (10 warnings), removed toast.tsx dead re-export + unused `useToastContext` export (4), un-exported unused `HERMES_EFFORT_LABELS`/`filterJobsForConversation` (2); lint backlog 30→14. Remaining react-refresh sites need import-site changes (contexts, ui/* cva variants, helper fns) or are spark-landing.
+- 2026-08-22 — Slice 6 landed: full lint burn-down to ZERO warnings — deleted stale eslint-disable, moved PROVIDER_KEY_URLS/tour-setup/image-extract/buildPickerSuggestions into lib modules, split cva variants out of button/badge/toggle, extracted context objects into *-value modules with hooks in src/hooks/, moved TourStep into its own file, split spark-landing Root.tsx. Lint backlog 14→0; build verified.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -89,6 +90,21 @@ than the spec's suppression fallback — cleaner than spec'd, same warning count
 
 Spec deviation note: `allowConstantExport: true` was ALREADY set in eslint.config.js:36,
 so the config step was a no-op; proceeded directly to the capped manual-fix fallback.
+
+### Slice 6 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | **0 errors, 0 warnings** (was 14) — `eslint .` exits clean |
+| unit tests | 134 files, 820 tests passed |
+| build | `npm run build` success (frontend + server bundle) |
+| diff | 36 files, +438/−409 — all moves/un-exports, no behavior changes |
+| commit | bf68518 pushed to feat/codex-function-calling |
+
+All 11 items from the spec executed including the deferred contexts chunk. New modules:
+button/badge/toggle-variants.ts, panel-context-value.ts + use-panel-context.ts,
+command-callbacks-context-value.ts + use-command-callbacks.ts, image-extract.ts,
+provider-key-urls.ts, tour-setup.ts, TourStep.tsx, spark-landing Root.tsx.
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->
