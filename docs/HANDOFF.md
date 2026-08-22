@@ -53,6 +53,7 @@
 - 2026-08-22 — Slice 28 landed: new test_challenge.py (14 tests) pinning the seeded-bug behavior of challenge.py (the review-exercise module from the fuzzing-infra commit): shared DEFAULT_PORTS mutation via Config default, discount cache keyed on first-dash split ("SAVE" not "SAVE-20") + floor at zero, Worker.jobs_done CLASS-variable accumulation across instances, parallel_square thread-count invariance, compute_stats([]) ZeroDivisionError, cached_load lock leak on miss (verified _lock.locked() True after call) with cache-hit-after-unjam. Tests are behavior-pins for the review exercise, not endorsements. Tests 608→622; lint held at zero.
 - 2026-08-22 — Slice 29 landed: new test_challenge_script.py (18 tests) for the second exercise module — module crashes on plain import (register returns None → stacked decorators TypeError; pinned + worked around with a tolerant registry shim returning a no-op decorator), closure workers share final loop value, shared default buffer across instances, counter lock leak on negative increment, singleton class-attr clobber (instance attr shadows it — corrected my initial wrong assumption), silent None after exhausted retries, float bounds accepted, generator close termination despite swallowed GeneratorExit (corrected: Python forces the close). Tests 622→640; lint held at zero.
 - 2026-08-22 — Slice 30 landed: new test_pricing_edges.py (19 tests) — rule precedence (free suffix beats opus/gpt rules, opus > sonnet, gemini-flash-lite < flash, bare "flash" NOT gemini so deepseek-v4-flash hits the deepseek rule, model rules beat provider defaults), resolve_provider edges (billing provider authoritative over model name, "custom:..." aggregator → unknown without a model, openai-codex/kimi-coding aliases, model-name inference fallback, unknown when nothing matches), cache-rate defaults (10% read / 125% write of input, explicit rates win, deepseek's explicit 0.014), cost math (zero tokens, reasoning at output rate, mixed bundle exact math). Tests 640→659; lint held at zero.
+- 2026-08-22 — Slice 31 landed: new test_mcp_tool_loop_check.py (7 integration tests) — tool_def frontend contract, MockMCPServer success/failure payloads, run_round register→dispatch→deregister hygiene across multiple rounds. SEVENTH REAL DEFECT + fix: importing hermes_adapter clobbers sys.modules["run_agent"] unconditionally, breaking test_run_agent in shared runs; fixed with a _pin_bridge_run_agent() helper re-asserting the bridge-local module after each clobbering import. Tests 659→666; lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -418,6 +419,22 @@ so the fallback can't silently regress.
 | pytest hermes-bridge | **659 passed, 5 skipped** (pricing 10→29) |
 | diff | new hermes-bridge/test_pricing_edges.py, +125 |
 | commit | 5354d66 pushed to feat/codex-function-calling |
+
+### Slice 31 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **666 passed, 5 skipped** (mcp_tool_loop_check 0→7, real threaded server) |
+| diff | new hermes-bridge/test_mcp_tool_loop_check.py, +129 |
+| commit | 739eec4 pushed to feat/codex-function-calling |
+
+Seventh real defect: hermes_adapter's import unconditionally overwrites
+sys.modules["run_agent"], breaking test_run_agent in any shared-process run that
+touches hermes_adapter first. Fixed in-test with _pin_bridge_run_agent() re-assertion.
+Root cause lives in hermes_adapter.py:94 — a source fix would need the frozen-contract
+escalation path (adapter relies on the swap for RealAIAgent resolution).
 
 One assumption corrected against source: "custom:..." billing providers resolve to
 "unknown" when no model name is present — "custom" is deliberately absent from
