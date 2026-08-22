@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
-import { Copy, Check, RotateCcw, Pencil, ChevronDown, Loader2, Wrench, FileCode, FileCode2, FilePlus, FileX, FileSearch, GitPullRequestDraft, CheckCircle2, ArrowRight, GitBranch, X } from 'lucide-react';
+import { Copy, Check, RotateCcw, Pencil, ChevronDown, Loader2, Wrench, FileCode, FileCode2, FilePlus, FileX, FileSearch, GitPullRequestDraft, CheckCircle2, ArrowRight, GitBranch, X, XCircle } from 'lucide-react';
 import { GhostIcon } from './GhostIcon';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { useChangesetStore } from '@/stores/changeset-store';
@@ -1046,32 +1046,35 @@ function ToolInvocationDisplay({
   }
 
   return (
-    <div className="rounded-md border border-amber-500/20 bg-amber-500/5 my-1.5 overflow-hidden">
-      {/* Accordion header — always visible, click to expand */}
+    <div className="rounded-md border border-border/50 my-1 overflow-hidden">
+      {/* Accordion header — always visible, click to expand. Codex-style:
+          one quiet neutral line, color only for failure states. */}
       <button
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
-        className="flex items-center gap-2 w-full px-3 py-1.5 text-left hover:bg-amber-500/10 transition-colors"
+        className="flex items-center gap-2 w-full px-3 py-1.5 text-left hover:bg-muted/40 transition-colors"
       >
         <ChevronDown
           className={cn(
-            'h-3.5 w-3.5 text-amber-500/70 transition-transform duration-200 flex-shrink-0',
+            'h-3.5 w-3.5 text-muted-foreground/60 transition-transform duration-200 flex-shrink-0',
             expanded ? 'rotate-0' : '-rotate-90'
           )}
         />
         {isInProgress ? (
           <GhostIcon />
+        ) : hasError ? (
+          <XCircle className="h-3.5 w-3.5 shrink-0 text-red-400" />
         ) : isComplete ? (
-          <CheckCircle2 className={cn('h-3.5 w-3.5 shrink-0', hasError ? 'text-amber-500' : 'text-green-500')} />
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
         ) : (
-          <Icon className="h-3.5 w-3.5 text-amber-500/70 shrink-0" />
+          <Icon className="h-3.5 w-3.5 text-muted-foreground/60 shrink-0" />
         )}
-        <span className="text-[11px] font-medium text-amber-600/80 dark:text-amber-400/80 truncate min-w-0">
+        <span className="text-[11px] font-medium text-muted-foreground truncate min-w-0">
           {displayLabel}
         </span>
         {toolTargetLabel && (
           <code
-            className="text-[11px] text-foreground/70 bg-muted/50 px-1.5 py-0.5 rounded font-mono truncate min-w-0 max-w-[160px] sm:max-w-[300px]"
+            className="text-[11px] text-muted-foreground/70 bg-muted/40 px-1.5 py-0.5 rounded font-mono truncate min-w-0 max-w-[160px] sm:max-w-[300px]"
             title={toolTargetLabel}
           >
             {toolTargetLabel}
@@ -1101,7 +1104,7 @@ function ToolInvocationDisplay({
           <span className="ml-auto text-[10px] font-mono text-red-500/90 shrink-0">Failed {invocation.toolName}</span>
         )}
         {!isInProgress && isComplete && !isFailed && !isSynthesizedPseudo && (
-          <span className="ml-auto text-[10px] font-mono text-emerald-500/80 shrink-0">Ran {invocation.toolName}</span>
+          <span className="ml-auto text-[10px] font-mono text-muted-foreground/50 shrink-0">{invocation.toolName}</span>
         )}
         {!isInProgress && isComplete && isSynthesizedPseudo && (
           <span className="ml-auto text-[10px] text-muted-foreground/60">done</span>
@@ -1110,8 +1113,8 @@ function ToolInvocationDisplay({
           <span className="text-[10px] font-mono text-red-500/90 shrink-0">✗ ({exitCode})</span>
         )}
         {!isInProgress && !isSynthesizedPseudo && durationMs !== null && (
-          <span className={cn('text-[10px] font-mono shrink-0', isFailed ? 'text-red-400/70' : 'text-emerald-500/80')}>
-            {isFailed ? '•' : '✓'} {formatToolDuration(durationMs)}
+          <span className={cn('text-[10px] font-mono shrink-0', isFailed ? 'text-red-400/70' : 'text-muted-foreground/50')}>
+            {formatToolDuration(durationMs)}
           </span>
         )}
       </button>
