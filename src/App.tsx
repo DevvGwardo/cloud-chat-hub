@@ -6,6 +6,7 @@ import { HashRouter, Routes, Route } from "react-router-dom";
 // Route-level code splitting: phones opening /m don't download the desktop
 // app chunk (and vice versa) — matters most over a tunnel connection.
 const Index = lazy(() => import("./pages/Index"));
+const Workbench = lazy(() => import("./pages/Workbench"));
 const MobileShell = lazy(() => import("./mobile/MobileShell"));
 const MobileChat = lazy(() => import("./mobile/MobileChat"));
 const NotFound = lazy(() => import("./pages/NotFound"));
@@ -25,6 +26,8 @@ const App = () => (
         <Suspense fallback={routeFallback}>
           <Routes>
             <Route path="/" element={<Index />} />
+            {/* Dev-only design workbench: isolated composer/chat/welcome renders. */}
+            <Route path="/workbench" element={<Workbench />} />
             <Route path="/m" element={<MobileShell />} />
             <Route path="/m/chat" element={<MobileChat />} />
             {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
