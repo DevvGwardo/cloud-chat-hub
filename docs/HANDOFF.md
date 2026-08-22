@@ -51,6 +51,7 @@
 - 2026-08-22 — Slice 26 landed: new test_mcp_telemetry.py (15 tests) — _sanitize hyphen→underscore mirroring the agent, resolve_server longest-prefix-wins + sanitized-name return + non-mcp None, error detection by output prefix (Error/tool error/json-error → errors counter), unattributable calls reaped from inflight without leaking, minute-bucket accumulation (total/errors), input capped at 400 chars, snapshot remaps sanitized keys to raw config names for the dashboard. Persistence mocked out. Tests 575→590; lint held at zero.
 - 2026-08-22 — Slice 27 landed: new test_brain_cache.py (18 tests) — _CircuitBreaker state machine (closed→open at threshold, success resets, open→half-open via monotonic mock after recovery window, half-open allows attempt), token loading (openclaw.json → HERMES_BRAIN_TOKEN env fallback, cached after first load), retry logic (success first try no sleep, None→retry then succeed, exhausted retries → None + call count, circuit-open skips call entirely, exception counts as failure), safe wrappers (set/get/delete result mapping, ttl passthrough). Tests 590→608; lint held at zero.
 - 2026-08-22 — Slice 28 landed: new test_challenge.py (14 tests) pinning the seeded-bug behavior of challenge.py (the review-exercise module from the fuzzing-infra commit): shared DEFAULT_PORTS mutation via Config default, discount cache keyed on first-dash split ("SAVE" not "SAVE-20") + floor at zero, Worker.jobs_done CLASS-variable accumulation across instances, parallel_square thread-count invariance, compute_stats([]) ZeroDivisionError, cached_load lock leak on miss (verified _lock.locked() True after call) with cache-hit-after-unjam. Tests are behavior-pins for the review exercise, not endorsements. Tests 608→622; lint held at zero.
+- 2026-08-22 — Slice 29 landed: new test_challenge_script.py (18 tests) for the second exercise module — module crashes on plain import (register returns None → stacked decorators TypeError; pinned + worked around with a tolerant registry shim returning a no-op decorator), closure workers share final loop value, shared default buffer across instances, counter lock leak on negative increment, singleton class-attr clobber (instance attr shadows it — corrected my initial wrong assumption), silent None after exhausted retries, float bounds accepted, generator close termination despite swallowed GeneratorExit (corrected: Python forces the close). Tests 622→640; lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -396,6 +397,21 @@ so the fallback can't silently regress.
 | pytest hermes-bridge | **622 passed, 5 skipped** (challenge.py 0→14) |
 | diff | new hermes-bridge/test_challenge.py, +159 |
 | commit | 16c0411 pushed to feat/codex-function-calling |
+
+### Slice 29 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **640 passed, 5 skipped** (challenge_script 0→18) |
+| diff | new hermes-bridge/test_challenge_script.py, +236 |
+| commit | e51f14d pushed to feat/codex-function-calling |
+
+Discovery: challenge_script.py crashes on plain import — the stacked
+@TaskRegistry.register decorators explode because register returns None (an
+unstated bug #10). Tests load via exec with a tolerant shim. Two of my own
+assertions corrected against actual runtime behavior during build.
 
 challenge.py/challenge_script.py are the seeded-bug review exercises from the fuzzing-infra
 commit (607cb62b) — never imported by main. Tests pin their buggy behavior so accidental
