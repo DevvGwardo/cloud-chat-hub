@@ -48,6 +48,23 @@ if "httpx" not in sys.modules:
             raise NotImplementedError("httpx.Client is stubbed in tests")
 
     httpx_stub.Timeout = _Timeout
+    # hermes_adapter._execute_remote_mcp_tool catches httpx.TimeoutException and
+    # httpx.HTTPStatusError — the stub must expose exception classes or those
+    # except clauses raise TypeError/AttributeError when this stub wins the
+    # sys.modules["httpx"] import race.
+    if not hasattr(httpx_stub, "TimeoutException"):
+        class _TimeoutException(Exception):
+            pass
+
+        httpx_stub.TimeoutException = _TimeoutException
+    if not hasattr(httpx_stub, "HTTPStatusError"):
+        class _HTTPStatusError(Exception):
+            def __init__(self, message="", *, request=None, response=None):
+                super().__init__(message)
+                self.request = request
+                self.response = response
+
+        httpx_stub.HTTPStatusError = _HTTPStatusError
     httpx_stub.AsyncClient = _AsyncClient
     httpx_stub.Client = _Client
     sys.modules["httpx"] = httpx_stub
