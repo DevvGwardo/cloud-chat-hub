@@ -50,6 +50,7 @@
 - 2026-08-22 — Slice 25 landed: new test_team_tools.py (20 tests) — TEAM_ID/TEAM_SUBTASK_ID guards on all six tools, delegation POST body + confirmation id, progress blockers (coordinator /blocked call + importance 3 + blocked tag vs no-blocker importance 2), context query rendering (tags/stars/author/300-char truncation) + no-match + unreachable, publish_finding type inference (decision/artifact/question/default by title keywords) + title-prefixed content, request_help directed vs broadcast tags, signal_completion (finding→PATCH order, PATCH-failure coordinator-fallback third call, summary truncated to 200). Tests 555→575; lint held at zero.
 - 2026-08-22 — Slice 26 landed: new test_mcp_telemetry.py (15 tests) — _sanitize hyphen→underscore mirroring the agent, resolve_server longest-prefix-wins + sanitized-name return + non-mcp None, error detection by output prefix (Error/tool error/json-error → errors counter), unattributable calls reaped from inflight without leaking, minute-bucket accumulation (total/errors), input capped at 400 chars, snapshot remaps sanitized keys to raw config names for the dashboard. Persistence mocked out. Tests 575→590; lint held at zero.
 - 2026-08-22 — Slice 27 landed: new test_brain_cache.py (18 tests) — _CircuitBreaker state machine (closed→open at threshold, success resets, open→half-open via monotonic mock after recovery window, half-open allows attempt), token loading (openclaw.json → HERMES_BRAIN_TOKEN env fallback, cached after first load), retry logic (success first try no sleep, None→retry then succeed, exhausted retries → None + call count, circuit-open skips call entirely, exception counts as failure), safe wrappers (set/get/delete result mapping, ttl passthrough). Tests 590→608; lint held at zero.
+- 2026-08-22 — Slice 28 landed: new test_challenge.py (14 tests) pinning the seeded-bug behavior of challenge.py (the review-exercise module from the fuzzing-infra commit): shared DEFAULT_PORTS mutation via Config default, discount cache keyed on first-dash split ("SAVE" not "SAVE-20") + floor at zero, Worker.jobs_done CLASS-variable accumulation across instances, parallel_square thread-count invariance, compute_stats([]) ZeroDivisionError, cached_load lock leak on miss (verified _lock.locked() True after call) with cache-hit-after-unjam. Tests are behavior-pins for the review exercise, not endorsements. Tests 608→622; lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -385,6 +386,20 @@ so the fallback can't silently regress.
 | pytest hermes-bridge | **608 passed, 5 skipped** (brain_cache 0→18) |
 | diff | new hermes-bridge/test_brain_cache.py, +195 |
 | commit | 14226f3 pushed to feat/codex-function-calling |
+
+### Slice 28 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **622 passed, 5 skipped** (challenge.py 0→14) |
+| diff | new hermes-bridge/test_challenge.py, +159 |
+| commit | 16c0411 pushed to feat/codex-function-calling |
+
+challenge.py/challenge_script.py are the seeded-bug review exercises from the fuzzing-infra
+commit (607cb62b) — never imported by main. Tests pin their buggy behavior so accidental
+edits surface; they are documentation, not endorsements of the bugs.
 
 Two test bugs caught during build (both mine, not the source): (1) recovery=0.0 makes the
 circuit transition to half-open instantly — used monotonic mock + real 30s window instead;
