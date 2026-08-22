@@ -143,6 +143,24 @@ def _register_fallback_web_tools() -> None:
     except Exception:
         pass  # Treat check errors as "not available"
 
+    # hermes-agent 0.20+ ships a keyless web tier (Tavily/Firecrawl/Keenable
+    # round-robin + one-shot keyless rescue on failure) that is strictly better
+    # than this DuckDuckGo scraper. Defer to it when the tier is enabled — only
+    # register the DDG fallback when the user explicitly disabled keyless
+    # fallback (web.keyless_fallback: false) AND has no backend keys.
+    try:
+        from agent.web_search_registry import _keyless_tier_enabled
+
+        if _keyless_tier_enabled():
+            print(
+                "[hermes-adapter] No web API keys, but hermes-agent's keyless web "
+                "tier is enabled — skipping DuckDuckGo fallback registration.",
+                flush=True,
+            )
+            return
+    except Exception as e:
+        print(f"[hermes-adapter] Keyless-tier probe failed ({e}) — keeping DDG fallback", flush=True)
+
     import re
     from urllib.parse import quote_plus, unquote
 
@@ -1355,6 +1373,14 @@ class HermesAgentAdapter:
         on_fallback_switch: Optional[Callable[[str, str], None]] = None,
         on_computer_use_frame: Optional[Callable[[dict], None]] = None,
         on_stream_retry: Optional[Callable] = None,
+        # Structured AgentNotice from the real agent (credits warnings, run
+        # budget wrap-ups, etc.) — driver-agnostic payload with
+        # text/level/kind/ttl_ms/key. Surfaces as an SSE agent_notice event.
+        on_notice: Optional[Callable[[dict], None]] = None,
+        on_notice_clear: Optional[Callable[[str], None]] = None,
+        # Wall-clock budget for the whole run (seconds). Passed through to the
+        # real AIAgent (agent.run_budget_seconds); 0/unset = unlimited.
+        run_budget_seconds: Optional[int] = None,
     ):
         self.on_tool_start = on_tool_start
         self.on_tool_end = on_tool_end
@@ -1362,6 +1388,9 @@ class HermesAgentAdapter:
         self.on_server_tool_event = on_server_tool_event
         self.on_fallback_switch = on_fallback_switch
         self.on_computer_use_frame = on_computer_use_frame
+        self.on_notice = on_notice
+        self.on_notice_clear = on_notice_clear
+        self.run_budget_seconds = run_budget_seconds
         # Accepted for parity with the bridge's agent_kwargs; the real agent
         # retries its upstream calls internally (no callback to hook).
         self.on_stream_retry = on_stream_retry
@@ -1584,9 +1613,15 @@ class HermesAgentAdapter:
                 "reasoning_callback": self._on_reasoning,
                 "step_callback": self._on_step,
                 "status_callback": self._on_status,
+                # Structured AgentNotice (credits warnings, run-budget wrap-up)
+                # + its clear twin — forwarded as SSE agent_notice events.
+                "notice_callback": self._on_notice,
+                "notice_clear_callback": self._on_notice_clear,
                 # MoA reference/aggregator events arrive via tool_progress_callback
                 "tool_progress_callback": self._on_tool_progress,
             }
+            if getattr(self, "run_budget_seconds", None):
+                agent_kwargs["run_budget_seconds"] = int(self.run_budget_seconds)
             self._agent = RealAIAgent(**agent_kwargs)
 
             print(
@@ -1770,6 +1805,34 @@ class HermesAgentAdapter:
                     self._last_fallback_switch_key = switch_key
                     self.on_fallback_switch(switch["provider"], switch["model"])
         print(f"[hermes-adapter] status/{category}: {message}", flush=True)
+
+    def _on_notice(self, notice):
+        """Forward a structured AgentNotice (credits/run-budget warnings) to SSE."""
+        try:
+            payload = {
+                "text": str(getattr(notice, "text", "") or ""),
+                "level": str(getattr(notice, "level", "") or "info"),
+                "kind": str(getattr(notice, "kind", "") or "sticky"),
+                "ttl_ms": getattr(notice, "ttl_ms", None),
+                "key": getattr(notice, "key", None),
+            }
+        except Exception:
+            # A malformed notice must never break the agent loop (D-D fail-open)
+            return
+        print(f"[hermes-adapter] notice/{payload['level']}: {payload['text'][:120]}", flush=True)
+        if self.on_notice and payload["text"]:
+            try:
+                self.on_notice(payload)
+            except Exception:
+                pass
+
+    def _on_notice_clear(self, key):
+        """Forward a notice-clear (sticky notice recovered) to SSE."""
+        if self.on_notice_clear and key:
+            try:
+                self.on_notice_clear(str(key))
+            except Exception:
+                pass
 
     def _on_tool_progress(self, event_type, name=None, preview=None, args=None, **kwargs):
         """Forward Hermes tool_progress events — especially MoA advisor blocks.
