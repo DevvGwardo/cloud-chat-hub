@@ -44,6 +44,7 @@
 - 2026-08-22 — Slice 19 landed: goals/tool-search config edges (13 tests) — missing-section defaults, non-dict sections ignored, max_turns clamped to ≥1, set creates missing sections, no-op body changes nothing; tool_search boolean shorthand (True→auto/False→off), threshold clamped 0–100, limits clamped with search_default ≤ max, garbage numeric strings fall back to defaults, garbage "enabled" rejected on set. Tests 472→485 (hermes_ops 71→84); lint held at zero.
 - 2026-08-22 — Slice 20 landed: checkpoint edges (14 tests) — workdir resolution (explicit wins, prefers live-with-commits over live-without, orphans never selected, blank fields skipped), assert_safe_workdir (relative/control-chars rejected), assert_safe_checkpoint_index (0/neg/garbage rejected, float truncates), _format_checkpoint_entries malformed rows (non-dict skipped with ORIGINAL index preserved, missing reason defaults). REAL DEFECT: garbage files_changed ("lots") raised ValueError inside int() and killed the whole checkpoint listing — wrapped in try/except → 0. Tests 485→499 (hermes_ops 84→98); lint held at zero.
 - 2026-08-22 — Slice 21 landed: new test_delegation_live.py (18 tests) — path parsing (deleg id + task index), _safe_delegation_dir traversal/symlink escape rejection (resolve+relative_to guard works), manifest read (delegation_id injected, FileNotFoundError), list_recent_manifests (invalid JSON skipped, newest-first, limit clamped ≤20), tail_task_log (full read, offset paging with done-detection, missing log → empty not-done, task_index bounds −1/65 rejected). Traversal guard confirmed solid. Tests 499→515; lint held at zero.
+- 2026-08-22 — Slice 22 landed: new test_cursor_composer_bridge.py (8 tests) — probe_bridge_health outcomes (healthy ok / 200-but-wrong-status-field → degraded / connection-refused URLError → down with truncated detail / unexpected exception → error / invalid JSON body → error) and bridge_status aggregate (no skills + unreachable → disconnected, one SKILL.md installed → skills_ready, envelope fields present). Tests 515→523; lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -312,6 +313,16 @@ truncate (1.5→1) rather than reject, and entry indices reflect original positi
 
 Security-relevant positive finding: the _safe_delegation_dir traversal/symlink guard
 (resolve + relative_to) held against every escape attempt including symlinked deleg dirs.
+
+### Slice 22 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **523 passed, 5 skipped** (cursor_composer_bridge 0→8) |
+| diff | new hermes-bridge/test_cursor_composer_bridge.py, +114 |
+| commit | cb93e59 pushed to feat/codex-function-calling |
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->
