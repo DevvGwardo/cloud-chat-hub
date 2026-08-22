@@ -1,47 +1,52 @@
-# SLICE 4 — Last exhaustive-deps warning: add `stop` to the conversation-switch effect
+# SLICE 5 — Burn down the react-refresh warning class (29 of the remaining 30 warnings)
 
 ## Problem
-`src/hooks/useChat.ts` — the effect starting at line 3037 (conversation-switch guard) calls
-`stop()` at line 3068 but omits it from its dep array at line 3213. ESLint flags this as the
-repo's only remaining exhaustive-deps warning.
+29 of the 30 remaining lint warnings are `react-refresh/only-export-components` across
+16 files. The class breaks Fast Refresh (HMR) for any file that exports both components
+and non-component values. Two sub-shapes exist:
 
-Verified in slice 3 pre-flight:
-- `stop` is `useCallback(..., [sdkStop])` at useChat.ts:2436, and `sdkStop` comes from
-  `useAIChat` — so `stop`'s identity changes only when the SDK's stop changes.
-- The effect already depends on `isStreaming`, and the switch-guard only fires while
-  streaming. Adding `stop` cannot introduce spurious re-runs beyond what `sdkStop`
-  identity changes already imply.
+- **Constant exports next to components** (e.g. `buttonVariants`, config objects,
+  motion variants in src/components/onboarding/motion.tsx, tour-config.tsx) — the rule's
+  built-in `allowConstantExport: true` option covers plain `export const X = ...` of
+  literal/derived constants WITHOUT touching any component file.
+- **True mixed exports** (hooks/helpers exported from context files like
+  PanelContext.tsx, CommandCallbacksContext.tsx) — need `export function useX` moved to
+  its own file, which changes import sites repo-wide.
 
 ## Change
-Add `stop` to the dep array at line 3213 (alphabetical placement per existing style):
-```ts
-}, [aiChatSessionId, chatSessionId, clearStreamRetryIndicator, conversationId, safeSetMessages, panelId, resetPanelFileState, restoreFileState, saveConversationFiles, hydrateConversationMessages, isStreaming, scopeId, sessionLock, stop]);
-```
+1. Read `eslint.config.js` (or .eslintrc*) and enable `allowConstantExport: true` in the
+   react-refresh rule config.
+2. Re-run lint. Record how many of the 29 disappear from the config change alone.
+3. For any remaining warnings, fix the LOW-RISK ones only: move a pure-constant export to
+   an adjacent file (e.g. `button-variants.ts`) and update its import sites — cap at 3
+   files moved this slice. Context-provider hooks (PanelContext, CommandCallbacksContext)
+   are OUT OF SCOPE — those touch many import sites and deserve their own slice.
 
 ## Out of scope
-- The remaining ~30 react-refresh / other warnings (separate classes)
-- Any change to `stop` itself, `useAIChat`, or the switch-guard logic
-- The giant dep-array's general shape (a refactor for another day)
+- Moving hooks out of context providers
+- Any change to component behavior, props, or styling
+- spark-landing/src/main.tsx if it requires restructuring (it's a separate app; if the
+  config change doesn't cover it, defer)
+- Disabling the rule for any file (suppression = anti-pattern)
 
 ## Builder pre-flight
-1. Confirm warning still reads "missing dependency: 'stop'" at line ~3213/3214.
-2. Confirm `stop` is still `useCallback(..., [sdkStop])`.
-3. Confirm no OTHER missing-dep warnings appear after the edit (the plugin reports one
-   missing dep at a time — if adding `stop` reveals a second missing name, STOP, roll back,
-   and record it as deferred rather than growing scope).
+1. Locate the ESLint config and show the current react-refresh rule settings.
+2. Confirm the 29 warnings still match the class list above.
+3. After enabling allowConstantExport, list exactly which warnings remain.
 
 ## Acceptance gates (frozen before results)
 1. `npm run typecheck` → exit 0.
-2. `npm run lint` → zero exhaustive-deps warnings; **no NEW warnings** of any kind (total ≤ 31).
+2. `npm run lint` → 0 errors; total warnings ≤ 20 (config change alone should clear most
+   constant-export cases); **no NEW warnings**.
 3. `npm test` → all tests pass (baseline: 134 files / 820 tests).
-4. Diff touches ONLY src/hooks/useChat.ts (1-2 lines).
-5. One conventional commit (`fix:`) pushed to the current feat branch.
+4. Diff touches ONLY: the ESLint config + at most 3 moved-constant files + their import sites.
+5. One conventional commit (`chore:` or `fix:`) pushed to the current feat branch.
 
 ## Verify commands
 ```
 npm run typecheck && npm run lint && npm test
-npm run lint 2>&1 | grep -c "exhaustive-deps"   # expect 0
+npm run lint 2>&1 | grep -c "react-refresh"   # record before/after
 ```
 
 ## Commit message
-`fix: add stop to conversation-switch effect deps to clear last exhaustive-deps warning`
+`chore: enable allowConstantExport for react-refresh and move remaining constant exports out of component files`
