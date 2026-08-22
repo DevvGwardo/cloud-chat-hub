@@ -31,6 +31,7 @@
 - 2026-08-22 — Slice 6 landed: full lint burn-down to ZERO warnings — deleted stale eslint-disable, moved PROVIDER_KEY_URLS/tour-setup/image-extract/buildPickerSuggestions into lib modules, split cva variants out of button/badge/toggle, extracted context objects into *-value modules with hooks in src/hooks/, moved TourStep into its own file, split spark-landing Root.tsx. Lint backlog 14→0; build verified.
 - 2026-08-22 — Slice 7 landed: added hermes provider-routing regression tests — placeholder keys ("none"/"null"/"undefined"/whitespace) must not become Authorization or keep an uncredentialed openrouter pin, and a keyless custom:base_url pin must survive. Tests 820→822; lint stays at zero.
 - 2026-08-22 — Slice 8 landed: approval-engine edge cases — "once" rule consumption, expired-rule pruning, missing-command prefix non-match, APPROVAL_TIMEOUT_MS timeout via fake timers, emit-throw → abort, double-resolve idempotency, cross-conversation rule scoping. Tests 822→829 (28 in approval-engine); lint held at zero.
+- 2026-08-22 — Slice 9 landed: `messages` in useRoomChat.ts wrapped in useMemo over `[roomMessages]` — the per-render `.map(toChatMessage)` allocation was a dependency of ChatArea's `panelToolActivity` memo (line ~647) and usage-tracking effect (~732), re-running both every render. HermesModelPicker/MessageBubble candidates inspected: feed nothing memoized — skipped per spec.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -130,6 +131,19 @@ placeholder handling and keyless custom-pin survival.
 | unit tests | 134 files, **829 tests passed** (was 822; approval-engine 21→28) |
 | diff | only server/__tests__/approval-engine.test.ts, +136/−1 |
 | commit | dc4e137 pushed to feat/codex-function-calling |
+
+### Slice 9 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| unit tests | 134 files, 829 tests passed |
+| diff | only src/hooks/useRoomChat.ts, +3/−1 |
+| commit | 49576cd pushed to feat/codex-function-calling |
+
+Pre-flight: swept chat paths for dep-feeding inline allocations. Only useRoomChat.messages
+qualified (feeds ChatArea memo + effect). MessageBubble's buildInterleavedByOffset is a
+plain function; HermesModelPicker has zero hooks/memos — both skipped as speculative.
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->

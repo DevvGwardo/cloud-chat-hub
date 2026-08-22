@@ -1,39 +1,33 @@
-# SLICE 9 — Perf: memoize per-render array allocations in hot chat paths (slice-1 pattern, round 2)
+# SLICE 10 — Test coverage: bridge cwd-OSError guard regression (known gotcha class)
 
 ## Problem
-Slice 1 fixed the `members` array pattern. Pre-flight should re-sweep the chat render
-paths for the same class: `const x = someArray.filter/map/slice(...)` computed inline in
-the component body (not in useMemo) and then used as a useMemo/useCallback dependency —
-each re-run allocates and invalidates downstream memos every render.
-
-Known candidates from the slice-1 audit (verify current state first):
-- `src/hooks/useRoomChat.ts:38` — `const messages = roomMessages.map(toChatMessage)` runs
-  every render; if it feeds a dependency anywhere downstream, wrap in useMemo over
-  `[roomMessages]`.
-- `src/components/sidebar/ImagesPanel.tsx` — `extractImageUrls` output state handling
-  (verify; may already be effect-scoped).
+The loop's known-gotchas list includes the "bridge cwd OSError" class — the hermes-bridge
+crashed when the spawn cwd no longer existed. Commit ef565f4 ("fix: bridge cwd-OSError
+guard, admin proxy startup-race retry, CSP 127.0.0.1") landed the fix, but pre-flight must
+verify whether a regression test exists in hermes-bridge/ for it.
 
 ## Change (finalize after pre-flight)
-Wrap genuinely hot, dependency-feeding allocations in useMemo. Do NOT memoize anything
-that renders once or feeds nothing — that's speculative.
+If untested: add pytest coverage in hermes-bridge/ for the cwd-missing path (spawn with a
+deleted/nonexistent cwd must fall back gracefully, not raise). Test-only diff unless the
+guard turns out to be missing/broken — then fix minimally and note it.
 
 ## Out of scope
-- Any component outside src/components/chat/ + src/hooks/ unless pre-flight proves a
-  dependency-feeding allocation there
-- Changing what is computed, only when/how often
+- hermes-bridge transport refactors
+- Any Electron/server code
 
 ## Builder pre-flight
-1. For each candidate, trace whether the allocation is a dep of any memo/callback/effect.
-2. Grep for other `= .*\.map(` / `= .*\.filter(` at component-body level in chat paths.
+1. Locate the cwd guard (grep hermes-bridge/main.py + acp_transport.py for cwd handling).
+2. Check hermes-bridge/ tests for existing coverage (`pytest -q` baseline too).
 
 ## Acceptance gates (frozen before results)
-1. `npm run typecheck` → exit 0.
-2. `npm run lint` → 0 errors, 0 warnings.
-3. `npm test` → all pass; total ≥ 829.
-4. Diff touches ONLY the files pre-flight names, minimal lines each.
-5. One conventional commit (`perf:`) pushed to the current feat branch.
+1. `npm run typecheck` → exit 0; `npm run lint` → 0/0; `npm test` → all pass (≥ 829).
+2. `pytest -q` in hermes-bridge/ → all pass (baseline from pre-flight + new tests).
+3. Diff touches ONLY hermes-bridge test files (+ at most one bridge source file if a real
+   defect surfaced).
+4. One conventional commit (`test:` or `fix:`) pushed to the current feat branch.
 
 ## Verify commands
 ```
-npm run typecheck && npm run lint && npm test
+cd hermes-bridge && pytest -q
+cd .. && npm run typecheck && npm run lint && npm test
 ```
