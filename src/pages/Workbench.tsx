@@ -7,6 +7,20 @@ import { useSettingsStore, type ThemeMode } from '@/stores/settings-store';
 import { cn } from '@/lib/utils';
 import type { Message } from '@/lib/db';
 import type { ToolCallRecords } from '@/stores/hermes-store';
+import {
+  STACK,
+  SIDEBAR_TABS,
+  SLICES,
+  type SliceRecord,
+  GATE_HISTORY,
+  DEFECTS_FIXED,
+  QA_SURFACES,
+  QA_DEFERRED,
+  OVERNIGHT_BACKLOG,
+  DOCS_INDEX,
+  LIVE_COUNTS,
+  MODULE_INVENTORY,
+} from './workbench-data';
 
 /**
  * Component Workbench — isolated renders of the chat surface's building
@@ -17,9 +31,11 @@ import type { ToolCallRecords } from '@/stores/hermes-store';
  * command suggestions from the bridge catalog, voice input, image upload.
  */
 
-type Section = 'composer' | 'messages' | 'welcome';
+type Section = 'blueprint' | 'progress' | 'composer' | 'messages' | 'welcome';
 
 const SECTIONS: Array<{ id: Section; label: string }> = [
+  { id: 'blueprint', label: 'Blueprint' },
+  { id: 'progress', label: 'Progress' },
   { id: 'composer', label: 'Composer' },
   { id: 'messages', label: 'Messages' },
   { id: 'welcome', label: 'Welcome' },
@@ -105,6 +121,254 @@ const FAILED_TOOL_PARTS = [
   { type: 'tool-invocation' as const, toolInvocation: TOOL_INVOCATION_FAILED },
   { type: 'text' as const, text: 'The command failed — the auth filter name changed in the vitest config. Retrying with the right pattern.' },
 ];
+
+// ── Blueprint section ──────────────────────────────────────────────────────
+
+function Stat({ value, label }: { value: React.ReactNode; label: string }) {
+  return (
+    <div className="rounded-lg border border-border/50 bg-card/40 px-3 py-2.5">
+      <div className="font-mono text-lg font-semibold tabular-nums text-foreground">{value}</div>
+      <div className="mt-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
+    </div>
+  );
+}
+
+function BlueprintSection() {
+  const inv = MODULE_INVENTORY;
+  const componentDirs = Object.entries(inv.components).sort((a, b) => b[1] - a[1]);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <WorkbenchCard title="At a glance">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-6">
+          <Stat value={STACK.length} label="Stack layers" />
+          <Stat value={SIDEBAR_TABS.length} label="Sidebar panels" />
+          <Stat value={LIVE_COUNTS.totalModules} label="Source modules" />
+          <Stat value={LIVE_COUNTS.frontendSuites + LIVE_COUNTS.serverSuites} label="JS test suites" />
+          <Stat value={LIVE_COUNTS.bridgeTestFiles} label="Bridge test files" />
+          <Stat value="v1.0.0-beta.8" label="Version" />
+        </div>
+      </WorkbenchCard>
+
+      <WorkbenchCard title="Stack">
+        <div className="space-y-2">
+          {STACK.map((layer) => (
+            <div key={layer.id} className="rounded-lg border border-border/50 p-3">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="text-[13px] font-semibold text-foreground">{layer.name}</span>
+                <span className="font-mono text-[10px] text-muted-foreground">{layer.entry}</span>
+              </div>
+              <div className="mt-0.5 text-[11px] text-primary/80">{layer.tech}</div>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{layer.role}</p>
+            </div>
+          ))}
+        </div>
+      </WorkbenchCard>
+
+      <WorkbenchCard title="Feature surface — Hermes sidebar sub-tabs">
+        <div className="flex flex-wrap gap-1.5">
+          {SIDEBAR_TABS.map((tab) => (
+            <span
+              key={tab}
+              className="rounded-full border border-border/50 bg-muted/40 px-2.5 py-1 text-[11px] text-muted-foreground"
+            >
+              {tab}
+            </span>
+          ))}
+        </div>
+        <p className="mt-2 text-[11px] text-muted-foreground/70">
+          18 panels driven by <code className="font-mono">HERMES_SUB_TABS</code> in ChatSidebar — each backed by a
+          Hermes*Panel component and a bridge endpoint.
+        </p>
+      </WorkbenchCard>
+
+      <WorkbenchCard title="Module inventory (live counts)">
+        <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs sm:grid-cols-3">
+          <div className="flex justify-between border-b border-border/30 py-1">
+            <span className="text-muted-foreground">hooks</span>
+            <span className="font-mono tabular-nums">{inv.hooks}</span>
+          </div>
+          <div className="flex justify-between border-b border-border/30 py-1">
+            <span className="text-muted-foreground">stores</span>
+            <span className="font-mono tabular-nums">{inv.stores}</span>
+          </div>
+          <div className="flex justify-between border-b border-border/30 py-1">
+            <span className="text-muted-foreground">lib</span>
+            <span className="font-mono tabular-nums">{inv.lib}</span>
+          </div>
+          <div className="flex justify-between border-b border-border/30 py-1">
+            <span className="text-muted-foreground">pages</span>
+            <span className="font-mono tabular-nums">{inv.pages}</span>
+          </div>
+          <div className="flex justify-between border-b border-border/30 py-1">
+            <span className="text-muted-foreground">contexts</span>
+            <span className="font-mono tabular-nums">{inv.contexts}</span>
+          </div>
+          <div className="flex justify-between border-b border-border/30 py-1">
+            <span className="text-muted-foreground">mobile</span>
+            <span className="font-mono tabular-nums">{inv.mobile}</span>
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {componentDirs.map(([dir, count]) => (
+            <span key={dir} className="rounded-md bg-muted/40 px-2 py-1 font-mono text-[10px] text-muted-foreground">
+              {dir.replace('components/', '')}: {count}
+            </span>
+          ))}
+        </div>
+      </WorkbenchCard>
+
+      <WorkbenchCard title="Docs index">
+        <div className="space-y-1.5">
+          {DOCS_INDEX.map((doc) => (
+            <div key={doc.path} className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-3">
+              <code className="shrink-0 font-mono text-[11px] text-primary/80">{doc.path}</code>
+              <span className="text-[11px] text-muted-foreground">{doc.role}</span>
+            </div>
+          ))}
+        </div>
+      </WorkbenchCard>
+    </div>
+  );
+}
+
+// ── Progress section ───────────────────────────────────────────────────────
+
+const KIND_STYLES: Record<SliceRecord['kind'], string> = {
+  perf: 'bg-sky-500/15 text-sky-400',
+  lint: 'bg-violet-500/15 text-violet-400',
+  tests: 'bg-emerald-500/15 text-emerald-400',
+  defect: 'bg-red-500/15 text-red-400',
+};
+
+const KIND_LABEL: Record<SliceRecord['kind'], string> = {
+  perf: 'perf',
+  lint: 'lint',
+  tests: 'tests',
+  defect: 'defect',
+};
+
+function ProgressSection() {
+  const first = GATE_HISTORY[0];
+  const last = GATE_HISTORY[GATE_HISTORY.length - 1];
+  const pyFirst = GATE_HISTORY.find((g) => g.pyTests !== undefined)?.pyTests ?? 0;
+  const pyLast = last.pyTests ?? 0;
+  const totalPyDelta = SLICES.reduce((sum, s) => sum + (s.pyDelta ?? 0), 0);
+  const defectCount = SLICES.filter((s) => s.kind === 'defect').length;
+
+  return (
+    <div className="flex flex-col gap-6">
+      <WorkbenchCard title="Improvement loop — outcome">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <Stat value={`${first.lintWarnings} → ${last.lintWarnings}`} label="Lint warnings" />
+          <Stat value={`${first.npmTests} → ${last.npmTests}`} label="JS tests" />
+          <Stat value={`${pyFirst || '—'} → ${pyLast || '—'}`} label="Bridge tests" />
+          <Stat value={defectCount} label="Real defects fixed" />
+        </div>
+        <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
+          32 slices in one day (2026-08-22), each spec'd → built → gate-verified → recorded in
+          <code className="mx-1 font-mono">docs/HANDOFF.md</code>. Bridge suite grew
+          +{totalPyDelta} tests across the loop; seven real defects found and fixed.
+          The eighth (stale provider pins → OpenRouter 400s) landed after the loop stopped.
+        </p>
+      </WorkbenchCard>
+
+      <WorkbenchCard title="Gate history">
+        <div className="space-y-1.5">
+          {GATE_HISTORY.map((gate) => (
+            <div key={gate.label} className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md bg-muted/30 px-3 py-2 text-xs">
+              <span className="w-16 shrink-0 font-mono text-[11px] text-muted-foreground">{gate.label}</span>
+              <span className="text-muted-foreground">
+                lint <span className={cn('font-mono tabular-nums', gate.lintWarnings === 0 && 'text-emerald-400')}>{gate.lintWarnings}</span>
+              </span>
+              <span className="text-muted-foreground">
+                js tests <span className="font-mono tabular-nums text-foreground">{gate.npmTests}</span>
+              </span>
+              {gate.pyTests !== undefined && (
+                <span className="text-muted-foreground">
+                  py tests <span className="font-mono tabular-nums text-foreground">{gate.pyTests}</span>
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      </WorkbenchCard>
+
+      <WorkbenchCard title={`Slice timeline (${SLICES.length} slices)`}>
+        <div className="max-h-[420px] space-y-1 overflow-y-auto pr-1">
+          {SLICES.map((slice) => (
+            <div key={slice.n} className="flex items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-muted/40">
+              <span className="w-7 shrink-0 text-right font-mono text-[10px] tabular-nums text-muted-foreground/60">
+                #{slice.n}
+              </span>
+              <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide', KIND_STYLES[slice.kind])}>
+                {KIND_LABEL[slice.kind]}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-xs text-foreground/90">{slice.title}</span>
+              {slice.pyDelta !== undefined && (
+                <span className="shrink-0 font-mono text-[10px] tabular-nums text-emerald-400/80">+{slice.pyDelta} py</span>
+              )}
+              {slice.npmDelta !== undefined && (
+                <span className="shrink-0 font-mono text-[10px] tabular-nums text-emerald-400/80">+{slice.npmDelta} js</span>
+              )}
+              {slice.commit && (
+                <code className="hidden shrink-0 font-mono text-[10px] text-muted-foreground/60 sm:inline">{slice.commit}</code>
+              )}
+            </div>
+          ))}
+        </div>
+      </WorkbenchCard>
+
+      <WorkbenchCard title="Defects found & fixed by the loop">
+        <ol className="list-inside list-decimal space-y-1.5 text-xs text-muted-foreground">
+          {DEFECTS_FIXED.map((defect, i) => (
+            <li key={i} className="leading-relaxed">{defect}</li>
+          ))}
+        </ol>
+      </WorkbenchCard>
+
+      <WorkbenchCard title="QA audit ledger — 12 surfaces, all audited">
+        <div className="space-y-1.5">
+          {QA_SURFACES.map((surface) => {
+            const total = surface.findings.med + surface.findings.low;
+            return (
+              <div key={surface.surface} className="flex items-center gap-3 rounded-md bg-muted/30 px-3 py-1.5 text-xs">
+                <span className="min-w-0 flex-1 truncate text-foreground/90">{surface.surface}</span>
+                <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
+                  {total === 0 ? 'clean' : `${surface.findings.med} med · ${surface.findings.low} low`}
+                </span>
+                <span className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-400">
+                  audited
+                </span>
+              </div>
+            );
+          })}
+        </div>
+        <div className="mt-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Deferred to human review (MED)
+          </p>
+          <ul className="mt-1.5 list-inside list-disc space-y-1 text-xs text-muted-foreground">
+            {QA_DEFERRED.map((item, i) => (
+              <li key={i} className="leading-relaxed">{item}</li>
+            ))}
+          </ul>
+        </div>
+      </WorkbenchCard>
+
+      <WorkbenchCard title="Overnight backlog">
+        <div className="flex items-center gap-3 text-xs">
+          <span className="rounded bg-emerald-500/15 px-2 py-1 font-mono text-[11px] text-emerald-400">
+            {OVERNIGHT_BACKLOG.done}/{OVERNIGHT_BACKLOG.done + OVERNIGHT_BACKLOG.open} shipped
+          </span>
+          <span className="text-muted-foreground">
+            {OVERNIGHT_BACKLOG.open === 0 ? 'Queue empty — every backlog item shipped with a proving test.' : `${OVERNIGHT_BACKLOG.open} items remaining`}
+          </span>
+        </div>
+      </WorkbenchCard>
+    </div>
+  );
+}
 
 // ── Section shells ─────────────────────────────────────────────────────────
 
@@ -272,6 +536,8 @@ export default function Workbench() {
         </header>
 
         <main className="mx-auto max-w-[900px] px-4 py-6">
+          {section === 'blueprint' && <BlueprintSection />}
+          {section === 'progress' && <ProgressSection />}
           {section === 'composer' && <ComposerSection />}
           {section === 'messages' && <MessagesSection />}
           {section === 'welcome' && <WelcomeSection />}
