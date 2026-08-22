@@ -43,6 +43,7 @@
 - 2026-08-22 — Slice 18 landed: hermes_ops guards + fallback-chain edges (11 tests) — set_fallback_providers moa case-insensitive block, base_url validated on set (file:// rejected, trailing slash stripped), get_fallback_providers skips non-dict/incomplete entries + legacy dedupe, assert_safe_http_base_url scheme/host checks, CLI token empty/dash/bad-chars rejection, goal multiline/null-byte/leading-dash rejection with natural-language passthrough. Tests 461→472 (hermes_ops 60→71); lint held at zero.
 - 2026-08-22 — Slice 19 landed: goals/tool-search config edges (13 tests) — missing-section defaults, non-dict sections ignored, max_turns clamped to ≥1, set creates missing sections, no-op body changes nothing; tool_search boolean shorthand (True→auto/False→off), threshold clamped 0–100, limits clamped with search_default ≤ max, garbage numeric strings fall back to defaults, garbage "enabled" rejected on set. Tests 472→485 (hermes_ops 71→84); lint held at zero.
 - 2026-08-22 — Slice 20 landed: checkpoint edges (14 tests) — workdir resolution (explicit wins, prefers live-with-commits over live-without, orphans never selected, blank fields skipped), assert_safe_workdir (relative/control-chars rejected), assert_safe_checkpoint_index (0/neg/garbage rejected, float truncates), _format_checkpoint_entries malformed rows (non-dict skipped with ORIGINAL index preserved, missing reason defaults). REAL DEFECT: garbage files_changed ("lots") raised ValueError inside int() and killed the whole checkpoint listing — wrapped in try/except → 0. Tests 485→499 (hermes_ops 84→98); lint held at zero.
+- 2026-08-22 — Slice 21 landed: new test_delegation_live.py (18 tests) — path parsing (deleg id + task index), _safe_delegation_dir traversal/symlink escape rejection (resolve+relative_to guard works), manifest read (delegation_id injected, FileNotFoundError), list_recent_manifests (invalid JSON skipped, newest-first, limit clamped ≤20), tail_task_log (full read, offset paging with done-detection, missing log → empty not-done, task_index bounds −1/65 rejected). Traversal guard confirmed solid. Tests 499→515; lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -298,6 +299,19 @@ falls back to defaults. Test pins that fallback rather than the imagined alias p
 Sixth real defect: one malformed files_changed value crashed the entire checkpoint
 listing (int() uncaught). Now coerced to 0. Also pinned: float checkpoint indices
 truncate (1.5→1) rather than reject, and entry indices reflect original positions.
+
+### Slice 21 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **515 passed, 5 skipped** (delegation_live 0→18) |
+| diff | new hermes-bridge/test_delegation_live.py, +142 |
+| commit | 4b60b0e pushed to feat/codex-function-calling |
+
+Security-relevant positive finding: the _safe_delegation_dir traversal/symlink guard
+(resolve + relative_to) held against every escape attempt including symlinked deleg dirs.
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->
