@@ -1,20 +1,21 @@
-# SLICE 15 — Test coverage: bridge_events translation edge cases
+# SLICE 16 — Log-reasoning path: run_agent exit-code / error frame translation
 
 ## Problem
-test_bridge_events.py covers the ACP dispatch mapping and run-event translation basics.
-Pre-flight should check the remaining translation branches (reasoning deltas, approval
-pending payloads, error frames) for gaps.
+test_run_agent.py is the largest bridge test file (80 tests) but the loop hasn't audited
+it for gaps. Its coverage is heavy on repo-tools and vision. Pre-flight should check the
+exit-code normalization, error actionability (ActionableErrorTests class exists), and
+VERIFICATION_COMPLETE / run-final translation branches for holes.
 
 ## Change (finalize after pre-flight)
-pytest-only additions to test_bridge_events.py. Skip live-process paths.
+pytest-only additions. Avoid re-testing what ActionableErrorTests etc. already cover.
 
 ## Builder pre-flight
-1. Map bridge_events.py + acp_transport._dispatch translation surface vs existing tests.
-2. List uncovered branches with line refs.
+1. Run `grep -c "def test" test_run_agent.py`; list classes; identify weak spots.
+2. Cross-ref run_agent.py error/exit-code branches against existing tests.
 
 ## Acceptance gates (frozen before results)
 1. `npm run typecheck` → 0; lint → 0/0; npm test → ≥ 829.
-2. `.venv/bin/python -m pytest -q` → all pass (baseline 422+).
+2. `.venv/bin/python -m pytest -q` → all pass (baseline 442+).
 3. Diff touches ONLY hermes-bridge tests (+ minimal source if a real defect surfaces).
 4. One conventional commit (`test:`/`fix:`) pushed.
 
