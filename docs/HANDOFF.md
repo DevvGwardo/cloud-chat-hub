@@ -29,6 +29,7 @@
 - 2026-08-22 — Slice 4 landed: added `stop` to the conversation-switch effect deps (useChat.ts:3213) — exhaustive-deps class fully cleared, zero remaining; lint backlog 31→30. Next class: react-refresh warnings (~29) and misc single-file warnings.
 - 2026-08-22 — Slice 5 landed: pre-flight found `allowConstantExport` already enabled, so pivoted per spec fallback — moved motion presets into motion-presets.ts (10 warnings), removed toast.tsx dead re-export + unused `useToastContext` export (4), un-exported unused `HERMES_EFFORT_LABELS`/`filterJobsForConversation` (2); lint backlog 30→14. Remaining react-refresh sites need import-site changes (contexts, ui/* cva variants, helper fns) or are spark-landing.
 - 2026-08-22 — Slice 6 landed: full lint burn-down to ZERO warnings — deleted stale eslint-disable, moved PROVIDER_KEY_URLS/tour-setup/image-extract/buildPickerSuggestions into lib modules, split cva variants out of button/badge/toggle, extracted context objects into *-value modules with hooks in src/hooks/, moved TourStep into its own file, split spark-landing Root.tsx. Lint backlog 14→0; build verified.
+- 2026-08-22 — Slice 7 landed: added hermes provider-routing regression tests — placeholder keys ("none"/"null"/"undefined"/whitespace) must not become Authorization or keep an uncredentialed openrouter pin, and a keyless custom:base_url pin must survive. Tests 820→822; lint stays at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -105,6 +106,20 @@ All 11 items from the spec executed including the deferred contexts chunk. New m
 button/badge/toggle-variants.ts, panel-context-value.ts + use-panel-context.ts,
 command-callbacks-context-value.ts + use-command-callbacks.ts, image-extract.ts,
 provider-key-urls.ts, tour-setup.ts, TourStep.tsx, spark-landing Root.tsx.
+
+### Slice 7 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held at zero) |
+| unit tests | 134 files, **822 tests passed** (was 820; +2 routing regression tests, 15 total in hermes-chat-route) |
+| diff | only server/__tests__/hermes-chat-route.test.ts, +132 |
+| commit | 5c59248 pushed to feat/codex-function-calling |
+
+Pre-flight finding: the `_KNOWN_HOSTS ''` bug class is already covered by existing tests
+("omits empty Authorization..." + "forwards usable Authorization...") — no production
+defect surfaced. The new tests close two uncovered branches of `hermesBridgeAuthHeaders`
+placeholder handling and keyless custom-pin survival.
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->
