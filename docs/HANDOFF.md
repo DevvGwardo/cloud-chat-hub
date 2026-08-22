@@ -41,6 +41,7 @@
 - 2026-08-22 — Slice 16 landed: run-command/read-file edge tests (11) — exit 127/2 hints, PermissionError→exit 126 (REAL DEFECT: subprocess.run raises PermissionError for non-executable files and _tool_run_command had no handler → unhandled crash instead of a hint; added except PermissionError), stderr merge, no-output placeholder, sibling-list overflow note (+5 more), permission-denied message, large-file truncation. Also pinned the module-clobber pattern: test binds bridge-local run_agent by explicit file path since hermes_adapter's import replaces sys.modules entry. Tests 442→453; lint held at zero.
 - 2026-08-22 — Slice 17 landed: request-validation tests (8) — ChatCompletionRequest defaults/extra-fields-tolerated/messages default, _no_api_key_error provider-specific vs generic messages + OpenAI error-dict shape, REPO_NOT_FOUND / GITHUB_TOKEN_EXPIRED envelopes. Tests must tolerate test_main.py's pydantic/fastapi STUBS (stub BaseModel doesn't validate types; stub JSONResponse exposes .content not .body) — assertions restricted to behavior shared by both environments, message-content access stub-adaptive. Tests 453→461; lint held at zero.
 - 2026-08-22 — Slice 18 landed: hermes_ops guards + fallback-chain edges (11 tests) — set_fallback_providers moa case-insensitive block, base_url validated on set (file:// rejected, trailing slash stripped), get_fallback_providers skips non-dict/incomplete entries + legacy dedupe, assert_safe_http_base_url scheme/host checks, CLI token empty/dash/bad-chars rejection, goal multiline/null-byte/leading-dash rejection with natural-language passthrough. Tests 461→472 (hermes_ops 60→71); lint held at zero.
+- 2026-08-22 — Slice 19 landed: goals/tool-search config edges (13 tests) — missing-section defaults, non-dict sections ignored, max_turns clamped to ≥1, set creates missing sections, no-op body changes nothing; tool_search boolean shorthand (True→auto/False→off), threshold clamped 0–100, limits clamped with search_default ≤ max, garbage numeric strings fall back to defaults, garbage "enabled" rejected on set. Tests 472→485 (hermes_ops 71→84); lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -268,6 +269,20 @@ stub-adaptive or move to a subprocess-isolated file.
 | pytest hermes-bridge | **472 passed, 5 skipped** (hermes_ops 60→71) |
 | diff | only hermes-bridge/test_hermes_ops.py, +86 |
 | commit | a8ede91 pushed to feat/codex-function-calling |
+
+### Slice 19 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **485 passed, 5 skipped** (hermes_ops 71→84) |
+| diff | only hermes-bridge/test_hermes_ops.py, +83 |
+| commit | 53d7484 pushed to feat/codex-function-calling |
+
+One test written then corrected against actual behavior: bare-string tool_search values
+("true"/"off") are NOT parsed — only dict form reads enabled aliases; the string branch
+falls back to defaults. Test pins that fallback rather than the imagined alias parsing.
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->
