@@ -1,21 +1,21 @@
-# SLICE 16 — Log-reasoning path: run_agent exit-code / error frame translation
+# SLICE 17 — Test coverage: main.py chat request validation & auth edges
 
 ## Problem
-test_run_agent.py is the largest bridge test file (80 tests) but the loop hasn't audited
-it for gaps. Its coverage is heavy on repo-tools and vision. Pre-flight should check the
-exit-code normalization, error actionability (ActionableErrorTests class exists), and
-VERIFICATION_COMPLETE / run-final translation branches for holes.
+test_chat-route-validation.test.ts covers the Express side, but main.py (FastAPI bridge)
+request validation — malformed messages arrays, oversized payloads, missing model,
+auth-header edge cases on /v1/chat/completions and /v1/models — has only indirect
+coverage via test_main.py's EdgeCaseTests.
 
 ## Change (finalize after pre-flight)
-pytest-only additions. Avoid re-testing what ActionableErrorTests etc. already cover.
+pytest-only additions to test_main.py or a new focused file. Skip live-agent paths.
 
 ## Builder pre-flight
-1. Run `grep -c "def test" test_run_agent.py`; list classes; identify weak spots.
-2. Cross-ref run_agent.py error/exit-code branches against existing tests.
+1. Map main.py request-validation branches (4xx returns) vs existing tests.
+2. Identify untested validation branches with line refs.
 
 ## Acceptance gates (frozen before results)
 1. `npm run typecheck` → 0; lint → 0/0; npm test → ≥ 829.
-2. `.venv/bin/python -m pytest -q` → all pass (baseline 442+).
+2. `.venv/bin/python -m pytest -q` → all pass (baseline 453+).
 3. Diff touches ONLY hermes-bridge tests (+ minimal source if a real defect surfaces).
 4. One conventional commit (`test:`/`fix:`) pushed.
 
