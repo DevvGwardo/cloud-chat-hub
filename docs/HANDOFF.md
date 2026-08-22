@@ -30,6 +30,7 @@
 - 2026-08-22 — Slice 5 landed: pre-flight found `allowConstantExport` already enabled, so pivoted per spec fallback — moved motion presets into motion-presets.ts (10 warnings), removed toast.tsx dead re-export + unused `useToastContext` export (4), un-exported unused `HERMES_EFFORT_LABELS`/`filterJobsForConversation` (2); lint backlog 30→14. Remaining react-refresh sites need import-site changes (contexts, ui/* cva variants, helper fns) or are spark-landing.
 - 2026-08-22 — Slice 6 landed: full lint burn-down to ZERO warnings — deleted stale eslint-disable, moved PROVIDER_KEY_URLS/tour-setup/image-extract/buildPickerSuggestions into lib modules, split cva variants out of button/badge/toggle, extracted context objects into *-value modules with hooks in src/hooks/, moved TourStep into its own file, split spark-landing Root.tsx. Lint backlog 14→0; build verified.
 - 2026-08-22 — Slice 7 landed: added hermes provider-routing regression tests — placeholder keys ("none"/"null"/"undefined"/whitespace) must not become Authorization or keep an uncredentialed openrouter pin, and a keyless custom:base_url pin must survive. Tests 820→822; lint stays at zero.
+- 2026-08-22 — Slice 8 landed: approval-engine edge cases — "once" rule consumption, expired-rule pruning, missing-command prefix non-match, APPROVAL_TIMEOUT_MS timeout via fake timers, emit-throw → abort, double-resolve idempotency, cross-conversation rule scoping. Tests 822→829 (28 in approval-engine); lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -120,6 +121,15 @@ Pre-flight finding: the `_KNOWN_HOSTS ''` bug class is already covered by existi
 ("omits empty Authorization..." + "forwards usable Authorization...") — no production
 defect surfaced. The new tests close two uncovered branches of `hermesBridgeAuthHeaders`
 placeholder handling and keyless custom-pin survival.
+
+### Slice 8 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| unit tests | 134 files, **829 tests passed** (was 822; approval-engine 21→28) |
+| diff | only server/__tests__/approval-engine.test.ts, +136/−1 |
+| commit | dc4e137 pushed to feat/codex-function-calling |
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->
