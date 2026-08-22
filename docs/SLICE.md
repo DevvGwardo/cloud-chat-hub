@@ -1,33 +1,30 @@
-# SLICE 10 — Test coverage: bridge cwd-OSError guard regression (known gotcha class)
+# SLICE 11 — Test coverage: hermes-bridge worktree header handling
 
 ## Problem
-The loop's known-gotchas list includes the "bridge cwd OSError" class — the hermes-bridge
-crashed when the spawn cwd no longer existed. Commit ef565f4 ("fix: bridge cwd-OSError
-guard, admin proxy startup-race retry, CSP 127.0.0.1") landed the fix, but pre-flight must
-verify whether a regression test exists in hermes-bridge/ for it.
+The bridge supports repo-mode worktrees (`worktree_cwd`, `x-hermes-worktree-*` headers,
+commit ef565f4-era code at main.py ~5730). test_worktree_support.py exists — pre-flight
+must establish what it covers and find genuinely untested branches (e.g. setup-failure
+fallback to original cwd, missing worktree info, malformed wt_info payloads).
 
 ## Change (finalize after pre-flight)
-If untested: add pytest coverage in hermes-bridge/ for the cwd-missing path (spawn with a
-deleted/nonexistent cwd must fall back gracefully, not raise). Test-only diff unless the
-guard turns out to be missing/broken — then fix minimally and note it.
+pytest-only additions. If a branch doesn't exist, don't invent it.
 
 ## Out of scope
-- hermes-bridge transport refactors
-- Any Electron/server code
+- Bridge transport/agent refactors
+- Server or Electron code
 
 ## Builder pre-flight
-1. Locate the cwd guard (grep hermes-bridge/main.py + acp_transport.py for cwd handling).
-2. Check hermes-bridge/ tests for existing coverage (`pytest -q` baseline too).
+1. Read main.py worktree section (~5720-5760) + test_worktree_support.py; list covered cases.
+2. Identify untested branches with line refs.
 
 ## Acceptance gates (frozen before results)
-1. `npm run typecheck` → exit 0; `npm run lint` → 0/0; `npm test` → all pass (≥ 829).
-2. `pytest -q` in hermes-bridge/ → all pass (baseline from pre-flight + new tests).
-3. Diff touches ONLY hermes-bridge test files (+ at most one bridge source file if a real
-   defect surfaced).
-4. One conventional commit (`test:` or `fix:`) pushed to the current feat branch.
+1. `npm run typecheck` → 0; lint → 0/0; npm test → ≥ 829.
+2. `.venv/bin/python -m pytest -q` in hermes-bridge/ → all pass (baseline 365+).
+3. Diff touches ONLY hermes-bridge tests (+ minimal source if a real defect surfaces).
+4. One conventional commit (`test:`/`fix:`) pushed.
 
 ## Verify commands
 ```
-cd hermes-bridge && pytest -q
+cd hermes-bridge && .venv/bin/python -m pytest -q
 cd .. && npm run typecheck && npm run lint && npm test
 ```

@@ -32,6 +32,7 @@
 - 2026-08-22 — Slice 7 landed: added hermes provider-routing regression tests — placeholder keys ("none"/"null"/"undefined"/whitespace) must not become Authorization or keep an uncredentialed openrouter pin, and a keyless custom:base_url pin must survive. Tests 820→822; lint stays at zero.
 - 2026-08-22 — Slice 8 landed: approval-engine edge cases — "once" rule consumption, expired-rule pruning, missing-command prefix non-match, APPROVAL_TIMEOUT_MS timeout via fake timers, emit-throw → abort, double-resolve idempotency, cross-conversation rule scoping. Tests 822→829 (28 in approval-engine); lint held at zero.
 - 2026-08-22 — Slice 9 landed: `messages` in useRoomChat.ts wrapped in useMemo over `[roomMessages]` — the per-render `.map(toChatMessage)` allocation was a dependency of ChatArea's `panelToolActivity` memo (line ~647) and usage-tracking effect (~732), re-running both every render. HermesModelPicker/MessageBubble candidates inspected: feed nothing memoized — skipped per spec.
+- 2026-08-22 — Slice 10 landed: cwd-OSError guard regression tests (3: broken getcwd → home fallback, repo-root header wins, healthy getcwd sanity). Found + fixed a real pre-existing test-infra defect on HEAD: test_main.py's httpx stub lacked TimeoutException/HTTPStatusError exception classes, so hermes_adapter's except clauses raised when the stub won the import race (test_dispatch_handles_connection_failure failed in combined runs). pytest hermes-bridge: 365 passed, 5 skipped; npm gates green.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -144,6 +145,19 @@ placeholder handling and keyless custom-pin survival.
 Pre-flight: swept chat paths for dep-feeding inline allocations. Only useRoomChat.messages
 qualified (feeds ChatArea memo + effect). MessageBubble's buildInterleavedByOffset is a
 plain function; HermesModelPicker has zero hooks/memos — both skipped as speculative.
+
+### Slice 10 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **365 passed, 5 skipped** (full suite green incl. test_run_agent/test_main) |
+| diff | test_cwd_oserror_guard.py (new, 3 tests) + test_main.py httpx stub fix, +123 |
+| commit | 7a8caf2 pushed to feat/codex-function-calling |
+
+Note: pytest with system python3 fails collection (PEP 604 unions) — use the bridge venv:
+`.venv/bin/python -m pytest -q`. test_run_agent.py + test_main.py only collect under venv.
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->
