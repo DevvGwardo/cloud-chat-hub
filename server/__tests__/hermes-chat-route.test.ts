@@ -904,4 +904,136 @@ describe('Hermes chat route', () => {
     }
   })
 
+  it('suppresses placeholder-string API keys ("none"/"null"/"undefined") and whitespace-only keys like empty ones', async () => {
+    const bridgeStream = [
+      'data: {"id":"chatcmpl-hermes-placeholder","choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n',
+      'data: {"id":"chatcmpl-hermes-placeholder","choices":[{"index":0,"delta":{"content":"placeholder suppressed"}}]}\n\n',
+      'data: {"id":"chatcmpl-hermes-placeholder","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n',
+      'data: [DONE]\n\n',
+    ].join('')
+
+    for (const badKey of ['none', 'null', 'undefined', '   ']) {
+      let capturedHeaders: Record<string, string> = {}
+      vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as { url: string }).url
+        if (url.includes('/functions/v1/chat')) {
+          return actualFetch(input, init)
+        }
+
+        const raw = init?.headers
+        if (raw instanceof Headers) {
+          capturedHeaders = Object.fromEntries(raw.entries())
+        } else if (Array.isArray(raw)) {
+          capturedHeaders = Object.fromEntries(raw)
+        } else {
+          capturedHeaders = { ...(raw as Record<string, string> | undefined) }
+        }
+
+        return new Response(bridgeStream, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }))
+
+      const server = await createTestServer()
+
+      try {
+        const response = await actualFetch(`${server.url}/functions/v1/chat`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            provider: 'hermes',
+            model: 'auto',
+            api_key: badKey,
+            hermes_provider: 'openrouter',
+            messages: [
+              { role: 'user', content: 'hello' },
+            ],
+          }),
+        })
+
+        const body = await response.text()
+        expect(response.ok).toBe(true)
+        expect(body).toContain('placeholder suppressed')
+
+        // Placeholder key must not become an Authorization header — an empty or
+        // placeholder auth confuses OpenRouter key detection on the bridge side.
+        const headerKeys = Object.keys(capturedHeaders).map((k) => k.toLowerCase())
+        expect(headerKeys).not.toContain('authorization')
+        // And the uncredentialed openrouter pin must be dropped with it.
+        expect(headerKeys).not.toContain('x-hermes-provider')
+      } finally {
+        await server.close()
+        vi.unstubAllGlobals()
+      }
+    }
+  })
+
+  it('keeps an explicit non-openrouter custom pin even when no usable key is present', async () => {
+    const bridgeStream = [
+      'data: {"id":"chatcmpl-hermes-keyless-pin","choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n',
+      'data: {"id":"chatcmpl-hermes-keyless-pin","choices":[{"index":0,"delta":{"content":"keyless custom pin kept"}}]}\n\n',
+      'data: {"id":"chatcmpl-hermes-keyless-pin","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n',
+      'data: [DONE]\n\n',
+    ].join('')
+
+    let capturedHeaders: Record<string, string> = {}
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as { url: string }).url
+      if (url.includes('/functions/v1/chat')) {
+        return actualFetch(input, init)
+      }
+
+      const raw = init?.headers
+      if (raw instanceof Headers) {
+        capturedHeaders = Object.fromEntries(raw.entries())
+      } else if (Array.isArray(raw)) {
+        capturedHeaders = Object.fromEntries(raw)
+      } else {
+        capturedHeaders = { ...(raw as Record<string, string> | undefined) }
+      }
+
+      return new Response(bridgeStream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    }))
+
+    const server = await createTestServer()
+
+    try {
+      const response = await actualFetch(`${server.url}/functions/v1/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          provider: 'hermes',
+          model: 'auto',
+          api_key: '',
+          hermes_provider: 'custom:api.bullinf.fun',
+          messages: [
+            { role: 'user', content: 'hello' },
+          ],
+        }),
+      })
+
+      const body = await response.text()
+      expect(response.ok).toBe(true)
+      expect(body).toContain('keyless custom pin kept')
+
+      // Keyless: no Authorization. But a custom base_url provider pin is exactly
+      // what routes the request — it must survive without a client key.
+      const headerKeys = Object.keys(capturedHeaders).map((k) => k.toLowerCase())
+      expect(headerKeys).not.toContain('authorization')
+      const pin = capturedHeaders['X-Hermes-Provider'] ?? capturedHeaders['x-hermes-provider']
+      expect(pin).toBe('custom:api.bullinf.fun')
+    } finally {
+      await server.close()
+      vi.unstubAllGlobals()
+    }
+  })
+
 })
