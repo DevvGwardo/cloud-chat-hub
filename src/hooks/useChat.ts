@@ -3210,7 +3210,7 @@ When the user asks you to make changes:
     retriedToolsRef.current.clear();
     clearStreamRetryIndicator();
 
-  }, [aiChatSessionId, chatSessionId, clearStreamRetryIndicator, conversationId, safeSetMessages, panelId, resetPanelFileState, restoreFileState, saveConversationFiles, hydrateConversationMessages, isStreaming, scopeId, sessionLock]);
+  }, [aiChatSessionId, chatSessionId, clearStreamRetryIndicator, conversationId, safeSetMessages, panelId, resetPanelFileState, restoreFileState, saveConversationFiles, hydrateConversationMessages, isStreaming, scopeId, sessionLock, stop]);
 
   // Auto-save file state (debounced) whenever the panel's file state changes
   useEffect(() => {
