@@ -36,6 +36,7 @@
 - 2026-08-22 — Slice 11 landed: worktree edge cases — maybe_setup_worktree success/failure/no-root/missing-path, _untrack promotion + unknown-info noop, manual-cleanup empty-path/already-deleted/rmtree-failure, CLI-cleanup-leaves-path → manual fallback, cleanup_session count. Tests 365→379 (worktree 12→26); lint held at zero.
 - 2026-08-22 — Slice 12 landed: extract_gateway_error_text direct tests (dict message/type/code preference, string error, top-level message, blank-value skip, non-serializable fallback, 500-char truncation) + needs_agent_loop_parity edges (whitespace base_url ignored, auto/default not explicit, blank github_pat, empty custom_tools, case-insensitive moa match, repo_mode wins with parity). Tests 379→392 (hermes_runs 62→75); lint held at zero.
 - 2026-08-22 — Slice 13 landed: new test_acp_transport.py (19 tests) — _safe_conversation_id sanitization (traversal/charset/40-cap), _env_float fallbacks, idle reaper (idle reaped / busy protected / young survive / close failures swallowed), resolve_approval (pending future resolved, unknown id False, done future skipped), shutdown_all (registry cleared, close errors swallowed). Tests 392→411; lint held at zero.
+- 2026-08-22 — Slice 14 landed: test_hermes_adapter_helpers.py (11 tests) — _cap truncation (short/exact-limit/overflow marker reports overflow size), parse_fallback_switch_status edges (in-progress wins over arrow pattern, unparseable tail, whitespace stripping, short-form requires parenthesized provider), cache stats reset. CRITICAL lesson re-learned: hermes_adapter must NEVER be imported at module level in tests — it replaces sys.modules["run_agent"] with the hermes-agent copy lacking repo_mode, breaking 47 test_run_agent tests. Lazy import inside test methods only (same contract as test_hermes_adapter_mcp.py). Tests 411→422; lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -204,6 +205,20 @@ for /v1/runs rejections. Also pinned the truncation cap and case-insensitive moa
 Spawn/connect paths intentionally untested (need a live hermes-acp process). One test
 expectation corrected during build: handle.close() swallows inner close_session failures
 by design (bounded wait_for + force-kill), so the reaper counts those as closed.
+
+### Slice 14 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **422 passed, 5 skipped** |
+| diff | new hermes-bridge/test_hermes_adapter_helpers.py, +107 |
+| commit | cc2f8a7 pushed to feat/codex-function-calling |
+
+Mid-slice rollback: first version imported hermes_adapter at module level → clobbered
+sys.modules["run_agent"] → 47 test_run_agent failures. Rolled back to lazy imports per
+the documented contract in test_hermes_adapter_mcp.py's docstring; full suite green.
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->
