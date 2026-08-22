@@ -35,6 +35,7 @@
 - 2026-08-22 — Slice 10 landed: cwd-OSError guard regression tests (3: broken getcwd → home fallback, repo-root header wins, healthy getcwd sanity). Found + fixed a real pre-existing test-infra defect on HEAD: test_main.py's httpx stub lacked TimeoutException/HTTPStatusError exception classes, so hermes_adapter's except clauses raised when the stub won the import race (test_dispatch_handles_connection_failure failed in combined runs). pytest hermes-bridge: 365 passed, 5 skipped; npm gates green.
 - 2026-08-22 — Slice 11 landed: worktree edge cases — maybe_setup_worktree success/failure/no-root/missing-path, _untrack promotion + unknown-info noop, manual-cleanup empty-path/already-deleted/rmtree-failure, CLI-cleanup-leaves-path → manual fallback, cleanup_session count. Tests 365→379 (worktree 12→26); lint held at zero.
 - 2026-08-22 — Slice 12 landed: extract_gateway_error_text direct tests (dict message/type/code preference, string error, top-level message, blank-value skip, non-serializable fallback, 500-char truncation) + needs_agent_loop_parity edges (whitespace base_url ignored, auto/default not explicit, blank github_pat, empty custom_tools, case-insensitive moa match, repo_mode wins with parity). Tests 379→392 (hermes_runs 62→75); lint held at zero.
+- 2026-08-22 — Slice 13 landed: new test_acp_transport.py (19 tests) — _safe_conversation_id sanitization (traversal/charset/40-cap), _env_float fallbacks, idle reaper (idle reaped / busy protected / young survive / close failures swallowed), resolve_approval (pending future resolved, unknown id False, done future skipped), shutdown_all (registry cleared, close errors swallowed). Tests 392→411; lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -189,6 +190,20 @@ CLI-cleanup-leaves-path → manual fallback chain, cleanup_session counting. All
 Note: needs_agent_loop_parity was already well covered (13 cases); the real gap was
 extract_gateway_error_text — zero direct tests despite being the user-visible error path
 for /v1/runs rejections. Also pinned the truncation cap and case-insensitive moa matching.
+
+### Slice 13 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **411 passed, 5 skipped** (acp_transport 0→19; only BridgeAcpClient._dispatch was covered before) |
+| diff | new hermes-bridge/test_acp_transport.py, +221 |
+| commit | ce48fbe pushed to feat/codex-function-calling |
+
+Spawn/connect paths intentionally untested (need a live hermes-acp process). One test
+expectation corrected during build: handle.close() swallows inner close_session failures
+by design (bounded wait_for + force-kill), so the reaper counts those as closed.
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->
