@@ -34,6 +34,7 @@
 - 2026-08-22 — Slice 9 landed: `messages` in useRoomChat.ts wrapped in useMemo over `[roomMessages]` — the per-render `.map(toChatMessage)` allocation was a dependency of ChatArea's `panelToolActivity` memo (line ~647) and usage-tracking effect (~732), re-running both every render. HermesModelPicker/MessageBubble candidates inspected: feed nothing memoized — skipped per spec.
 - 2026-08-22 — Slice 10 landed: cwd-OSError guard regression tests (3: broken getcwd → home fallback, repo-root header wins, healthy getcwd sanity). Found + fixed a real pre-existing test-infra defect on HEAD: test_main.py's httpx stub lacked TimeoutException/HTTPStatusError exception classes, so hermes_adapter's except clauses raised when the stub won the import race (test_dispatch_handles_connection_failure failed in combined runs). pytest hermes-bridge: 365 passed, 5 skipped; npm gates green.
 - 2026-08-22 — Slice 11 landed: worktree edge cases — maybe_setup_worktree success/failure/no-root/missing-path, _untrack promotion + unknown-info noop, manual-cleanup empty-path/already-deleted/rmtree-failure, CLI-cleanup-leaves-path → manual fallback, cleanup_session count. Tests 365→379 (worktree 12→26); lint held at zero.
+- 2026-08-22 — Slice 12 landed: extract_gateway_error_text direct tests (dict message/type/code preference, string error, top-level message, blank-value skip, non-serializable fallback, 500-char truncation) + needs_agent_loop_parity edges (whitespace base_url ignored, auto/default not explicit, blank github_pat, empty custom_tools, case-insensitive moa match, repo_mode wins with parity). Tests 379→392 (hermes_runs 62→75); lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -174,6 +175,20 @@ Pre-flight: existing tests covered flag parsing, toolset routing, path ownership
 cleanup. Uncovered: maybe_setup_worktree lifecycle (success chdir+track, failure fallbacks,
 blank-root CLI discovery), _untrack promotion semantics, manual-cleanup error paths,
 CLI-cleanup-leaves-path → manual fallback chain, cleanup_session counting. All now covered.
+
+### Slice 12 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **392 passed, 5 skipped** (hermes_runs 62→75) |
+| diff | only hermes-bridge/test_hermes_runs.py, +99 |
+| commit | 4450868 pushed to feat/codex-function-calling |
+
+Note: needs_agent_loop_parity was already well covered (13 cases); the real gap was
+extract_gateway_error_text — zero direct tests despite being the user-visible error path
+for /v1/runs rejections. Also pinned the truncation cap and case-insensitive moa matching.
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->

@@ -1,21 +1,21 @@
-# SLICE 12 — Test coverage: hermes_runs submit/parity edge cases
+# SLICE 13 — Test coverage: hermes-bridge acp_transport session lifecycle
 
 ## Problem
-`hermes_runs.py` (Gateway /v1/runs client) is exercised via test_hermes_runs.py and
-test_runs_parity_name.py, but main.py's runs-routing fallback chain (route_runs demotion:
-moa rejection, parity mismatch, provider pinning) has branches around main.py:5700-5770
-that pre-flight should check for coverage.
+acp_transport.py (ACP transport to the real hermes-agent) has zero dedicated test file.
+Pre-flight should check what's importable/testable without a live agent: `acp_available`,
+session bookkeeping, idle-reaper logic, event-queue translation, PROMPT_TIMEOUT handling.
 
 ## Change (finalize after pre-flight)
-pytest-only additions to existing files. Don't invent branches that don't exist.
+pytest-only additions in a new test_acp_transport.py. Mock the agent process; test pure
+logic and state transitions only. Skip anything requiring a live hermes-acp binary.
 
 ## Builder pre-flight
-1. Map the route_runs decision chain in main.py (lines ~5690-5790).
-2. Check which demotion paths have tests today.
+1. Map acp_transport.py: public functions, module state, what needs a live process.
+2. Confirm no existing coverage (grep test_*.py for acp_transport imports).
 
 ## Acceptance gates (frozen before results)
 1. `npm run typecheck` → 0; lint → 0/0; npm test → ≥ 829.
-2. `.venv/bin/python -m pytest -q` → all pass (baseline 379+).
+2. `.venv/bin/python -m pytest -q` → all pass (baseline 392+).
 3. Diff touches ONLY hermes-bridge tests (+ minimal source if a real defect surfaces).
 4. One conventional commit (`test:`/`fix:`) pushed.
 
