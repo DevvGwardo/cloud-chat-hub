@@ -182,7 +182,7 @@ export function HermesMcpSettingsPanel({
 }) {
   const setMcpStoreFullscreen = useUIStore((s) => s.setMcpStoreFullscreen);
 
-  const toolIndex = useHermesMcpToolIndex();
+  const { reload: reloadToolIndex, ...toolIndex } = useHermesMcpToolIndex();
   const [servers, setServers] = useState<HermesMcpServerInfo[]>([]);
   const [catalog, setCatalog] = useState<HermesMcpCatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -200,13 +200,13 @@ export function HermesMcpSettingsPanel({
       const [s, c] = await Promise.all([fetchHermesMcpServers(), fetchHermesMcpCatalog()]);
       setServers(s);
       setCatalog(c);
-      await toolIndex.reload();
+      await reloadToolIndex();
     } catch (err) {
       setLoadError(err instanceof HermesApiError ? err.message : 'Could not reach the Hermes bridge.');
     } finally {
       setLoading(false);
     }
-  }, [toolIndex.reload]);
+  }, [reloadToolIndex]);
 
   useEffect(() => {
     void reload();

@@ -210,7 +210,7 @@ type McpTab = 'dashboard' | 'store';
 
 export function McpStoreView({ onExitFullscreen }: { onExitFullscreen?: () => void } = {}) {
   const [tab, setTab] = useState<McpTab>('dashboard');
-  const toolIndex = useHermesMcpToolIndex();
+  const { reload: reloadToolIndex, ...toolIndex } = useHermesMcpToolIndex();
   const [servers, setServers] = useState<HermesMcpServerInfo[]>([]);
   const [catalog, setCatalog] = useState<HermesMcpCatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -225,13 +225,13 @@ export function McpStoreView({ onExitFullscreen }: { onExitFullscreen?: () => vo
       const [s, c] = await Promise.all([fetchHermesMcpServers(), fetchHermesMcpCatalog()]);
       setServers(s);
       setCatalog(c);
-      await toolIndex.reload();
+      await reloadToolIndex();
     } catch (err) {
       setLoadError(err instanceof HermesApiError ? err.message : 'Could not reach the bridge.');
     } finally {
       setLoading(false);
     }
-  }, [toolIndex.reload]);
+  }, [reloadToolIndex]);
 
   useEffect(() => {
     void reload();
