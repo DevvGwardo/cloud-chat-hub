@@ -2489,6 +2489,91 @@ _PROVIDER_CONFIG: dict[str, dict] = {
         "auth_json_provider": "custom:Cursor-Composer",
         "env_var": "CURSOR_API_KEY",
     },
+    # --- Providers synced from hermes-agent's PROVIDER_REGISTRY (hermes_cli/auth.py) ---
+    # Sync check:
+    #   python3 -c "import re;auth=open('~/.hermes/hermes-agent/hermes_cli/auth.py').read();\
+    #   ids=set(re.findall(r'id=\"([a-z0-9_]+)\"',auth));main=open('hermes-bridge/main.py').read();\
+    #   m=re.search(r'_PROVIDER_CONFIG[^=]*=\s*\{',main);keys=set(re.findall(r'\"([a-z0-9_]+)\":\s*\{',main[m.end():]));\
+    #   print(sorted(ids-keys))"
+    "xiaomi": {
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "name": "Xiaomi MiMo",
+        "model_prefixes": ["xiaomi/", "mimo"],
+        "auth_json_provider": "xiaomi",
+        "env_var": "XIAOMI_API_KEY",
+    },
+    "gemini": {
+        # Distinct registry id upstream; same endpoint as google/ai-studio.
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "name": "Google AI Studio (gemini)",
+        "model_prefixes": ["gemini/"],
+        "auth_json_provider": "gemini",
+        "env_var": "GEMINI_API_KEY",
+    },
+    "lmstudio": {
+        "base_url": "http://127.0.0.1:1234/v1",
+        "name": "LM Studio (local)",
+        "model_prefixes": ["lmstudio/"],
+        "auth_json_provider": "lmstudio",
+        "env_var": "LM_API_KEY",
+    },
+    "copilot": {
+        "base_url": "https://api.githubcopilot.com",
+        "name": "GitHub Copilot",
+        "model_prefixes": ["copilot/"],
+        "auth_json_provider": "copilot",
+        "env_var": "COPILOT_GITHUB_TOKEN",
+    },
+    "stepfun": {
+        "base_url": "https://api.stepfun.ai/step_plan/v1",
+        "name": "StepFun Step Plan",
+        "model_prefixes": ["stepfun/"],
+        "auth_json_provider": "stepfun",
+        "env_var": "STEPFUN_API_KEY",
+    },
+    "arcee": {
+        "base_url": "https://api.arcee.ai/api/v1",
+        "name": "Arcee AI",
+        "model_prefixes": ["arcee/"],
+        "auth_json_provider": "arcee",
+        "env_var": "ARCEEAI_API_KEY",
+    },
+    "gmi": {
+        "base_url": "https://api.gmi-serving.com/v1",
+        "name": "GMI Cloud",
+        "model_prefixes": ["gmi/"],
+        "auth_json_provider": "gmi",
+        "env_var": "GMI_API_KEY",
+    },
+    "actual": {
+        "base_url": "https://api.actual.inc/v1",
+        "name": "Actual Computer",
+        "model_prefixes": ["actual/"],
+        "auth_json_provider": "actual",
+        "env_var": "ACTUAL_API_KEY",
+    },
+    "nvidia": {
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "name": "NVIDIA NIM",
+        "model_prefixes": ["nvidia/", "nvidia-nim/"],
+        "auth_json_provider": "nvidia",
+        "env_var": "NVIDIA_API_KEY",
+    },
+    # aws_sdk / vertex auth types — no bearer-token proxying via the bridge;
+    # registered so model-prefix routing and /health credential reporting
+    # recognize them instead of falling through to OpenRouter with a wrong key.
+    "bedrock": {
+        "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "name": "AWS Bedrock (no bridge proxying — SDK auth)",
+        "model_prefixes": ["bedrock/"],
+        "auth_json_provider": "bedrock",
+    },
+    "vertex": {
+        "base_url": "",
+        "name": "Google Vertex AI (no bridge proxying — ADC auth)",
+        "model_prefixes": ["vertex/"],
+        "auth_json_provider": "vertex",
+    },
 }
 
 # Build a reverse lookup: model_prefix → provider_id
@@ -2499,8 +2584,16 @@ for _pid, _cfg in _PROVIDER_CONFIG.items():
 
 # Known hosts for custom base_url detection
 _KNOWN_HOSTS: tuple[str, ...] = tuple(
-    {u.split("://")[-1].split("/")[0].replace("api.", "").replace("www.", "")
-     for u in [_c["base_url"] for _c in _PROVIDER_CONFIG.values()]}
+    # Filter empty strings: a provider entry with base_url "" (e.g. vertex,
+    # resolved at request time) would otherwise yield "" as a host and
+    # `"" in url` is always True — silently marking every base_url "known"
+    # and killing the cli_is_custom passthrough path.
+    h
+    for h in {
+        u.split("://")[-1].split("/")[0].replace("api.", "").replace("www.", "")
+        for u in [_c["base_url"] for _c in _PROVIDER_CONFIG.values()]
+    }
+    if h
 )
 
 # Backward-compatible constants
@@ -2929,9 +3022,12 @@ except Exception:
 # Bridge provider id → hermes_cli provider id (where they differ)
 _BRIDGE_TO_CLI_PROVIDER = {
     "anthropic": "anthropic", "deepseek": "deepseek", "google": "gemini",
-    "openai": "openai-api", "xai": "xai", "kimi": "kimi-coding",
+    "gemini": "gemini", "openai": "openai-api", "xai": "xai", "kimi": "kimi-coding",
     "zai": "zai", "alibaba": "alibaba", "huggingface": "huggingface",
     "kilocode": "kilocode", "nous": "nous", "minimax": "minimax",
+    "xiaomi": "xiaomi", "copilot": "copilot", "stepfun": "stepfun",
+    "arcee": "arcee", "gmi": "gmi", "actual": "actual", "nvidia": "nvidia",
+    "lmstudio": "lmstudio",
 }
 
 # Static fallbacks for bridge ids with no clean cli source.
@@ -4604,6 +4700,13 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
     plan_mode = bool((body.model_extra or {}).get("plan_mode"))
     if plan_mode:
         print(f"[hermes-bridge] plan_mode: stripping mutating toolsets from {enabled_toolsets}", flush=True)
+    # Wall-clock run budget (seconds) — optional request extra, forwarded to
+    # the real AIAgent (agent.run_budget_seconds). 0/absent = unlimited.
+    _raw_budget = (body.model_extra or {}).get("run_budget_seconds")
+    try:
+        run_budget_seconds = max(0, int(_raw_budget)) if _raw_budget else None
+    except (TypeError, ValueError):
+        run_budget_seconds = None
     execution_mode = request.headers.get("x-hermes-execution-mode", "agent-loop").strip().lower() or "agent-loop"
     request_profile = _resolve_profile_name(request)
     repo_owner = request.headers.get("x-hermes-repo-owner", "")
@@ -5448,6 +5551,14 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
     def on_computer_use_frame(frame: dict):
         _qput(("computer_use_frame", frame))
 
+    def on_notice(notice: dict):
+        # Structured AgentNotice (credits warnings, run-budget wrap-up) from
+        # the real hermes agent — surfaced as an SSE agent_notice event.
+        _qput(("agent_notice", notice))
+
+    def on_notice_clear(key: str):
+        _qput(("agent_notice_clear", {"key": key}))
+
     def _run_agent_sync():
         wt_info = None
         worktree_active = False
@@ -5722,6 +5833,11 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             if _using_real_agent:
                 agent_kwargs["on_fallback_switch"] = on_fallback_switch
                 agent_kwargs["on_computer_use_frame"] = on_computer_use_frame
+                # Structured notices (credits/run-budget) — real-agent only.
+                agent_kwargs["on_notice"] = on_notice
+                agent_kwargs["on_notice_clear"] = on_notice_clear
+                if run_budget_seconds:
+                    agent_kwargs["run_budget_seconds"] = run_budget_seconds
             if resolved_provider == MOA_PROVIDER_ID:
                 agent_kwargs["provider_override"] = MOA_PROVIDER_ID
             agent = AIAgent(**agent_kwargs)
@@ -5871,6 +5987,16 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                     frame = event[1]
                     yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
                         "computer_use_frame": frame
+                    }))
+                elif event[0] == "agent_notice":
+                    notice = event[1]
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
+                        "agent_notice": notice
+                    }))
+                elif event[0] == "agent_notice_clear":
+                    clear = event[1]
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
+                        "agent_notice_clear": clear
                     }))
 
             if not done_event.is_set():
@@ -6047,7 +6173,14 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
 
     workspace_id = _resolve_workspace_id(request, body)
     session_id = workspace_id
-    cwd = repo_root_header or os.getcwd()
+    # The bridge process can outlive its original working directory (a build
+    # or cleanup step may delete it). os.getcwd() then raises FileNotFoundError
+    # and every chat request 500s — fall back to the home directory so requests
+    # keep working regardless of what happens to the launch cwd.
+    try:
+        cwd = repo_root_header or os.getcwd()
+    except OSError:
+        cwd = repo_root_header or os.path.expanduser("~")
     # Plan mode: passed to hermes-acp as an env hint + prompt suffix (the real
     # agent owns its tool registration; this is best-effort enforcement).
     plan_mode = bool((body.model_extra or {}).get("plan_mode"))

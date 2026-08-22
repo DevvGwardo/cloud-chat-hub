@@ -335,7 +335,7 @@ function registerCspHeaders() {
           // blob: allows local object-URL previews (pasted image thumbnails)
           " img-src 'self' data: blob: https: http: file: cloudchat-asset:;" +
           " media-src 'self' blob:;" +
-          " connect-src 'self' data: http://localhost:* " + (is.dev ? "ws://localhost:* " : "") + "https://api.github.com https://api.anthropic.com https://api.openai.com https://api.deepseek.com https://generativelanguage.googleapis.com https://api.minimax.chat https://api.moonshot.cn https://api.x.ai https://openrouter.ai https://api.together.xyz https://api.groq.com https://api.mistral.ai https://api.perplexity.ai;" +
+          " connect-src 'self' data: http://localhost:* http://127.0.0.1:* " + (is.dev ? "ws://localhost:* ws://127.0.0.1:* " : "") + "https://api.github.com https://api.anthropic.com https://api.openai.com https://api.deepseek.com https://generativelanguage.googleapis.com https://api.minimax.chat https://api.moonshot.cn https://api.x.ai https://openrouter.ai https://api.together.xyz https://api.groq.com https://api.mistral.ai https://api.perplexity.ai;" +
           " worker-src 'self' blob:;"
         ]
       }

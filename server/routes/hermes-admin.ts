@@ -98,6 +98,51 @@ function invalidateBridgeReadCache(): void {
   bridgeReadCache.clear();
 }
 
+// Startup-race guard for the admin proxy (mirrors the chat proxy's readiness
+// retry in lib/hermes.ts). The Electron main starts the bridge in parallel
+// with the renderer, so the first /health, /v1/providers, /workspace/*
+// polls can fire while uvicorn is still booting -> ECONNREFUSED -> 502 spam.
+// Only kicks in on connection errors; happy path adds zero latency.
+const BRIDGE_READY_POLL_INTERVAL_MS = 300;
+const BRIDGE_READY_POLL_TIMEOUT_MS = 8_000;
+
+function isLikelyBridgeConnectionError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const err = error as { name?: string; code?: string; message?: string; cause?: { code?: string; name?: string } };
+  const CONN_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'UND_ERR_SOCKET']);
+  if (err.code && CONN_CODES.has(err.code)) return true;
+  if (err.cause?.code && CONN_CODES.has(err.cause.code)) return true;
+  if (err.name === 'TypeError' && (err.cause || err.message?.includes('fetch failed'))) return true;
+  return false;
+}
+
+async function fetchWithBridgeReadinessRetry(url: string, init: RequestInit): Promise<globalThis.Response> {
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    if (!isLikelyBridgeConnectionError(error)) throw error;
+    const deadline = Date.now() + BRIDGE_READY_POLL_TIMEOUT_MS;
+    let ready = false;
+    while (Date.now() < deadline) {
+      try {
+        const health = await fetch(`${HERMES_BRIDGE_URL}/health`, {
+          signal: AbortSignal.timeout(1_000),
+        });
+        if (health.ok) {
+          ready = true;
+          break;
+        }
+      } catch {
+        // Bridge not up yet — keep polling.
+      }
+      await new Promise((resolve) => setTimeout(resolve, BRIDGE_READY_POLL_INTERVAL_MS));
+    }
+    if (!ready) throw error;
+    logger.info('[hermes-admin] Hermes bridge became reachable; retrying proxy fetch for %s', url);
+    return await fetch(url, init);
+  }
+}
+
 async function proxyTo(
   req: Request,
   res: Response,
@@ -121,7 +166,7 @@ async function proxyTo(
   }
 
   try {
-    const response = await fetch(`${HERMES_BRIDGE_URL}${path}`, {
+    const response = await fetchWithBridgeReadinessRetry(`${HERMES_BRIDGE_URL}${path}`, {
       ...options,
       headers: {
         'Content-Type': 'application/json',
