@@ -18,10 +18,10 @@ export function GetSpark() {
 
         <div className="dl-group">
           <button className="btn btn-pill" onClick={() => window.open(RELEASES, "_blank")}>
-            <Icon name="download" /> Download for desktop
+            <Icon name="download" /> Download for Windows
           </button>
           <a className="btn btn-ghost" href={RELEASES} target="_blank" rel="noopener">
-            <Icon name="desktop" /> macOS · Windows · Linux
+            <Icon name="desktop" /> Windows 10/11 · x64 · installer
           </a>
         </div>
 

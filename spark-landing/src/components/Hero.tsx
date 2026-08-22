@@ -17,17 +17,15 @@ export function Hero() {
           className="btn btn-pill btn-glimmer"
           onClick={() => window.open(RELEASES, "_blank")}
         >
-          Download for desktop
+          Download for Windows
         </button>
         <a className="btn btn-frost" href={REPO} target="_blank" rel="noopener">
           Explore on GitHub
         </a>
       </div>
       <p className="available">
-        Available on{" "}
-        <a href={RELEASES} target="_blank" rel="noopener">macOS</a>,{" "}
-        <a href={RELEASES} target="_blank" rel="noopener">Windows</a> and{" "}
-        <a href={RELEASES} target="_blank" rel="noopener">Linux</a>
+        Available for{" "}
+        <a href={RELEASES} target="_blank" rel="noopener">Windows 10/11 (x64)</a>
       </p>
     </header>
   );

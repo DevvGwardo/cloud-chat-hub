@@ -10,6 +10,7 @@ import type { ToolCallRecords } from '@/stores/hermes-store';
 import {
   STACK,
   SIDEBAR_TABS,
+  DISTRIBUTION,
   SLICES,
   type SliceRecord,
   GATE_HISTORY,
@@ -163,6 +164,27 @@ function BlueprintSection() {
               <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{layer.role}</p>
             </div>
           ))}
+        </div>
+      </WorkbenchCard>
+
+      <WorkbenchCard title="Distribution">
+        <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs sm:grid-cols-2">
+          <div className="flex justify-between border-b border-border/30 py-1">
+            <span className="text-muted-foreground">Platform</span>
+            <span className="text-right font-mono text-[11px]">{DISTRIBUTION.platform}</span>
+          </div>
+          <div className="flex justify-between border-b border-border/30 py-1">
+            <span className="text-muted-foreground">Installer</span>
+            <span className="text-right font-mono text-[11px]">{DISTRIBUTION.installer}</span>
+          </div>
+          <div className="flex justify-between border-b border-border/30 py-1">
+            <span className="text-muted-foreground">Code signing</span>
+            <span className="text-right font-mono text-[11px]">{DISTRIBUTION.signing}</span>
+          </div>
+          <div className="flex justify-between border-b border-border/30 py-1">
+            <span className="text-muted-foreground">Auto-update</span>
+            <span className="text-right font-mono text-[11px]">{DISTRIBUTION.autoUpdate}</span>
+          </div>
         </div>
       </WorkbenchCard>
 

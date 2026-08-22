@@ -73,7 +73,7 @@ export const STACK: StackLayer[] = [
     id: 'electron',
     name: 'Electron shell',
     tech: 'Electron + electron-vite',
-    role: 'Desktop app: tray, auto-updater, OAuth (OpenRouter), embedded server, bridge lifecycle',
+    role: 'Windows desktop app: tray, auto-updater, OAuth (OpenRouter), embedded server, bridge lifecycle',
     entry: 'npm run dev:electron · electron/',
   },
   {
@@ -106,6 +106,16 @@ export const SIDEBAR_TABS = [
   'Skills', 'Usage', 'Logs', 'Images', 'MCP', 'Board', 'Tasks', 'Rooms',
   'Teams', 'Webhooks', 'Pairing', 'System',
 ] as const;
+
+// ── Distribution ───────────────────────────────────────────────────────────
+
+/** Windows-only: no Apple Developer license, so no signed/notarized macOS builds. */
+export const DISTRIBUTION = {
+  platform: 'Windows 10/11 (x64)',
+  installer: 'NSIS installer (Spark-<version>-win.exe)',
+  signing: 'Authenticode when WIN_CSC_LINK is configured; unsigned otherwise',
+  autoUpdate: 'GitHub releases (private repo, CLOUDCHAT_UPDATE_TOKEN)',
+} as const;
 
 // ── Improvement-loop progress ──────────────────────────────────────────────
 

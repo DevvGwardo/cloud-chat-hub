@@ -2,6 +2,9 @@ name: Release
 
 # Triggers a build whenever a version tag is pushed.
 # Use prerelease tags for beta builds: v1.0.0-beta.1, v1.0.0-beta.2, ...
+#
+# Windows-only distribution: no Apple Developer license is held, so macOS
+# builds (which require signing + notarization to be usable) are not produced.
 on:
   push:
     tags:
@@ -17,28 +20,7 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Both macOS artifacts build on the arm64 macos-latest runner: arm64
-          # natively and x64 via electron-builder cross-compile (--x64). GitHub
-          # retired the Intel macos-13 runner, so a separate x64 host is no
-          # longer available. Each job bundles a standalone Python runtime
-          # matching its target architecture (see py_target).
-          - os: macos-latest
-            build_cmd: npm run electron:publish -- --arm64
-            py_target: aarch64-apple-darwin
-          - os: macos-latest
-            build_cmd: npm run electron:publish -- --x64
-            py_target: x86_64-apple-darwin
-          - os: windows-latest
-            build_cmd: npm run electron:publish:win
-            py_target: x86_64-pc-windows-msvc
-          - os: ubuntu-latest
-            build_cmd: npm run electron:publish:linux
-            py_target: x86_64-unknown-linux-gnu
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -56,35 +38,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Download python-build-standalone for the current runner so the
-      # bundled app ships a self-contained Python interpreter. Pinned to a
-      # known release of indygreg/python-build-standalone.
-      # Bundled Python target triple, selected per matrix entry. Quoted into an
-      # env var so the workflow expression never lands inside a shell command.
-      - name: Download bundled Python (macOS / Linux)
-        if: runner.os == 'macOS' || runner.os == 'Linux'
-        shell: bash
-        env:
-          PY_TARGET: ${{ matrix.py_target }}
-        run: |
-          set -euo pipefail
-          PY_VERSION="3.12.7"
-          BUILD_DATE="20241016"
-          # Universal2 isn't published; ship an arch-specific runtime per job.
-          TARBALL="cpython-${PY_VERSION}+${BUILD_DATE}-${PY_TARGET}-install_only.tar.gz"
-          URL="https://github.com/indygreg/python-build-standalone/releases/download/${BUILD_DATE}/${TARBALL}"
-          mkdir -p resources/python-runtime
-          curl -fsSL "$URL" -o /tmp/python.tar.gz
-          tar -xzf /tmp/python.tar.gz -C /tmp
-          # tarball extracts to /tmp/python with bin/, lib/, etc. — move contents up.
-          cp -R /tmp/python/. resources/python-runtime/
-          ls resources/python-runtime/bin
-
+      # Download python-build-standalone for the runner so the bundled app
+      # ships a self-contained Python interpreter (x86_64 Windows target).
+      # Pinned to a known release of indygreg/python-build-standalone.
       - name: Download bundled Python (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         env:
-          PY_TARGET: ${{ matrix.py_target }}
+          PY_TARGET: x86_64-pc-windows-msvc
         run: |
           $PyVersion = "3.12.7"
           $BuildDate = "20241016"
@@ -97,58 +58,12 @@ jobs:
           Copy-Item -Path "$env:TEMP\python\*" -Destination "resources\python-runtime\" -Recurse -Force
           Get-ChildItem resources\python-runtime
 
-      # Decode the base64-encoded App Store Connect API key (.p8) into a file
-      # that electron-notarize can read. @electron/notarize expects APPLE_API_KEY
-      # to be a *path*, not content, so we write it to disk and expose the path
-      # via $GITHUB_ENV for the Build & publish step.
-      - name: Decode Apple API key (macOS)
-        if: runner.os == 'macOS'
-        shell: bash
-        env:
-          APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/apple-secrets"
-          printf '%s' "$APPLE_API_KEY_B64" | base64 -d > "$HOME/apple-secrets/AuthKey.p8"
-          chmod 600 "$HOME/apple-secrets/AuthKey.p8"
-          echo "APPLE_API_KEY=$HOME/apple-secrets/AuthKey.p8" >> "$GITHUB_ENV"
-
-      # Import the Developer ID Application cert into a dedicated keychain
-      # that exists for the whole job. This lets our afterPack hook find the
-      # signing identity (it runs *before* electron-builder's main signing
-      # pass, which would otherwise be the only step to import CSC_LINK).
-      # Once the keychain has the cert, electron-builder auto-discovers it
-      # without needing CSC_LINK, so we don't pass CSC_LINK downstream.
-      - name: Set up signing keychain (macOS)
-        if: runner.os == 'macOS'
-        shell: bash
-        env:
-          CSC_LINK_B64: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          KEYCHAIN_PATH="$RUNNER_TEMP/cloudchat-signing.keychain-db"
-          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
-          CERT_PATH="$RUNNER_TEMP/cert.p12"
-          printf '%s' "$CSC_LINK_B64" | base64 -d > "$CERT_PATH"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERT_PATH" -P "$CSC_KEY_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          # Prepend our keychain to the user search list so `security find-identity`
-          # (without -k flag) sees it. Quoting keeps multi-word keychain names intact.
-          EXISTING_KEYCHAINS=$(security list-keychains -d user | sed -E 's/^[[:space:]]*"?//; s/"?$//' | tr '\n' ' ')
-          security list-keychains -d user -s "$KEYCHAIN_PATH" $EXISTING_KEYCHAINS
-          security find-identity -v -p codesigning
-          rm "$CERT_PATH"
-
       # Expose Windows Authenticode signing to electron-builder only when a cert
-      # secret is present, and only on Windows. Writing CSC_LINK as an empty
-      # string elsewhere makes electron-builder treat it as a cert *path* and
-      # fail ("not a file"), so we must leave it unset rather than blank.
+      # secret is present. Writing CSC_LINK as an empty string makes
+      # electron-builder treat it as a cert *path* and fail ("not a file"), so
+      # we leave it unset rather than blank when no cert is configured — an
+      # unset cert just builds unsigned.
       - name: Configure Windows code signing
-        if: runner.os == 'Windows'
         shell: bash
         env:
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
@@ -168,7 +83,7 @@ jobs:
 
       - name: Build & publish
         env:
-          # GITHUB_TOKEN: provided automatically by Actions, used by electron-builder
+          # GH_TOKEN: provided automatically by Actions, used by electron-builder
           # at PUBLISH time to upload artifacts to the release.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # CLOUDCHAT_UPDATE_TOKEN: fine-grained PAT (contents: read) baked into
@@ -178,11 +93,4 @@ jobs:
           CLOUDCHAT_UPDATE_TOKEN: ${{ secrets.CLOUDCHAT_UPDATE_TOKEN }}
           # Mark prereleases automatically when tag contains a hyphen (e.g. -beta.1)
           EP_PRE_RELEASE: ${{ contains(github.ref_name, '-') }}
-          # macOS App Store Connect notarization. APPLE_API_KEY (path) is injected
-          # via $GITHUB_ENV by the Decode step. The Developer ID cert is in the
-          # keychain set up by the previous step, so electron-builder auto-finds
-          # the signing identity — no CSC_LINK needed here.
-          APPLE_API_KEY_ID: ${{ runner.os == 'macOS' && secrets.APPLE_API_KEY_ID || '' }}
-          APPLE_API_ISSUER: ${{ runner.os == 'macOS' && secrets.APPLE_API_KEY_ISSUER_ID || '' }}
-          APPLE_TEAM_ID: ${{ runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
-        run: ${{ matrix.build_cmd }}
+        run: npm run electron:publish:win
