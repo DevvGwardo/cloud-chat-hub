@@ -988,3 +988,106 @@ class ToolSearchConfigEdgeTests(unittest.TestCase):
     def test_set_threshold_rejects_garbage(self):
         with self.assertRaises(ValueError):
             hermes_ops.set_tool_search_config({}, {"threshold_pct": "high"})
+
+
+class ResolveCheckpointWorkdirEdgeTests(unittest.TestCase):
+    def test_explicit_workdir_wins_over_projects(self):
+        wd = hermes_ops._resolve_checkpoint_workdir(
+            "/explicit/path",
+            projects=[{"workdir": "/tmp/live", "commits": 3, "state": "live"}],
+            hermes_home=Path("/tmp/hermes"),
+        )
+        self.assertEqual(wd, "/explicit/path")
+
+    def test_prefers_live_project_with_commits_over_live_without(self):
+        projects = [
+            {"workdir": "/tmp/no-commits", "commits": 0, "state": "live"},
+            {"workdir": "/tmp/with-commits", "commits": 4, "state": "live"},
+        ]
+        wd = hermes_ops._resolve_checkpoint_workdir(
+            None, projects=projects, hermes_home=Path("/tmp/hermes")
+        )
+        self.assertEqual(wd, "/tmp/with-commits")
+
+    def test_orphan_projects_never_selected_even_with_commits(self):
+        projects = [{"workdir": "/tmp/orphan", "commits": 9, "state": "orphan"}]
+        wd = hermes_ops._resolve_checkpoint_workdir(
+            None, projects=projects, hermes_home=Path("/tmp/hermes")
+        )
+        # Falls through to cwd (absolute in test env) — never the orphan.
+        self.assertNotEqual(wd, "/tmp/orphan")
+
+    def test_blank_workdir_fields_skipped(self):
+        projects = [
+            {"workdir": "   ", "commits": 5, "state": "live"},
+            {"commits": 5, "state": "live"},
+        ]
+        wd = hermes_ops._resolve_checkpoint_workdir(
+            None, projects=projects, hermes_home=Path("/tmp/hermes")
+        )
+        self.assertNotIn(wd, (None, "", "   "))
+
+
+class AssertSafeWorkdirEdgeTests(unittest.TestCase):
+    def test_relative_path_rejected(self):
+        with self.assertRaises(ValueError):
+            hermes_ops.assert_safe_workdir("relative/path")
+
+    def test_control_characters_rejected(self):
+        for bad in ("/tmp/a\nb", "/tmp/a\rb", "/tmp/a\x00b"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    hermes_ops.assert_safe_workdir(bad)
+
+    def test_absolute_path_accepted(self):
+        self.assertEqual(
+            hermes_ops.assert_safe_workdir("  /Users/x/project  "), "/Users/x/project"
+        )
+
+
+class AssertSafeCheckpointIndexTests(unittest.TestCase):
+    def test_valid_indices_pass(self):
+        self.assertEqual(hermes_ops.assert_safe_checkpoint_index(1), 1)
+        self.assertEqual(hermes_ops.assert_safe_checkpoint_index("7"), 7)
+
+    def test_zero_and_negative_rejected(self):
+        for bad in (0, -1):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    hermes_ops.assert_safe_checkpoint_index(bad)
+
+    def test_garbage_rejected(self):
+        for bad in ("abc", None, []):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    hermes_ops.assert_safe_checkpoint_index(bad)
+
+    def test_float_truncates_toward_one(self):
+        # int(1.5) == 1 — accepted and truncated, not rejected.
+        self.assertEqual(hermes_ops.assert_safe_checkpoint_index(1.5), 1)
+
+
+class FormatCheckpointEntriesMalformedTests(unittest.TestCase):
+    def test_non_dict_rows_skipped_and_index_preserved(self):
+        entries = hermes_ops._format_checkpoint_entries([
+            "not-a-dict",
+            {"hash": "aaa"},
+            42,
+            {"reason": "no hash"},
+            {"hash": "bbb"},
+        ])
+        # Indices reflect ORIGINAL position (enumerate), not filtered position.
+        self.assertEqual([e["index"] for e in entries], [2, 5])
+        self.assertEqual([e["path"] for e in entries], ["aaa", "bbb"])
+
+    def test_missing_reason_defaults_to_checkpoint(self):
+        entries = hermes_ops._format_checkpoint_entries([{"hash": "h1"}])
+        self.assertEqual(entries[0]["label"], "checkpoint")
+
+    def test_files_changed_missing_or_garbage_coerced_to_zero(self):
+        entries = hermes_ops._format_checkpoint_entries([
+            {"hash": "a"},
+            {"hash": "b", "files_changed": "lots"},
+        ])
+        self.assertEqual(entries[0]["files_changed"], 0)
+        self.assertEqual(entries[1]["files_changed"], 0)
