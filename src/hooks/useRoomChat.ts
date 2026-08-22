@@ -35,7 +35,9 @@ export function useRoomChat(roomId: string | null) {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const members = useMemo(() => activeRoom?.members ?? [], [activeRoom]);
-  const messages = roomMessages.map(toChatMessage);
+  // Stable identity so downstream consumers (ChatArea memo/effects keyed on
+  // `messages`) don't re-run on every render — only when room messages change.
+  const messages = useMemo(() => roomMessages.map(toChatMessage), [roomMessages]);
   const isStreaming = pendingAgents.length > 0;
 
   // ── @mention autocomplete state ──
