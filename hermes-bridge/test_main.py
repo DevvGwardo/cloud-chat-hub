@@ -2021,5 +2021,91 @@ class WorkspaceUsageCostTests(unittest.TestCase):
         self.assertAlmostEqual(payload["cost_usd"], 7.77, places=4)
 
 
+class StaleProviderPinTests(unittest.TestCase):
+    """Stale x-hermes-provider pins must be dropped, not forwarded to routing.
+
+    Regression: a UI pin like `custom:inference-api.nousresearch.com` saved
+    before config.yaml became `provider: nous` was forwarded verbatim to
+    hermes-acp's set_session_model. parse_model_input there doesn't know the
+    synthetic id, so it resolved (provider="custom",
+    model="<host>:<model>") and the real agent hit OpenRouter with an empty
+    key → "HTTP 400: <host>:<model> is not a valid model ID".
+    """
+
+    def _cfg(self, provider="nous", base_url="https://inference-api.nousresearch.com/v1"):
+        return {"default": "stealth/ox-alpha", "provider": provider,
+                "base_url": base_url, "api_key": None}
+
+    def test_helper_includes_builtin_and_moa_ids(self):
+        with patch.object(main, "_load_cli_model_config", return_value=self._cfg()):
+            ids = main._provider_ids_for_chat_routing()
+        self.assertIn("nous", ids)
+        self.assertIn("openrouter", ids)
+        self.assertIn(main.MOA_PROVIDER_ID, ids)
+
+    def test_helper_includes_synthetic_custom_id_when_config_is_custom(self):
+        with patch.object(main, "_load_cli_model_config", return_value=self._cfg(
+                provider="custom", base_url="https://api.bullinf.fun/v1")):
+            ids = main._provider_ids_for_chat_routing()
+        self.assertIn("custom:api.bullinf.fun", ids)
+
+    def test_helper_omits_synthetic_id_when_config_is_native_provider(self):
+        with patch.object(main, "_load_cli_model_config", return_value=self._cfg()):
+            ids = main._provider_ids_for_chat_routing()
+        self.assertNotIn("custom:inference-api.nousresearch.com", ids)
+
+    def _dropped_pin(self, header_value, cfg):
+        """Run the exact normalization _acp_chat_completions_impl applies."""
+        with patch.object(main, "_load_cli_model_config", return_value=cfg), \
+             patch.object(main, "_resolve_hermes_home", return_value=main.Path("/tmp")):
+            provider = (header_value or "").strip().lower()
+            if provider in ("", "auto", "default"):
+                return None
+            if provider not in main._provider_ids_for_chat_routing(
+                    main._resolve_hermes_home(None)):
+                return None
+            return provider
+
+    def test_stale_host_pin_is_dropped(self):
+        provider = self._dropped_pin(
+            "Custom:Inference-API.NousResearch.COM", self._cfg())
+        self.assertIsNone(provider)
+
+    def test_known_builtin_pin_survives(self):
+        provider = self._dropped_pin("nous", self._cfg())
+        self.assertEqual(provider, "nous")
+
+    def test_current_synthetic_custom_pin_survives(self):
+        provider = self._dropped_pin(
+            "custom:api.bullinf.fun",
+            self._cfg(provider="custom", base_url="https://api.bullinf.fun/v1"),
+        )
+        self.assertEqual(provider, "custom:api.bullinf.fun")
+
+    def test_nous_inference_host_is_known_not_custom(self):
+        """Regression: _KNOWN_HOSTS used str.replace("api.", ""), which mangled
+        inference-api.nousresearch.com → inference-nousresearch.com, so the
+        native nous base_url was misclassified as a custom endpoint."""
+        cfg = self._cfg()
+        with patch.object(main, "_load_cli_model_config", return_value=cfg):
+            ids = main._provider_ids_for_chat_routing()
+        self.assertFalse(main._cli_config_is_custom(cfg))
+        self.assertNotIn("custom:inference-api.nousresearch.com", ids)
+        self.assertIn("inference-api.nousresearch.com", main._KNOWN_HOSTS)
+
+    def test_leading_api_label_is_still_collapsed(self):
+        # api.deepseek.com must still collapse to deepseek.com (existing behavior).
+        self.assertIn("deepseek.com", main._KNOWN_HOSTS)
+        self.assertNotIn("api.deepseek.com", main._KNOWN_HOSTS)
+        # A custom endpoint on a DIFFERENT host is still custom.
+        cfg = {"default": "m", "provider": "custom",
+               "base_url": "https://api.bullinf.fun/v1", "api_key": None}
+        self.assertTrue(main._cli_config_is_custom(cfg))
+
+    def test_auto_and_empty_pins_normalize_to_none(self):
+        self.assertIsNone(self._dropped_pin("auto", self._cfg()))
+        self.assertIsNone(self._dropped_pin("", self._cfg()))
+
+
 if __name__ == "__main__":
     unittest.main()

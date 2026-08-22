@@ -2583,6 +2583,22 @@ for _pid, _cfg in _PROVIDER_CONFIG.items():
         _MODEL_PREFIX_TO_PROVIDER[_pfx] = _pid
 
 # Known hosts for custom base_url detection
+def _known_host_label(hostname: str) -> str:
+    """Collapse a provider's public host to its matchable form.
+
+    Strips only a LEADING ``api.`` / ``www.`` label. ``str.replace`` also
+    mangled hosts where those labels appear mid-name — e.g. Nous's
+    ``inference-api.nousresearch.com`` became ``inference-nousresearch.com``,
+    an entry that never substring-matches the real base_url, so the native
+    nous config was misclassified as a custom endpoint (bogus synthetic
+    ``custom:<host>`` provider row + stale UI pins routing to OpenRouter).
+    """
+    for prefix in ("api.", "www."):
+        if hostname.startswith(prefix):
+            return hostname[len(prefix):]
+    return hostname
+
+
 _KNOWN_HOSTS: tuple[str, ...] = tuple(
     # Filter empty strings: a provider entry with base_url "" (e.g. vertex,
     # resolved at request time) would otherwise yield "" as a host and
@@ -2590,7 +2606,7 @@ _KNOWN_HOSTS: tuple[str, ...] = tuple(
     # and killing the cli_is_custom passthrough path.
     h
     for h in {
-        u.split("://")[-1].split("/")[0].replace("api.", "").replace("www.", "")
+        _known_host_label(u.split("://")[-1].split("/")[0])
         for u in [_c["base_url"] for _c in _PROVIDER_CONFIG.values()]
     }
     if h
@@ -3281,6 +3297,24 @@ def _default_model_credentialed(hermes_home: Optional[Path] = None) -> bool:
     if provider and _get_credential_pool_key(provider):
         return True
     return bool(_get_local_gateway_key())
+
+
+def _provider_ids_for_chat_routing(profile_home: Optional[Path] = None) -> set[str]:
+    """Provider ids a chat request may legitimately pin via x-hermes-provider.
+
+    Mirrors what /v1/providers exposes: the built-in _PROVIDER_CONFIG ids, the
+    synthetic CLI custom endpoint id (custom:<host> / custom:<name>), and the
+    MoA virtual provider. A pin outside this set is stale UI state (the CLI
+    config moved on) and must be dropped rather than forwarded to routing —
+    forwarding it makes the real agent resolve an unknown custom endpoint and
+    400 at OpenRouter with "<host>:<model> is not a valid model ID".
+    """
+    ids = set(_PROVIDER_CONFIG.keys())
+    ids.add(MOA_PROVIDER_ID)
+    cfg = _load_cli_model_config(profile_home)
+    if _cli_config_is_custom(cfg):
+        ids.add(_synthetic_cli_provider_id(cfg))
+    return ids
 
 
 @app.get("/health")
@@ -6169,6 +6203,23 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
     repo_root_header = request.headers.get("x-hermes-repo-root", "").strip()
     provider = request.headers.get("x-hermes-provider", "").strip().lower()
     if provider in ("", "auto", "default"):
+        provider = None
+    # A stale UI pin (e.g. `custom:inference-api.nousresearch.com` saved when
+    # the CLI config was last a custom endpoint) must not reach hermes-acp's
+    # set_session_model: parse_model_input there doesn't know the synthetic id,
+    # so it resolves (provider="custom", model="inference-api...:stealth/ox-alpha")
+    # and the real agent routes to OpenRouter with an empty key →
+    # "HTTP 400: <host>:<model> is not a valid model ID". When the pinned id is
+    # no longer exposed by /v1/providers, drop the pin and let routing follow
+    # config.yaml — same policy the agent-loop path applies via cli_is_custom.
+    if provider and provider not in _provider_ids_for_chat_routing(
+        _resolve_hermes_home(request_profile)
+    ):
+        print(
+            f"[hermes-bridge] Dropping stale provider pin {provider!r} "
+            "(not in current provider list) — falling back to CLI routing",
+            flush=True,
+        )
         provider = None
 
     workspace_id = _resolve_workspace_id(request, body)

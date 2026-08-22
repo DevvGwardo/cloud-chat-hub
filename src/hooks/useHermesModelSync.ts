@@ -18,7 +18,7 @@ export function useHermesModelSync(): void {
   const followAgentModel = useHermesStore((s) => s.followAgentModel);
   const underlyingProvider = useHermesStore((s) => s.underlyingProvider);
   const setUnderlyingProvider = useHermesStore((s) => s.setUnderlyingProvider);
-  const { defaultModel, reload } = useHermesProviders(activeProvider === 'hermes');
+  const { defaultModel, providers, reload } = useHermesProviders(activeProvider === 'hermes');
 
   // Agent default must not keep a stale openrouter (or other) pin that would
   // override the CLI custom base_url with an empty Authorization header.
@@ -26,6 +26,17 @@ export function useHermesModelSync(): void {
     if (!followAgentModel || !underlyingProvider) return;
     setUnderlyingProvider('');
   }, [followAgentModel, underlyingProvider, setUnderlyingProvider]);
+
+  // A persisted pin that /v1/providers no longer exposes is stale (the CLI
+  // config moved on — e.g. custom:inference-api.nousresearch.com left over
+  // from before config.yaml became provider: nous). Forwarding it makes the
+  // real agent resolve an unknown endpoint and fail with
+  // "<host>:<model> is not a valid model ID". Clear it once providers load.
+  useEffect(() => {
+    if (!providers.length || !underlyingProvider || followAgentModel) return;
+    if (providers.some((p) => p.id === underlyingProvider)) return;
+    setUnderlyingProvider('');
+  }, [providers, underlyingProvider, followAgentModel, setUnderlyingProvider]);
 
   // Adopt the agent's CLI model while following it.
   useEffect(() => {
