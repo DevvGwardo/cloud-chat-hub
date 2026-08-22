@@ -42,6 +42,7 @@
 - 2026-08-22 — Slice 17 landed: request-validation tests (8) — ChatCompletionRequest defaults/extra-fields-tolerated/messages default, _no_api_key_error provider-specific vs generic messages + OpenAI error-dict shape, REPO_NOT_FOUND / GITHUB_TOKEN_EXPIRED envelopes. Tests must tolerate test_main.py's pydantic/fastapi STUBS (stub BaseModel doesn't validate types; stub JSONResponse exposes .content not .body) — assertions restricted to behavior shared by both environments, message-content access stub-adaptive. Tests 453→461; lint held at zero.
 - 2026-08-22 — Slice 18 landed: hermes_ops guards + fallback-chain edges (11 tests) — set_fallback_providers moa case-insensitive block, base_url validated on set (file:// rejected, trailing slash stripped), get_fallback_providers skips non-dict/incomplete entries + legacy dedupe, assert_safe_http_base_url scheme/host checks, CLI token empty/dash/bad-chars rejection, goal multiline/null-byte/leading-dash rejection with natural-language passthrough. Tests 461→472 (hermes_ops 60→71); lint held at zero.
 - 2026-08-22 — Slice 19 landed: goals/tool-search config edges (13 tests) — missing-section defaults, non-dict sections ignored, max_turns clamped to ≥1, set creates missing sections, no-op body changes nothing; tool_search boolean shorthand (True→auto/False→off), threshold clamped 0–100, limits clamped with search_default ≤ max, garbage numeric strings fall back to defaults, garbage "enabled" rejected on set. Tests 472→485 (hermes_ops 71→84); lint held at zero.
+- 2026-08-22 — Slice 20 landed: checkpoint edges (14 tests) — workdir resolution (explicit wins, prefers live-with-commits over live-without, orphans never selected, blank fields skipped), assert_safe_workdir (relative/control-chars rejected), assert_safe_checkpoint_index (0/neg/garbage rejected, float truncates), _format_checkpoint_entries malformed rows (non-dict skipped with ORIGINAL index preserved, missing reason defaults). REAL DEFECT: garbage files_changed ("lots") raised ValueError inside int() and killed the whole checkpoint listing — wrapped in try/except → 0. Tests 485→499 (hermes_ops 84→98); lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -283,6 +284,20 @@ stub-adaptive or move to a subprocess-isolated file.
 One test written then corrected against actual behavior: bare-string tool_search values
 ("true"/"off") are NOT parsed — only dict form reads enabled aliases; the string branch
 falls back to defaults. Test pins that fallback rather than the imagined alias parsing.
+
+### Slice 20 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **499 passed, 5 skipped** (hermes_ops 84→98) |
+| diff | hermes_ops.py +6/−1 (files_changed guard) + test_hermes_ops.py +103 |
+| commit | c4d5a55 pushed to feat/codex-function-calling |
+
+Sixth real defect: one malformed files_changed value crashed the entire checkpoint
+listing (int() uncaught). Now coerced to 0. Also pinned: float checkpoint indices
+truncate (1.5→1) rather than reject, and entry indices reflect original positions.
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->
