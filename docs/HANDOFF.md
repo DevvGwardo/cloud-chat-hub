@@ -33,6 +33,7 @@
 - 2026-08-22 — Slice 8 landed: approval-engine edge cases — "once" rule consumption, expired-rule pruning, missing-command prefix non-match, APPROVAL_TIMEOUT_MS timeout via fake timers, emit-throw → abort, double-resolve idempotency, cross-conversation rule scoping. Tests 822→829 (28 in approval-engine); lint held at zero.
 - 2026-08-22 — Slice 9 landed: `messages` in useRoomChat.ts wrapped in useMemo over `[roomMessages]` — the per-render `.map(toChatMessage)` allocation was a dependency of ChatArea's `panelToolActivity` memo (line ~647) and usage-tracking effect (~732), re-running both every render. HermesModelPicker/MessageBubble candidates inspected: feed nothing memoized — skipped per spec.
 - 2026-08-22 — Slice 10 landed: cwd-OSError guard regression tests (3: broken getcwd → home fallback, repo-root header wins, healthy getcwd sanity). Found + fixed a real pre-existing test-infra defect on HEAD: test_main.py's httpx stub lacked TimeoutException/HTTPStatusError exception classes, so hermes_adapter's except clauses raised when the stub won the import race (test_dispatch_handles_connection_failure failed in combined runs). pytest hermes-bridge: 365 passed, 5 skipped; npm gates green.
+- 2026-08-22 — Slice 11 landed: worktree edge cases — maybe_setup_worktree success/failure/no-root/missing-path, _untrack promotion + unknown-info noop, manual-cleanup empty-path/already-deleted/rmtree-failure, CLI-cleanup-leaves-path → manual fallback, cleanup_session count. Tests 365→379 (worktree 12→26); lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -158,6 +159,21 @@ plain function; HermesModelPicker has zero hooks/memos — both skipped as specu
 
 Note: pytest with system python3 fails collection (PEP 604 unions) — use the bridge venv:
 `.venv/bin/python -m pytest -q`. test_run_agent.py + test_main.py only collect under venv.
+
+### Slice 11 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **379 passed, 5 skipped** (worktree_support 12→26) |
+| diff | only hermes-bridge/test_worktree_support.py, +155 |
+| commit | c10408c pushed to feat/codex-function-calling |
+
+Pre-flight: existing tests covered flag parsing, toolset routing, path ownership, basic
+cleanup. Uncovered: maybe_setup_worktree lifecycle (success chdir+track, failure fallbacks,
+blank-root CLI discovery), _untrack promotion semantics, manual-cleanup error paths,
+CLI-cleanup-leaves-path → manual fallback chain, cleanup_session counting. All now covered.
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->

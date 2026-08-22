@@ -1,25 +1,21 @@
-# SLICE 11 — Test coverage: hermes-bridge worktree header handling
+# SLICE 12 — Test coverage: hermes_runs submit/parity edge cases
 
 ## Problem
-The bridge supports repo-mode worktrees (`worktree_cwd`, `x-hermes-worktree-*` headers,
-commit ef565f4-era code at main.py ~5730). test_worktree_support.py exists — pre-flight
-must establish what it covers and find genuinely untested branches (e.g. setup-failure
-fallback to original cwd, missing worktree info, malformed wt_info payloads).
+`hermes_runs.py` (Gateway /v1/runs client) is exercised via test_hermes_runs.py and
+test_runs_parity_name.py, but main.py's runs-routing fallback chain (route_runs demotion:
+moa rejection, parity mismatch, provider pinning) has branches around main.py:5700-5770
+that pre-flight should check for coverage.
 
 ## Change (finalize after pre-flight)
-pytest-only additions. If a branch doesn't exist, don't invent it.
-
-## Out of scope
-- Bridge transport/agent refactors
-- Server or Electron code
+pytest-only additions to existing files. Don't invent branches that don't exist.
 
 ## Builder pre-flight
-1. Read main.py worktree section (~5720-5760) + test_worktree_support.py; list covered cases.
-2. Identify untested branches with line refs.
+1. Map the route_runs decision chain in main.py (lines ~5690-5790).
+2. Check which demotion paths have tests today.
 
 ## Acceptance gates (frozen before results)
 1. `npm run typecheck` → 0; lint → 0/0; npm test → ≥ 829.
-2. `.venv/bin/python -m pytest -q` in hermes-bridge/ → all pass (baseline 365+).
+2. `.venv/bin/python -m pytest -q` → all pass (baseline 379+).
 3. Diff touches ONLY hermes-bridge tests (+ minimal source if a real defect surfaces).
 4. One conventional commit (`test:`/`fix:`) pushed.
 
