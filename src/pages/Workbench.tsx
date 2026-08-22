@@ -16,6 +16,7 @@ import {
   DEFECTS_FIXED,
   QA_SURFACES,
   QA_DEFERRED,
+  QA_FIXED_SINCE_AUDIT,
   OVERNIGHT_BACKLOG,
   DOCS_INDEX,
   LIVE_COUNTS,
@@ -343,6 +344,16 @@ function ProgressSection() {
               </div>
             );
           })}
+        </div>
+        <div className="mt-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-400/80">
+            Fixed since the audit
+          </p>
+          <ul className="mt-1.5 list-inside list-disc space-y-1 text-xs text-muted-foreground">
+            {QA_FIXED_SINCE_AUDIT.map((item, i) => (
+              <li key={i} className="leading-relaxed">{item}</li>
+            ))}
+          </ul>
         </div>
         <div className="mt-3">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">

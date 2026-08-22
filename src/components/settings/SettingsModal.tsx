@@ -746,6 +746,7 @@ export const SettingsModal: React.FC = () => {
   const [mounted, setMounted] = useState(false);
   const [visible, setVisible] = useState(false);
   const closingRef = useRef(false);
+  const modalRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (settingsOpen) {
@@ -768,6 +769,47 @@ export const SettingsModal: React.FC = () => {
       closingRef.current = false;
     }
   }, []);
+
+  // Dialog semantics: Escape closes, focus moves into the modal on open and
+  // returns to the trigger on close. (The hand-rolled overlay predates the
+  // shared Dialog primitive; migrating wholesale is a larger task — this adds
+  // the missing keyboard/AT contract.)
+  useEffect(() => {
+    if (!settingsOpen || !mounted) return;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        setSettingsOpen(false);
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      // Minimal focus trap: cycle Tab within the modal.
+      const modal = modalRef.current;
+      if (!modal) return;
+      const focusable = modal.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown, true);
+    // Focus the modal container so Tab starts inside it.
+    requestAnimationFrame(() => modalRef.current?.focus());
+    return () => {
+      document.removeEventListener('keydown', onKeyDown, true);
+      previouslyFocused?.focus?.();
+    };
+  }, [settingsOpen, mounted, setSettingsOpen]);
 
   // Fetch the GitHub username whenever the PAT changes (debounced, validated)
   useEffect(() => {
@@ -1138,9 +1180,14 @@ export const SettingsModal: React.FC = () => {
         onClick={() => setSettingsOpen(false)}
       />
       <div
+        ref={modalRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Settings"
+        tabIndex={-1}
         onTransitionEnd={handleTransitionEnd}
         className={cn(
-          'relative flex w-[880px] h-[600px] flex-col overflow-hidden rounded-2xl border border-[#2a2a2a] bg-card transition-[transform,opacity] duration-250 ease-out',
+          'relative flex w-[880px] h-[600px] flex-col overflow-hidden rounded-2xl border border-[#2a2a2a] bg-card transition-[transform,opacity] duration-250 ease-out focus:outline-none',
           visible ? 'scale-100 opacity-100' : 'scale-95 opacity-0',
         )}
       >

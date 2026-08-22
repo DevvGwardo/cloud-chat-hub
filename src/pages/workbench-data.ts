@@ -206,14 +206,26 @@ export const QA_SURFACES: QaSurface[] = [
   { surface: 'UI primitives', status: 'done', findings: { blocker: 0, high: 0, med: 0, low: 0 } },
 ];
 
-/** MED+ items deferred to human review (from qa-audit.md). */
+/** MED items deferred to human review (from qa-audit.md). */
 export const QA_DEFERRED = [
-  'prompt()-based "Rename thread" broken in Electron',
-  'Settings → Knowledge tab shows fabricated mock data with dead buttons',
-  'Settings modal lacks dialog semantics/focus-trap/Escape',
-  'Sidebar thread search is unimplemented (dead Search icon)',
-  'Toast notifications not announced to screen readers',
-  'Composer Attach button + user-message Edit flow unwired (partially addressed since)',
+  // Fixed since the audit:
+  // - Sidebar thread search → ConversationSearchBar wired into ChatSidebar
+  // - Composer Attach button → file input + paste upload wired
+  // - User-message Edit → onEdit={handleEditAction} wired in ChatArea
+  'Settings → Knowledge tab shows fabricated mock data with dead buttons (needs product decision: real backend or cut the tab)',
+] as const;
+
+/**
+ * QA findings fixed after the audit — kept visible so the workbench reflects
+ * current state, not just the historical ledger.
+ */
+export const QA_FIXED_SINCE_AUDIT = [
+  'Sidebar thread search — ConversationSearchBar wired into ChatSidebar',
+  'Composer Attach button — file input + paste-to-upload wired',
+  'User-message Edit — onEdit={handleEditAction} wired in ChatArea',
+  '"Rename thread" window.prompt() (Electron no-op) — inline rename in header menus',
+  'Settings modal dialog semantics — role/aria-modal, Escape, focus trap, focus restore',
+  'Toast announcements — always-mounted aria-live region with alert role for errors',
 ] as const;
 
 /** Overnight backlog: 6 shipped, queue empty. */

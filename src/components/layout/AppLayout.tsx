@@ -158,6 +158,10 @@ export const AppLayout: React.FC = () => {
   const [prModalOpen, setPrModalOpen] = useState(false);
   const [prModalMode, setPrModalMode] = useState<'create' | 'review'>('create');
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  // Inline rename inside the header menu — window.prompt() is disabled in
+  // Electron and silently no-ops there.
+  const [renamingThread, setRenamingThread] = useState(false);
+  const renameInputRef = useRef<HTMLInputElement>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [remoteAccessOpen, setRemoteAccessOpen] = useState(false);
   const headerMenuRef = useRef<HTMLDivElement>(null);
@@ -663,15 +667,37 @@ const headerSecondaryLabel = selectedCronJobId
 
                               <button
                                 onClick={() => {
-                                  const newTitle = prompt('Rename thread:', activeConv.title);
-                                  if (newTitle?.trim()) renameConversation(activeConv.id, newTitle.trim());
-                                  setHeaderMenuOpen(false);
+                                  setRenamingThread(true);
+                                  // Focus after the input mounts.
+                                  requestAnimationFrame(() => renameInputRef.current?.focus());
                                 }}
                                 className="w-full flex items-center gap-3 px-3 py-2 hover:bg-muted transition-colors duration-100"
                               >
                                 <Pencil className="h-4 w-4 text-muted-foreground" />
                                 <span className="flex-1 text-left">Rename thread</span>
                               </button>
+
+                              {renamingThread && (
+                                <div className="px-3 pb-2">
+                                  <input
+                                    ref={renameInputRef}
+                                    defaultValue={activeConv.title}
+                                    aria-label="Thread name"
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        const next = e.currentTarget.value.trim();
+                                        if (next) void renameConversation(activeConv.id, next);
+                                        setRenamingThread(false);
+                                        setHeaderMenuOpen(false);
+                                      } else if (e.key === 'Escape') {
+                                        setRenamingThread(false);
+                                      }
+                                    }}
+                                    onBlur={() => setRenamingThread(false)}
+                                    className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-[12px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                                  />
+                                </div>
+                              )}
 
                               <button
                                 onClick={() => {

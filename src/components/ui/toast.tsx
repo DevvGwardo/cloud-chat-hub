@@ -76,14 +76,29 @@ function ToastContainer() {
     return subscribe(setItems);
   }, []);
 
-  if (items.length === 0) return null;
+  // The live region must be mounted BEFORE toasts appear for reliable
+  // announcement — an unmounting container swallows the message. It stays
+  // always-mounted and mirrors the newest toast's text.
+  const latest = items[items.length - 1];
+  const liveRegion = (
+    <div aria-live="polite" role={latest?.type === 'error' || latest?.type === 'warning' ? 'alert' : 'status'} className="sr-only">
+      {latest ? `${latest.type}: ${latest.message}` : ''}
+    </div>
+  );
+
+  if (items.length === 0) {
+    return createPortal(liveRegion, document.body);
+  }
 
   return createPortal(
-    <div className="fixed top-4 right-4 z-[9999] flex flex-col gap-2">
-      {items.slice(0, 5).map((item) => (
-        <ToastItemComponent key={item.id} item={item} />
-      ))}
-    </div>,
+    <>
+      {liveRegion}
+      <div className="fixed top-4 right-4 z-[9999] flex flex-col gap-2">
+        {items.slice(0, 5).map((item) => (
+          <ToastItemComponent key={item.id} item={item} />
+        ))}
+      </div>
+    </>,
     document.body
   );
 }

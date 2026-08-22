@@ -226,6 +226,10 @@ export const ChatPanel: React.FC<ChatPanelProps> = React.memo(({
   const setPreviewOpen = usePreviewStore((s) => s.setOpen);
   const setPreviewView = usePreviewStore((s) => s.setView);
   const [menuOpen, setMenuOpen] = useState(false);
+  // Inline rename inside the header menu — window.prompt() is disabled in
+  // Electron and silently no-ops there.
+  const [renamingThread, setRenamingThread] = useState(false);
+  const renameInputRef = useRef<HTMLInputElement>(null);
   const [backgroundConversationIds, setBackgroundConversationIds] = useState<string[]>([]);
   const menuRef = useRef<HTMLDivElement>(null);
   const previousConversationIdRef = useRef<string | null>(conversationId);
@@ -396,15 +400,35 @@ export const ChatPanel: React.FC<ChatPanelProps> = React.memo(({
                       </button>
                       <button
                         onClick={() => {
-                          const newTitle = prompt('Rename thread:', activeConv.title);
-                          if (newTitle?.trim()) renameConversation(activeConv.id, newTitle.trim());
-                          setMenuOpen(false);
+                          setRenamingThread(true);
+                          requestAnimationFrame(() => renameInputRef.current?.focus());
                         }}
                         className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-muted transition-colors duration-100"
                       >
                         <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
                         <span className="flex-1 text-left">Rename thread</span>
                       </button>
+                      {renamingThread && (
+                        <div className="px-3 pb-1.5">
+                          <input
+                            ref={renameInputRef}
+                            defaultValue={activeConv.title}
+                            aria-label="Thread name"
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                const next = e.currentTarget.value.trim();
+                                if (next) void renameConversation(activeConv.id, next);
+                                setRenamingThread(false);
+                                setMenuOpen(false);
+                              } else if (e.key === 'Escape') {
+                                setRenamingThread(false);
+                              }
+                            }}
+                            onBlur={() => setRenamingThread(false)}
+                            className="w-full rounded-md border border-border bg-background px-2 py-1 text-[12px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                          />
+                        </div>
+                      )}
                       <button
                         onClick={() => {
                           deleteConversation(activeConv.id);
