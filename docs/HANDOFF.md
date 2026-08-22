@@ -24,6 +24,7 @@
 <!-- architect rulings: date — decision — one-line why -->
 - 2026-08-22 — Loop initialized; baseline gate run recorded below — establishes green starting point before first slice.
 - 2026-08-22 — Slice 1 landed: `members` array wrapped in `useMemo` in SwarmRoomPanel.tsx + useRoomChat.ts — kills 4 per-render memo invalidations in chat mention paths; lint backlog 42→38.
+- 2026-08-22 — Slice 2 landed: destructured stable `reload` from `useHermesMcpToolIndex` in the 3 MCP panels — clears 3 exhaustive-deps warnings without destabilizing the callbacks; lint backlog 38→35.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -43,6 +44,15 @@
 | unit tests | 134 files, 820 tests passed |
 | diff | only SwarmRoomPanel.tsx + useRoomChat.ts, 2 insertions / 2 deletions |
 | commit | 19f6d10 pushed to feat/codex-function-calling |
+
+### Slice 2 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 35 warnings (was 38; 3 `toolIndex` exhaustive-deps warnings gone; grep for "missing dependency: 'toolIndex'" = 0) |
+| unit tests | 134 files, 820 tests passed |
+| diff | only McpStoreView.tsx, HermesMcpSettingsPanel.tsx, HermesMCPPanel.tsx — 3 files, +9/−9 |
+| commit | 0b7eb47 pushed to feat/codex-function-calling |
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->

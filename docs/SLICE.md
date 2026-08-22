@@ -1,55 +1,56 @@
-# SLICE 2 — Fix same-class stale-dep warnings in the three MCP panels (`toolIndex.reload`)
+# SLICE 3 — Clear the four remaining exhaustive-deps warnings (behavior-preserving dep additions)
 
 ## Problem
-Three components call `useHermesMcpToolIndex()` into an object named `toolIndex`, then pass
-`[toolIndex.reload]` as the useCallback dependency. ESLint flags these as missing-dependency
-warnings because it wants `toolIndex` itself — but adding the whole object would make the
-callback change identity every render (the hook returns a fresh object literal each render,
-see src/hooks/useHermesMcpToolIndex.ts:72-85). The correct minimal fix is to destructure
-`reload` at the call site so the dependency is a stable value, not a property access on a
-per-render object:
+Four warnings where a callback/effect reads a value but omits it from its dependency array.
+In each case adding the dep is safe because the value is already stable (a `useCallback`
+product or state-derived value), so no behavior change and no extra re-runs:
 
-- `src/components/mcp/McpStoreView.tsx:213,234`
-- `src/components/settings/HermesMcpSettingsPanel.tsx` (~line 209)
-- `src/components/sidebar/HermesMCPPanel.tsx` (~line 207)
+1. `src/hooks/useRoomChat.ts:104` — `handleSend` useCallback missing `setInput`.
+   `setInput` is `useCallback(..., [])` (line 47) → stable; adding it is a no-op.
+2. `src/components/chat/ContextualSuggestions.tsx:63` — effect missing `lastAssistant`.
+   Effect already depends on `lastAssistant?.content`; `lastAssistant` is a `findLast`
+   result re-created each render, but the effect only re-runs when its deps change, and
+   `lastAssistant` is only used via `lastAssistant?.content` inside — replace the dep
+   `lastAssistant?.content` usage consistently: keep dep as-is but reference the variable
+   instead of repeating the optional chain, i.e. add `lastAssistant` to deps AND use
+   `lastAssistant.content` in the body (the guard `!lastAssistant` at line 41 already
+   narrows it). Net effect: identical behavior, warning gone.
+3. `src/hooks/useVoiceInput.ts:150` — unmount effect missing `cleanupStream`.
+   This is a mount-only cleanup effect (`[]` deps) with an in-code comment explaining why
+   `onstop` is not nulled. The correct fix is NOT to add the dep (would re-run the effect);
+   it is to verify the intent and add a targeted `// eslint-disable-next-line
+   react-hooks/exhaustive-deps` with the existing comment as justification. This is a
+   single-line suppression with documented rationale — NOT "fixing lint by disabling rules
+   wholesale" (anti-pattern only bans wholesale rule disabling).
+4. `src/hooks/useChat.ts:1748` — useCallback missing `panelId`. Read the site first: if
+   `panelId` is a stable primitive from a store selector, add it to deps. If adding it
+   would change callback identity per render, use the ref-pattern the file already uses
+   elsewhere; if neither is clean, SKIP this one this slice and record it as deferred
+   (3 of 4 cleared still meets the gate).
 
 ## Change
-In each of the three files, replace:
-```ts
-const toolIndex = useHermesMcpToolIndex();
-```
-with:
-```ts
-const { reload: reloadToolIndex, ...rest } = useHermesMcpToolIndex();
-```
-(keep every other property the component uses, named exactly as before so downstream code is
-untouched), then update the callback body to `await reloadToolIndex()` and its dep array to
-`[reloadToolIndex]`. No behavior change — `reload` was already stable (useCallback over
-`[enabled]`).
+Minimal per-site fixes above. No logic rewrites, no extraction of new hooks.
 
 ## Out of scope
-- Any other lint warning (useChat.ts, ContextualSuggestions.tsx, HermesMcpSettingsPanel's
-  OTHER warnings if any, react-refresh warnings, etc.)
-- Changing `useHermesMcpToolIndex` itself or its return shape
-- Any refactor of the panels' rendering logic
+- The `useChat.ts:3212` `stop` warning (streaming lifecycle — riskier, defer)
+- All react-refresh warnings (29 of them, separate class)
+- `ContextualSuggestions` suggestion-generation logic itself
+- `useVoiceInput` recorder logic itself
 
 ## Builder pre-flight
-1. Confirm all three warning sites still exist at the listed lines (update refs if moved).
-2. Confirm each file only consumes `toolIndex.<prop>` accesses that survive the destructure.
-3. Confirm `reload` in useHermesMcpToolIndex.ts is still `useCallback([enabled])` (stable).
+1. Confirm the four warning sites still exist at the listed lines.
+2. For site 4: read useChat.ts around 1700-1760 and decide add-dep vs skip per the rule above.
+3. Confirm `setInput` in useRoomChat.ts is still `useCallback(..., [])`.
 
 ## Acceptance gates (frozen before results)
 1. `npm run typecheck` → exit 0.
-2. `npm run lint` → the 3 `toolIndex` warnings gone; **no NEW warnings** anywhere (total ≤ 35).
+2. `npm run lint` → at least 3 of the 4 warnings gone; **no NEW warnings** (total ≤ 33 if 3 cleared, ≤ 32 if 4).
 3. `npm test` → all tests pass (baseline: 134 files / 820 tests).
-4. Diff touches ONLY the three named component files.
-5. One conventional commit (`fix:`) pushed to the current feat branch.
+4. Diff touches ONLY: useRoomChat.ts, ContextualSuggestions.tsx, useVoiceInput.ts, and (only if site 4 attempted) useChat.ts.
+5. One conventional commit (`fix:` or `chore:`) pushed to the current feat branch.
 
 ## Verify commands
 ```
 npm run typecheck && npm run lint && npm test
-npm run lint 2>&1 | grep -c "missing dependency: 'toolIndex'"   # expect 0
+npm run lint 2>&1 | grep -c "exhaustive-deps"   # expect 4 fewer than slice-2's count
 ```
-
-## Commit message
-`fix: destructure stable reload from MCP tool index hook to clear exhaustive-deps warnings`
