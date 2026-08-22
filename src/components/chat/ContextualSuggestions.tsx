@@ -46,7 +46,7 @@ export const ContextualSuggestions: React.FC<ContextualSuggestionsProps> = ({
     }
 
     const result = generateSuggestions({
-      lastAssistantContent: lastAssistant?.content || '',
+      lastAssistantContent: lastAssistant.content,
       lastUserContent: lastUser?.content || '',
       hasRepo: isRepoMode,
       hasChanges: changeCount > 0,
@@ -60,7 +60,7 @@ export const ContextualSuggestions: React.FC<ContextualSuggestionsProps> = ({
       setVisible(result.length > 0);
     }, 300);
     return () => clearTimeout(timer);
-  }, [isStreaming, messages.length, lastAssistant?.content, lastUser?.content, isRepoMode, changeCount, dismissed]);
+  }, [isStreaming, messages.length, lastAssistant, lastUser, isRepoMode, changeCount, dismissed]);
 
   // Track scroll state for arrow indicators
   const updateScrollState = useCallback(() => {

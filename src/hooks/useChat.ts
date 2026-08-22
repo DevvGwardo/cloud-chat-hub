@@ -1759,6 +1759,7 @@ When the user asks you to make changes:
     effectiveProvider,
     reasoningEffort,
     scopeId,
+    panelId,
   ]);
 
   const panelCount = usePanelStore((s) => s.panels.length);

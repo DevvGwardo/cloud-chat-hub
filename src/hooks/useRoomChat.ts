@@ -101,7 +101,7 @@ export function useRoomChat(roomId: string | null) {
       .then(() => setInput(''))
       .catch(console.error)
       .finally(() => setSending(false));
-  }, [input, roomId, sending, postMessage]);
+  }, [input, roomId, sending, postMessage, setInput]);
 
   const handleStop = useCallback(() => {}, []);
 

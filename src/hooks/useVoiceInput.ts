@@ -147,7 +147,8 @@ export function useVoiceInput(
       mediaRecorderRef.current = null;
       chunksRef.current = [];
     };
-  }, []);
+    // cleanupStream is stable (useCallback with [] deps), so this stays mount-only
+  }, [cleanupStream]);
 
   // ── Start recording ───────────────────────────────────────────────────────
   const startRecording = useCallback(async () => {
