@@ -48,6 +48,7 @@
 - 2026-08-22 — Slice 23 landed: new test_messaging_platforms.py (14 tests) — env-file helpers (missing→empty, comment/quote parsing, in-place update preserving comments + removing dropped keys, append), nested config get/set (missing→default, intermediate dict creation, overwrite), OAuth URL builders (discord client_id/scope/callback, slack/teams shape), gateway_state (missing/corrupt → empty platforms, valid read). Tests 523→537; lint held at zero.
 - 2026-08-22 — Slice 24 landed: new test_kanban_tools.py (18 tests) — _active_card_ids env parsing (single/comma/missing), _find_current_card (explicit id preferred → first running fallback → None on fetch fail), kanban_read_current_card full/minimal render + no-card error, update_status PATCH body with reportPath + unreachable error + no-card error, alias mapping (show→read, complete→done+summary, block→blocked+reason), comment requires body, heartbeat timestamped note. Tests 537→555; lint held at zero.
 - 2026-08-22 — Slice 25 landed: new test_team_tools.py (20 tests) — TEAM_ID/TEAM_SUBTASK_ID guards on all six tools, delegation POST body + confirmation id, progress blockers (coordinator /blocked call + importance 3 + blocked tag vs no-blocker importance 2), context query rendering (tags/stars/author/300-char truncation) + no-match + unreachable, publish_finding type inference (decision/artifact/question/default by title keywords) + title-prefixed content, request_help directed vs broadcast tags, signal_completion (finding→PATCH order, PATCH-failure coordinator-fallback third call, summary truncated to 200). Tests 555→575; lint held at zero.
+- 2026-08-22 — Slice 26 landed: new test_mcp_telemetry.py (15 tests) — _sanitize hyphen→underscore mirroring the agent, resolve_server longest-prefix-wins + sanitized-name return + non-mcp None, error detection by output prefix (Error/tool error/json-error → errors counter), unattributable calls reaped from inflight without leaking, minute-bucket accumulation (total/errors), input capped at 400 chars, snapshot remaps sanitized keys to raw config names for the dashboard. Persistence mocked out. Tests 575→590; lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -363,6 +364,16 @@ at import time. The env-file writer preserves comments and drops removed keys, v
 Notable pinned behavior: signal_completion has a three-call chain (context finding →
 delegation PATCH → coordinator-fallback finding on PATCH failure) — now guarded by tests
 so the fallback can't silently regress.
+
+### Slice 26 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **590 passed, 5 skipped** (mcp_telemetry 0→15) |
+| diff | new hermes-bridge/test_mcp_telemetry.py, +118 |
+| commit | d3c7d5e pushed to feat/codex-function-calling |
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->
