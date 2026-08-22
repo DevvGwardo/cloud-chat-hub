@@ -52,7 +52,7 @@ import { useUIStore } from '@/stores/ui-store';
 import { useChangesetStore } from '@/stores/changeset-store';
 import { useHermesStore } from '@/stores/hermes-store';
 import type { ToolCallRecordsByMessage } from '@/stores/hermes-store';
-import { useChatScopeId, usePanelId } from '@/contexts/PanelContext';
+import { useChatScopeId, usePanelId } from '@/hooks/use-panel-context';
 import {
   getProposalApprovalKey,
   matchApprovalPolicy,

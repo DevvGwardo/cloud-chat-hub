@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { FolderGit2, X, ChevronDown, Loader2, Code2, Globe, FileCode, Server, Search, Bug, TestTube2, Zap } from 'lucide-react';
 import { useChangesetStore } from '@/stores/changeset-store';
-import { useChatScopeId } from '@/contexts/PanelContext';
+import { useChatScopeId } from '@/hooks/use-panel-context';
 import { useSettingsStore } from '@/stores/settings-store';
 import { usePreviewStore } from '@/stores/preview-store';
 import { getApiBaseUrl, fetchRepoFileTreeResult } from '@/lib/api';

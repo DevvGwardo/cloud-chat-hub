@@ -10,7 +10,7 @@ import {
   type ServerApprovalDecision,
 } from '@/lib/hermes-api';
 import { cn } from '@/lib/utils';
-import { usePanelId } from '@/contexts/PanelContext';
+import { usePanelId } from '@/hooks/use-panel-context';
 
 /** Unified ladder decisions: server approvals accept the first three; the
  *  optional 4th ("Always for prefix") is sent as decision "approved" with

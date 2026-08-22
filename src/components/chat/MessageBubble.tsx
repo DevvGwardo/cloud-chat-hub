@@ -3,7 +3,7 @@ import { Copy, Check, RotateCcw, Pencil, ChevronDown, Loader2, Wrench, FileCode,
 import { GhostIcon } from './GhostIcon';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { useChangesetStore } from '@/stores/changeset-store';
-import { useChatScopeId } from '@/contexts/PanelContext';
+import { useChatScopeId } from '@/hooks/use-panel-context';
 import { usePreviewStore } from '@/stores/preview-store';
 import type { Message } from '@/lib/db';
 import { computeDiffLines, getChangeLineDelta, summarizeChangeLines } from '@/lib/change-diff';

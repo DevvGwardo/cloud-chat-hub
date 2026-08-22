@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { ArrowUp, Square, Plus, ChevronDown, Mic, MicOff, CornerDownLeft, Bot, ClipboardList, Loader2, Repeat, X, Flag } from 'lucide-react';
 import { useHermesStore, DEFAULT_LOOP_STATE } from '@/stores/hermes-store';
-import { usePanelId, useChatScopeId } from '@/contexts/PanelContext';
+import { usePanelId, useChatScopeId } from '@/hooks/use-panel-context';
 import { useChangesetStore } from '@/stores/changeset-store';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '@/stores/ui-store';
@@ -21,11 +21,12 @@ import { StreamingStatusBar } from './StreamingStatusBar';
 import { ContextMeter } from './ContextMeter';
 import { useChatStore } from '@/stores/chat-store';
 import { QueuedMessageTray } from './QueuedMessageTray';
-import { CommandSuggestions, commandTakesArgs } from './CommandSuggestions';
-import { ContextRefSuggestions, buildPickerSuggestions, type ContextRefSuggestion } from './ContextRefSuggestions';
+import { CommandSuggestions } from './CommandSuggestions';
+import { buildPickerSuggestions, type ContextRefSuggestion } from '@/lib/context-refs';
+import { ContextRefSuggestions } from './ContextRefSuggestions';
 import { HermesModelPicker } from './HermesModelPicker';
 import { HermesEffortSlider } from './HermesEffortSlider';
-import { parseCommand, findCommand, filterCommands, ensureHermesAgentCommandsLoaded, type CommandContext } from '@/lib/hermes-commands';
+import { parseCommand, findCommand, filterCommands, ensureHermesAgentCommandsLoaded, commandTakesArgs, type CommandContext } from '@/lib/hermes-commands';
 import {
   detectContextRefQuery,
   estimateContextRefTokens,
@@ -36,7 +37,7 @@ import {
   type ContextRefQuery,
 } from '@/lib/context-refs';
 import { fetchGoalsConfig, updateGoalsConfig, type GoalsConfig } from '@/lib/hermes-api';
-import { useCommandCallbacks } from '@/contexts/CommandCallbacksContext';
+import { useCommandCallbacks } from '@/hooks/use-command-callbacks';
 import {
   DropdownMenu,
   DropdownMenuContent,

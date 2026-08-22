@@ -332,3 +332,25 @@ export async function expandContextRefs(
 export function estimateContextRefTokens(text: string): number {
   return estimateTokens(text);
 }
+
+export interface ContextRefSuggestion {
+  label: string;
+  insert: string;
+  hint?: string;
+  kind?: ContextRefKind | 'picker';
+  tokens?: number;
+}
+
+/** Suggestions for the @-context picker, filtered by the user's query. */
+export function buildPickerSuggestions(filterQuery: string): ContextRefSuggestion[] {
+  const q = filterQuery.toLowerCase();
+  return CONTEXT_REF_PICKER_ITEMS.filter((item) => {
+    if (!q) return true;
+    return item.kind.includes(q) || item.label.includes(q);
+  }).map((item) => ({
+    label: item.label,
+    insert: item.insert,
+    hint: item.hint,
+    kind: item.kind,
+  }));
+}

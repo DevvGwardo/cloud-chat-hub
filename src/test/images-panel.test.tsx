@@ -1,7 +1,7 @@
 
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { extractImageUrls } from '@/components/sidebar/ImagesPanel';
+import { extractImageUrls } from '@/lib/image-extract';
 import type { Conversation, Message } from '@/lib/db';
 
 function assetUrl(path: string): string {

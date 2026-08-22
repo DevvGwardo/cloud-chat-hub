@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { useChatScopeId } from '@/contexts/PanelContext';
+import { useChatScopeId } from '@/hooks/use-panel-context';
 import { useChangesetStore, type FileChange } from '@/stores/changeset-store';
 import { useHermesStore } from '@/stores/hermes-store';
 import type { ToolActivityEvent } from './AgentActivity';

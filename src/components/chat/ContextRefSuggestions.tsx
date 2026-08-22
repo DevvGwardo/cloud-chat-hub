@@ -3,7 +3,6 @@ import { File, Folder, GitCompare, Link2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { formatTokenCount } from '@/lib/tokens';
 import {
-  CONTEXT_REF_PICKER_ITEMS,
   type ContextRefKind,
   type ContextRefQuery,
 } from '@/lib/context-refs';
@@ -15,13 +14,7 @@ const KIND_ICON: Record<ContextRefKind, React.ReactNode> = {
   url: <Link2 className="h-3 w-3 shrink-0" />,
 };
 
-export interface ContextRefSuggestion {
-  label: string;
-  insert: string;
-  hint?: string;
-  kind?: ContextRefKind | 'picker';
-  tokens?: number;
-}
+import type { ContextRefSuggestion } from '@/lib/context-refs';
 
 interface ContextRefSuggestionsProps {
   query: ContextRefQuery;
@@ -123,15 +116,3 @@ export const ContextRefSuggestions: React.FC<ContextRefSuggestionsProps> = ({
   );
 };
 
-export function buildPickerSuggestions(filterQuery: string): ContextRefSuggestion[] {
-  const q = filterQuery.toLowerCase();
-  return CONTEXT_REF_PICKER_ITEMS.filter((item) => {
-    if (!q) return true;
-    return item.kind.includes(q) || item.label.includes(q);
-  }).map((item) => ({
-    label: item.label,
-    insert: item.insert,
-    hint: item.hint,
-    kind: item.kind,
-  }));
-}

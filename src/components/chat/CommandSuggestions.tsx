@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { describeCommandExecution, filterCommands } from '@/lib/hermes-commands';
+import { describeCommandExecution, filterCommands, commandTakesArgs } from '@/lib/hermes-commands';
 import { cn } from '@/lib/utils';
 
 interface CommandSuggestionsProps {
@@ -8,11 +8,6 @@ interface CommandSuggestionsProps {
   selectedIndex: number;
   onSelect: (command: string) => void;
   onSelectIndex: (index: number) => void;
-}
-
-// True if the command's usage includes <arg> markers, meaning it needs user input
-export function commandTakesArgs(cmd: { usage: string }): boolean {
-  return cmd.usage.includes('<');
 }
 
 const KIND_BADGE: Record<string, { label: string; className: string }> = {

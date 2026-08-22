@@ -1,15 +1,6 @@
-import { createContext, useContext } from 'react';
 import type { ReactNode } from 'react';
 
-interface PanelContextValue {
-  panelId: string;
-  scopeId: string;
-}
-
-const PanelContext = createContext<PanelContextValue>({
-  panelId: 'default',
-  scopeId: 'default',
-});
+import { PanelContext, type PanelContextValue } from './panel-context-value';
 
 export function PanelProvider({
   value,
@@ -27,12 +18,4 @@ export function PanelProvider({
       {children}
     </PanelContext.Provider>
   );
-}
-
-export function usePanelId(): string {
-  return useContext(PanelContext).panelId;
-}
-
-export function useChatScopeId(): string {
-  return useContext(PanelContext).scopeId;
 }

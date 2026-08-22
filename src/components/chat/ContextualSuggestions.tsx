@@ -3,7 +3,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { generateSuggestions, type ContextualSuggestion } from '@/lib/contextual-suggestions';
 import { useChangesetStore } from '@/stores/changeset-store';
-import { useChatScopeId } from '@/contexts/PanelContext';
+import { useChatScopeId } from '@/hooks/use-panel-context';
 
 interface ContextualSuggestionsProps {
   messages: { role: string; content: string }[];

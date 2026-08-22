@@ -8,7 +8,7 @@ import { fetchHermesProviders, fetchHermesSavedProviders, type HermesProviderInf
 import { useUIStore } from '@/stores/ui-store';
 import { PROVIDERS, PROVIDER_ORDER, CATEGORY_LABELS, getVisibleModelOptions } from '@/lib/providers';
 import { validateApiKey, listGitHubRepos, type GitHubRepoSummary } from '@/lib/api';
-import { PROVIDER_KEY_URLS } from '@/components/chat/ApiKeyModal';
+import { PROVIDER_KEY_URLS } from '@/lib/provider-key-urls';
 import { cn } from '@/lib/utils';
 import {
   optimizeChatBackgroundImage,
@@ -26,7 +26,7 @@ import { AuthPoolSettingsPanel } from './AuthPoolSettingsPanel';
 import { PortalSettingsPanel } from './PortalSettingsPanel';
 import { HermesMcpSettingsPanel } from './HermesMcpSettingsPanel';
 import { useTour } from '@reactour/tour';
-import { prepareUiForTour } from '@/components/tour/TourController';
+import { prepareUiForTour } from '@/lib/tour-setup';
 import packageJson from '../../../package.json';
 
 const PROVIDER_COLORS: Partial<Record<Provider, string>> = {

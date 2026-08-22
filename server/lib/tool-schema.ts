@@ -37,7 +37,6 @@ function unwrap(schema: ZodLike): { schema: ZodLike; optional: boolean; nullable
   let current = schema;
   let optional = false;
   let nullable = false;
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     if (isZodType(current, 'ZodOptional')) {
       optional = true;
