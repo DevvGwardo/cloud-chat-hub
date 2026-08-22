@@ -160,3 +160,158 @@ class RunAgentWorktreeModeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MaybeSetupWorktreeTests(unittest.TestCase):
+    """maybe_setup_worktree: CLI interaction, failure fallbacks, chdir tracking."""
+
+    def setUp(self):
+        self.prev_cwd = os.getcwd()
+        # Reset module-level session state between tests.
+        ws._session_worktrees.clear()
+        ws._active_worktree = None
+
+    def tearDown(self):
+        os.chdir(self.prev_cwd)
+        ws._session_worktrees.clear()
+        ws._active_worktree = None
+
+    def _fake_cli(self, repo_root="/fake/repo", setup_result=None, git_root=None):
+        cli = mock.MagicMock()
+        cli._git_repo_root.return_value = git_root
+        cli._setup_worktree.return_value = setup_result
+        return mock.patch.object(ws, "_import_cli", return_value=cli), cli
+
+    def test_success_chdirs_tracks_and_returns_info(self):
+        info = {"path": "/repo/.worktrees/hermes-abc", "branch": "hermes/abc"}
+        patcher, cli = self._fake_cli(setup_result=info)
+        with patcher, mock.patch("os.chdir") as chdir:
+            result = ws.maybe_setup_worktree("/fake/repo")
+
+        self.assertEqual(result, info)
+        chdir.assert_called_once_with("/repo/.worktrees/hermes-abc")
+        self.assertTrue(ws.is_worktree_active())
+        self.assertEqual(ws.get_active_worktree(), info)
+        cli._setup_worktree.assert_called_once_with(repo_root="/fake/repo")
+
+    def test_no_repo_root_returns_none(self):
+        patcher, cli = self._fake_cli(git_root="")
+        with patcher:
+            self.assertIsNone(ws.maybe_setup_worktree(None))
+        cli._setup_worktree.assert_not_called()
+
+    def test_blank_repo_root_argument_falls_back_to_cli_git_root(self):
+        patcher, cli = self._fake_cli(git_root="/discovered/root", setup_result=None)
+        with patcher:
+            ws.maybe_setup_worktree("   ")
+        cli._setup_worktree.assert_called_once_with(repo_root="/discovered/root")
+
+    def test_setup_failure_returns_none_and_does_not_chdir(self):
+        patcher, _cli = self._fake_cli(setup_result=None)
+        before = os.getcwd()
+        with patcher:
+            self.assertIsNone(ws.maybe_setup_worktree("/fake/repo"))
+        self.assertEqual(os.getcwd(), before)
+        self.assertFalse(ws.is_worktree_active())
+
+    def test_setup_info_missing_path_returns_none(self):
+        patcher, _cli = self._fake_cli(setup_result={"branch": "x"})  # no "path"
+        before = os.getcwd()
+        with patcher:
+            self.assertIsNone(ws.maybe_setup_worktree("/fake/repo"))
+        self.assertEqual(os.getcwd(), before)
+        self.assertFalse(ws.is_worktree_active())
+
+
+class UntrackTests(unittest.TestCase):
+    def setUp(self):
+        ws._session_worktrees.clear()
+        ws._active_worktree = None
+
+    def tearDown(self):
+        ws._session_worktrees.clear()
+        ws._active_worktree = None
+
+    def test_untrack_last_worktree_clears_active(self):
+        info = {"path": "/r/.worktrees/hermes-1", "branch": "b"}
+        ws._track_worktree(info)
+        ws._untrack_worktree(info)
+        self.assertFalse(ws.is_worktree_active())
+        self.assertIsNone(ws.get_active_worktree())
+
+    def test_untrack_middle_worktree_promotes_previous_to_active(self):
+        first = {"path": "/r/.worktrees/hermes-1"}
+        second = {"path": "/r/.worktrees/hermes-2"}
+        ws._track_worktree(first)
+        ws._track_worktree(second)
+        ws._untrack_worktree(second)
+        self.assertTrue(ws.is_worktree_active())
+        self.assertEqual(ws.get_active_worktree(), first)
+
+    def test_untrack_unknown_info_is_noop(self):
+        info = {"path": "/r/.worktrees/hermes-1"}
+        ws._track_worktree(info)
+        ws._untrack_worktree({"path": "/never/tracked"})
+        self.assertTrue(ws.is_worktree_active())
+
+
+class ManualCleanupEdgeTests(unittest.TestCase):
+    def test_rejects_empty_path(self):
+        self.assertFalse(ws._manual_cleanup_worktree({"path": "", "branch": "b"}))
+
+    def test_already_deleted_path_reports_clean(self):
+        with mock.patch.object(ws, "_path_created_by_bridge", return_value=True), \
+             mock.patch.object(ws.Path, "exists", return_value=False):
+            self.assertTrue(ws._manual_cleanup_worktree({
+                "path": "/repo/.worktrees/hermes-gone",
+                "branch": "hermes/gone",
+                "repo_root": "/repo",
+            }))
+
+    def test_rmtree_failure_returns_false(self):
+        with mock.patch.object(ws, "_path_created_by_bridge", return_value=True), \
+             mock.patch.object(ws.Path, "exists", return_value=True), \
+             mock.patch.object(ws.shutil, "rmtree", side_effect=OSError("busy")), \
+             mock.patch.object(ws.subprocess, "run"):
+            self.assertFalse(ws._manual_cleanup_worktree({
+                "path": "/repo/.worktrees/hermes-stuck",
+                "branch": "hermes/stuck",
+                "repo_root": "/repo",
+            }))
+
+
+class CleanupWorktreeFallbackTests(unittest.TestCase):
+    def setUp(self):
+        ws._session_worktrees.clear()
+        ws._active_worktree = None
+
+    def tearDown(self):
+        ws._session_worktrees.clear()
+        ws._active_worktree = None
+
+    def test_cleanup_without_any_worktree_returns_false(self):
+        self.assertFalse(ws.cleanup_worktree())
+
+    def test_cli_cleanup_leaving_path_falls_back_to_manual(self):
+        info = {"path": "/repo/.worktrees/hermes-x", "branch": "b", "repo_root": "/repo"}
+
+        fake_cli = mock.MagicMock()
+        # CLI helper runs "successfully" but the worktree path still exists.
+        fake_cli._cleanup_worktree.return_value = None
+
+        with mock.patch.object(ws, "_import_cli", return_value=fake_cli), \
+             mock.patch.object(ws, "_manual_cleanup_worktree", return_value=True) as manual, \
+             mock.patch.object(ws, "_untrack_worktree") as untrack, \
+             mock.patch.object(ws.Path, "exists", return_value=True):
+            self.assertTrue(ws.cleanup_worktree(info))
+            manual.assert_called_once_with(info)
+            untrack.assert_called_once_with(info)
+
+    def test_cleanup_session_returns_count_of_cleaned(self):
+        a = {"path": "/r/.worktrees/hermes-a"}
+        b = {"path": "/r/.worktrees/hermes-b"}
+        ws._track_worktree(a)
+        ws._track_worktree(b)
+        with mock.patch.object(ws, "cleanup_worktree", side_effect=[True, False]) as cw:
+            self.assertEqual(ws.cleanup_session_worktrees(), 1)
+        self.assertEqual(cw.call_count, 2)
