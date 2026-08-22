@@ -1221,6 +1221,12 @@ def _tool_run_command(command: str) -> str:
             f"Hint: Command not found. Check if the program is installed and in PATH.\n"
             f"Command: {command}"
         )
+    except PermissionError:
+        return (
+            f"[Exit code: 126]\n"
+            f"Hint: Permission denied. The file may not be executable.\n"
+            f"Command: {command}"
+        )
     except subprocess.TimeoutExpired:
         return (
             f"Error: Command timed out after {RUN_COMMAND_TIMEOUT_SECONDS} seconds.\n"
