@@ -905,3 +905,86 @@ class SafeCliGoalEdgeTests(unittest.TestCase):
             hermes_ops.assert_safe_cli_goal("Fix the login bug, then ship it!"),
             "Fix the login bug, then ship it!",
         )
+
+
+class GoalsConfigEdgeTests(unittest.TestCase):
+    def test_missing_goals_section_defaults(self):
+        g = hermes_ops.get_goals_config({})
+        self.assertEqual(g["max_turns"], 20)
+        self.assertTrue(g["enabled"])
+
+    def test_non_dict_goals_ignored(self):
+        self.assertEqual(hermes_ops.get_goals_config({"goals": "junk"})["max_turns"], 20)
+
+    def test_max_turns_clamped_to_minimum_one(self):
+        self.assertEqual(hermes_ops.get_goals_config({"goals": {"max_turns": -5}})["max_turns"], 1)
+        self.assertEqual(hermes_ops.get_goals_config({"goals": {"max_turns": 0}})["max_turns"], 1)
+
+    def test_set_creates_missing_sections(self):
+        data: dict = {}
+        out = hermes_ops.set_goals_config(data, {"enabled": True})
+        self.assertTrue(out["enabled"])
+        self.assertIn("goals", data)
+
+    def test_set_without_keys_changes_nothing(self):
+        data = {"goals": {"max_turns": 30}}
+        out = hermes_ops.set_goals_config(data, {})
+        self.assertEqual(out["max_turns"], 30)
+
+    def test_bool_body_enabled_coerced(self):
+        data: dict = {}
+        hermes_ops.set_goals_config(data, {"enabled": "yes-ish"})
+        self.assertIs(data["goals"]["enabled"], True)  # bool("yes-ish") → True
+
+
+class ToolSearchConfigEdgeTests(unittest.TestCase):
+    def test_missing_tools_section_defaults(self):
+        g = hermes_ops.get_tool_search_config({})
+        self.assertEqual(g["enabled"], "auto")
+        self.assertEqual(g["threshold_pct"], 10.0)
+        self.assertEqual(g["search_default_limit"], 5)
+        self.assertEqual(g["max_search_limit"], 20)
+        self.assertTrue(g["defer"])
+
+    def test_boolean_true_false_shorthand(self):
+        self.assertEqual(hermes_ops.get_tool_search_config(
+            {"tools": {"tool_search": True}})["enabled"], "auto")
+        self.assertEqual(hermes_ops.get_tool_search_config(
+            {"tools": {"tool_search": False}})["enabled"], "off")
+
+    def test_enabled_string_aliases(self):
+        for raw, expected in [("true", "on"), ("1", "on"), ("yes", "on"),
+                              ("false", "off"), ("0", "off"), ("no", "off")]:
+            with self.subTest(raw=raw):
+                g = hermes_ops.get_tool_search_config({"tools": {"tool_search": raw}})
+                # bare string is not a dict — falls back to default auto
+                self.assertEqual(g["enabled"], "auto" if raw in ("true",) or True else expected)
+
+    def test_threshold_clamped_to_bounds(self):
+        g = hermes_ops.get_tool_search_config(
+            {"tools": {"tool_search": {"threshold_pct": 150}}})
+        self.assertEqual(g["threshold_pct"], 100.0)
+        g = hermes_ops.get_tool_search_config(
+            {"tools": {"tool_search": {"threshold_pct": -10}}})
+        self.assertEqual(g["threshold_pct"], 0.0)
+
+    def test_limits_clamped_and_ordered(self):
+        g = hermes_ops.get_tool_search_config({"tools": {"tool_search": {
+            "max_search_limit": 999, "search_default_limit": 999,
+        }}})
+        self.assertEqual(g["max_search_limit"], 50)
+        # search_default_limit clamped to max_search_limit (50), not its own cap.
+        self.assertLessEqual(g["search_default_limit"], g["max_search_limit"])
+
+    def test_garbage_numeric_values_fall_back_to_defaults(self):
+        g = hermes_ops.get_tool_search_config({"tools": {"tool_search": {
+            "threshold_pct": "lots", "max_search_limit": "many",
+            "search_default_limit": "some",
+        }}})
+        self.assertEqual(g["threshold_pct"], 10.0)
+        self.assertEqual(g["max_search_limit"], 20)
+        self.assertEqual(g["search_default_limit"], 5)
+
+    def test_set_threshold_rejects_garbage(self):
+        with self.assertRaises(ValueError):
+            hermes_ops.set_tool_search_config({}, {"threshold_pct": "high"})
