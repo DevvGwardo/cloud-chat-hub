@@ -27,6 +27,7 @@
 - 2026-08-22 — Slice 2 landed: destructured stable `reload` from `useHermesMcpToolIndex` in the 3 MCP panels — clears 3 exhaustive-deps warnings without destabilizing the callbacks; lint backlog 38→35.
 - 2026-08-22 — Slice 3 landed: added missing stable deps in useRoomChat.handleSend (`setInput`), ContextualSuggestions effect (`lastAssistant`/`lastUser`, narrowed optional chains), useVoiceInput unmount cleanup (`cleanupStream`), useChat.buildRequestBody (`panelId`) — lint backlog 35→31; only remaining exhaustive-deps is useChat.ts:3213 `stop` (verified safe-add candidate for slice 4).
 - 2026-08-22 — Slice 4 landed: added `stop` to the conversation-switch effect deps (useChat.ts:3213) — exhaustive-deps class fully cleared, zero remaining; lint backlog 31→30. Next class: react-refresh warnings (~29) and misc single-file warnings.
+- 2026-08-22 — Slice 5 landed: pre-flight found `allowConstantExport` already enabled, so pivoted per spec fallback — moved motion presets into motion-presets.ts (10 warnings), removed toast.tsx dead re-export + unused `useToastContext` export (4), un-exported unused `HERMES_EFFORT_LABELS`/`filterJobsForConversation` (2); lint backlog 30→14. Remaining react-refresh sites need import-site changes (contexts, ui/* cva variants, helper fns) or are spark-landing.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -76,6 +77,18 @@ than the spec's suppression fallback — cleaner than spec'd, same warning count
 | unit tests | 134 files, 820 tests passed |
 | diff | only useChat.ts, +1/−1 |
 | commit | d27d352 pushed to feat/codex-function-calling |
+
+### Slice 5 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 14 warnings (was 30; react-refresh 29→13) |
+| unit tests | 134 files, 820 tests passed |
+| diff | motion.tsx split into motion-presets.ts + 4 import-site updates; toast.tsx dead re-export + unused hook removed; 2 unused exports un-exported — 10 files, +88/−79 |
+| commit | ad2b673 pushed to feat/codex-function-calling |
+
+Spec deviation note: `allowConstantExport: true` was ALREADY set in eslint.config.js:36,
+so the config step was a no-op; proceeded directly to the capped manual-fix fallback.
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->
