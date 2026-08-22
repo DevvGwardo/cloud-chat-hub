@@ -45,6 +45,7 @@
 - 2026-08-22 — Slice 20 landed: checkpoint edges (14 tests) — workdir resolution (explicit wins, prefers live-with-commits over live-without, orphans never selected, blank fields skipped), assert_safe_workdir (relative/control-chars rejected), assert_safe_checkpoint_index (0/neg/garbage rejected, float truncates), _format_checkpoint_entries malformed rows (non-dict skipped with ORIGINAL index preserved, missing reason defaults). REAL DEFECT: garbage files_changed ("lots") raised ValueError inside int() and killed the whole checkpoint listing — wrapped in try/except → 0. Tests 485→499 (hermes_ops 84→98); lint held at zero.
 - 2026-08-22 — Slice 21 landed: new test_delegation_live.py (18 tests) — path parsing (deleg id + task index), _safe_delegation_dir traversal/symlink escape rejection (resolve+relative_to guard works), manifest read (delegation_id injected, FileNotFoundError), list_recent_manifests (invalid JSON skipped, newest-first, limit clamped ≤20), tail_task_log (full read, offset paging with done-detection, missing log → empty not-done, task_index bounds −1/65 rejected). Traversal guard confirmed solid. Tests 499→515; lint held at zero.
 - 2026-08-22 — Slice 22 landed: new test_cursor_composer_bridge.py (8 tests) — probe_bridge_health outcomes (healthy ok / 200-but-wrong-status-field → degraded / connection-refused URLError → down with truncated detail / unexpected exception → error / invalid JSON body → error) and bridge_status aggregate (no skills + unreachable → disconnected, one SKILL.md installed → skills_ready, envelope fields present). Tests 515→523; lint held at zero.
+- 2026-08-22 — Slice 23 landed: new test_messaging_platforms.py (14 tests) — env-file helpers (missing→empty, comment/quote parsing, in-place update preserving comments + removing dropped keys, append), nested config get/set (missing→default, intermediate dict creation, overwrite), OAuth URL builders (discord client_id/scope/callback, slack/teams shape), gateway_state (missing/corrupt → empty platforms, valid read). Tests 523→537; lint held at zero.
 
 ## Raw results
 <!-- builder appends per session: tables and numbers only -->
@@ -323,6 +324,19 @@ Security-relevant positive finding: the _safe_delegation_dir traversal/symlink g
 | pytest hermes-bridge | **523 passed, 5 skipped** (cursor_composer_bridge 0→8) |
 | diff | new hermes-bridge/test_cursor_composer_bridge.py, +114 |
 | commit | cb93e59 pushed to feat/codex-function-calling |
+
+### Slice 23 (architect, 2026-08-22)
+| Gate | Result |
+|---|---|
+| typecheck | pass |
+| lint | 0 errors, 0 warnings (held) |
+| npm test | 134 files, 829 tests passed |
+| pytest hermes-bridge | **537 passed, 5 skipped** (messaging_platforms 0→14) |
+| diff | new hermes-bridge/test_messaging_platforms.py, +127 |
+| commit | df4e5f2 pushed to feat/codex-function-calling |
+
+Note: HERMES_HOME must be set to a temp dir BEFORE importing the module — paths pin
+at import time. The env-file writer preserves comments and drops removed keys, verified.
 
 ## Next slice
 <!-- architect writes; small enough for one PR -->
