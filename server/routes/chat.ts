@@ -961,6 +961,10 @@ All changes are staged for a PR — they are not applied directly to the repo.`;
         customTools: Array.isArray(custom_tools) ? custom_tools : undefined,
         activeProfile: activeHermesProfile ?? undefined,
         conversationId: typeof conversation_id === 'string' ? conversation_id : undefined,
+        // Real system role on every iteration — the normalized (fake-user)
+        // copy only leads iteration 1, so follow-up turns and the judge
+        // would otherwise run with no system prompt at all.
+        systemPrompt: effectiveSystemPrompt || undefined,
       });
       return;
     }

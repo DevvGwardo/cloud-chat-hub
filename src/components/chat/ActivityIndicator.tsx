@@ -1,9 +1,10 @@
 import React, { useMemo } from 'react';
 import { useChatScopeId } from '@/contexts/PanelContext';
 import { useChangesetStore, type FileChange } from '@/stores/changeset-store';
+import { useHermesStore } from '@/stores/hermes-store';
 import type { ToolActivityEvent } from './AgentActivity';
 import { parseToolActivityInput } from '@/lib/tool-activity';
-import { Terminal, FileCode, GitBranch, Search, Pencil, Brain, FileText } from 'lucide-react';
+import { Terminal, FileCode, GitBranch, Search, Pencil, Brain, FileText, Repeat, Gavel } from 'lucide-react';
 
 type Activity = 'thinking' | 'reading' | 'editing' | 'planning' | 'writing';
 
@@ -116,6 +117,12 @@ function FileChip({ path, status }: { path: string; status: 'active' | 'done' })
 
 export const ActivityIndicator: React.FC<ActivityIndicatorProps> = ({ isStreaming, messages, toolActivity, statusLabel }) => {
   const scopeId = useChatScopeId();
+  // Loop mode progress — read from the hermes store so the strip shows
+  // "Loop 2/5 · judging" instead of a generic label during loop runs.
+  const loopPhase = useHermesStore((s) => s.loops[scopeId]?.phase ?? 'idle');
+  const loopIteration = useHermesStore((s) => s.loops[scopeId]?.iteration ?? 0);
+  const loopMax = useHermesStore((s) => s.loops[scopeId]?.config.maxIterations ?? 0);
+  const loopActive = isStreaming && (loopPhase === 'agent' || loopPhase === 'judge');
   const stagedPaths = useChangesetStore((state) => {
     const scope = state.panelChangesets[scopeId];
     if (!scope) return '';
@@ -152,7 +159,12 @@ export const ActivityIndicator: React.FC<ActivityIndicatorProps> = ({ isStreamin
 
   const config = ACTIVITY_CONFIG[activity];
   const Icon = config.Icon;
-  const label = statusLabel || config.label;
+  const label = loopActive
+    ? loopPhase === 'judge'
+      ? `Judging iteration ${loopIteration}/${loopMax}`
+      : `Loop ${loopIteration}/${loopMax}`
+    : statusLabel || config.label;
+  const LoopIcon = loopPhase === 'judge' ? Gavel : Repeat;
 
   return (
     <div className="flex flex-col items-center gap-1.5 py-2 animate-in fade-in duration-200">
@@ -162,7 +174,11 @@ export const ActivityIndicator: React.FC<ActivityIndicatorProps> = ({ isStreamin
           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/60 opacity-75" />
           <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
         </span>
-        <Icon className="h-3 w-3 opacity-70" />
+        {loopActive ? (
+          <LoopIcon className={`h-3 w-3 ${loopPhase === 'judge' ? 'text-amber-400' : 'text-emerald-400'}`} />
+        ) : (
+          <Icon className="h-3 w-3 opacity-70" />
+        )}
         <span className="font-medium tracking-tight">{label}</span>
         {allFiles.length > 0 && (
           <span className="text-muted-foreground/50 font-mono text-[10px]">

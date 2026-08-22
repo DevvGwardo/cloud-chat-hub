@@ -830,6 +830,12 @@ function formatLoopStatusPart(status: {
   return { type: 'hermes_loop_status', status };
 }
 
+/** Renders a compact iteration header injected between loop passes so the
+ * chat transcript itself shows loop progress even without the toggle label. */
+function formatLoopIterationHeader(iteration: number, maxIterations: number): string {
+  return `\n\n---\n\n**Loop iteration ${iteration}/${maxIterations}**\n\n`;
+}
+
 const LOOP_JUDGE_MAX_ATTEMPTS = 3;
 const LOOP_JUDGE_RETRY_DELAY_MS = 2000;
 
@@ -842,6 +848,7 @@ async function judgeLoopIteration(input: {
   goal: string;
   attempt: string;
   activeProfile?: string;
+  systemPrompt?: string;
   signal: AbortSignal;
 }): Promise<{ met: boolean; feedback: string }> {
   let lastError: unknown;
@@ -874,6 +881,7 @@ async function judgeLoopIterationOnce(input: {
   goal: string;
   attempt: string;
   activeProfile?: string;
+  systemPrompt?: string;
   signal: AbortSignal;
 }): Promise<{ met: boolean; feedback: string }> {
   const response = await fetchHermesWithReadinessRetry(`${OPENAI_COMPATIBLE.hermes}/chat/completions`, {
@@ -892,6 +900,9 @@ async function judgeLoopIterationOnce(input: {
       stream: false,
       temperature: 0,
       max_tokens: 1024,
+      // The judge must see the same constraints the agent ran with, or it
+      // judges against a goal that was never actually given to the agent.
+      ...(input.systemPrompt ? { system: input.systemPrompt } : {}),
       messages: [
         { role: 'system', content: LOOP_JUDGE_SYSTEM_PROMPT },
         {
@@ -982,6 +993,10 @@ export async function proxyHermesLoopToDataStream(input: {
   customTools?: unknown[];
   activeProfile?: string;
   conversationId?: string;
+  /** System prompt forwarded as a real system role on every loop iteration
+   * (normalizeChatMessages folds it into a leading fake user message, which
+   * only leads iteration 1 — follow-up turns and the judge would lose it). */
+  systemPrompt?: string;
   /** Run the agent in an isolated git worktree of the local checkout. */
   hermesWorktree?: boolean;
   /** Local checkout path the bridge uses as the worktree repo root / ACP cwd. */
@@ -1034,7 +1049,7 @@ export async function proxyHermesLoopToDataStream(input: {
 
       await emitLoopStatus({ phase: 'agent', iteration, maxIterations });
       if (iteration > 1) {
-        await emitText(`\n\n---\n\n**Loop iteration ${iteration}/${maxIterations}**\n\n`);
+        await emitText(formatLoopIterationHeader(iteration, maxIterations));
       }
 
       const startedAt = Date.now();
@@ -1062,6 +1077,7 @@ export async function proxyHermesLoopToDataStream(input: {
         },
         body: JSON.stringify({
           model: input.model,
+          ...(input.systemPrompt ? { system: input.systemPrompt } : {}),
           messages: conversation,
           temperature: input.temperature ?? 0.7,
           top_p: input.topP ?? 0.9,
@@ -1108,6 +1124,7 @@ export async function proxyHermesLoopToDataStream(input: {
         goal,
         attempt: iterationText,
         activeProfile: input.activeProfile,
+        systemPrompt: input.systemPrompt,
         signal: abortController.signal,
       });
       logger.info(`[chat] Hermes loop iteration ${iteration} verdict met=${verdict.met}`);
@@ -1115,9 +1132,21 @@ export async function proxyHermesLoopToDataStream(input: {
       if (verdict.met) {
         stopReason = 'verdict-met';
         finalPhase = 'done';
-        await emitLoopStatus({ phase: 'done', iteration, maxIterations, stopReason });
+        // Surface the passing verdict inline so the transcript explains WHY
+        // the loop stopped, not just that it did.
+        if (verdict.feedback) {
+          await emitText(`\n\n> ✅ **Loop verdict (met):** ${verdict.feedback}\n`);
+        }
+        await emitLoopStatus({ phase: 'done', iteration, maxIterations, stopReason, feedback: verdict.feedback });
         break;
       }
+
+      // Not met — show the judge's critique inline before the next pass so
+      // the user sees what the loop is fixing.
+      if (verdict.feedback) {
+        await emitText(`\n\n> 🔁 **Judge feedback (iteration ${iteration}):** ${verdict.feedback}\n`);
+      }
+      await emitLoopStatus({ phase: 'judge', iteration, maxIterations, feedback: verdict.feedback });
 
       if (iteration === maxIterations) {
         stopReason = 'max-iterations';

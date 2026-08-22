@@ -1807,6 +1807,16 @@ When the user asks you to make changes:
       setAgentStatus(null);
       clearStreamRetryIndicator();
 
+      // Loop mode: the stream is over — release the toggle's transient
+      // phase so it doesn't stay stuck on "done"/"stopped" forever. The
+      // loop stays enabled; only iteration state resets.
+      {
+        const loop = useHermesStore.getState().getLoop(panelId);
+        if (loop.enabled && (loop.phase === 'agent' || loop.phase === 'judge' || loop.phase === 'done' || loop.phase === 'stopped' || loop.phase === 'error')) {
+          useHermesStore.getState().setLoopStatus(panelId, { phase: 'idle', iteration: 0 });
+        }
+      }
+
       // Plan gate: when this turn was a plan-mode send and the assistant
       // delivered a plan, park the text for the implementation gate. The live
       // checklist (plan_update events) is separate — this fires once at turn
@@ -2402,6 +2412,14 @@ When the user asks you to make changes:
       delete serverToolEventKeysRef.current.current;
       clearStreamRetryIndicator();
       setAgentStatus(null);
+      // Loop mode: a failed stream must release the phase too, or the toggle
+      // stays stuck mid-loop with no way to tell it's dead.
+      {
+        const loop = useHermesStore.getState().getLoop(panelId);
+        if (loop.enabled && loop.phase !== 'idle') {
+          useHermesStore.getState().setLoopStatus(panelId, { phase: 'idle', iteration: 0 });
+        }
+      }
       const errorMessage = getErrorMessage(err);
       console.error('[useChat:onError] Chat error:', errorMessage, 'provider:', effectiveProvider, 'model:', effectiveModel);
       if (errorMessage.includes('not configured')) {
