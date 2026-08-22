@@ -482,6 +482,105 @@ class NeedsAgentLoopParityTests(unittest.TestCase):
         self.assertIsNone(reason)
 
 
+
+class ExtractGatewayErrorTextTests(unittest.TestCase):
+    """Covers the error-text extraction used when /v1/runs rejects a submission."""
+
+    def test_error_dict_message_preferred(self):
+        text = hermes_runs.extract_gateway_error_text(
+            {"error": {"message": "  provider moa not supported  ", "code": "x"}}
+        )
+        self.assertEqual(text, "provider moa not supported")
+
+    def test_error_dict_falls_through_to_type_then_code(self):
+        self.assertEqual(
+            hermes_runs.extract_gateway_error_text({"error": {"type": "bad"}}), "bad"
+        )
+        self.assertEqual(
+            hermes_runs.extract_gateway_error_text({"error": {"code": "E42"}}), "E42"
+        )
+
+    def test_error_string(self):
+        self.assertEqual(hermes_runs.extract_gateway_error_text({"error": "boom"}), "boom")
+
+    def test_top_level_message_fallback(self):
+        self.assertEqual(
+            hermes_runs.extract_gateway_error_text({"message": "top-level msg"}),
+            "top-level msg",
+        )
+
+    def test_blank_values_skip_to_json_dump(self):
+        result = hermes_runs.extract_gateway_error_text({"error": {"message": "   "}})
+        # Blank strings are skipped; ends at JSON dump of the payload.
+        self.assertIn("error", result)
+        self.assertNotEqual(result.strip(), "")
+
+    def test_non_serializable_payload_returns_str(self):
+        class Unserializable:
+            pass
+
+        result = hermes_runs.extract_gateway_error_text({"error": Unserializable()})
+        # json.dumps fails → str(payload) fallback, still non-empty.
+        self.assertTrue(len(result) > 0)
+
+    def test_truncates_long_json_to_500_chars(self):
+        # No error/message fields → json.dumps fallback, capped at 500 chars.
+        payload = {"detail": "x" * 2000}
+        result = hermes_runs.extract_gateway_error_text(payload)
+        self.assertEqual(len(result), 500)
+
+
+class NeedsAgentLoopParityEdgeTests(unittest.TestCase):
+    """Branch edges not covered by NeedsAgentLoopParityTests."""
+
+    def test_whitespace_custom_cli_base_url_is_ignored(self):
+        needs, _ = hermes_runs.needs_agent_loop_parity(
+            runs_parity_available=True,
+            custom_cli_base_url="   ",
+            enabled_toolsets=["web", "browser", "terminal"],
+            default_toolsets=["web", "browser", "terminal"],
+        )
+        self.assertFalse(needs)
+
+    def test_provider_auto_and_default_are_not_explicit(self):
+        for provider in ("auto", "default", "", "   "):
+            with self.subTest(provider=provider):
+                needs, reason = hermes_runs.needs_agent_loop_parity(
+                    explicit_provider=provider,
+                    enabled_toolsets=["web", "browser", "terminal"],
+                    default_toolsets=["web", "browser", "terminal"],
+                )
+                self.assertFalse(needs)
+                self.assertIsNone(reason)
+
+    def test_blank_github_pat_is_not_explicit(self):
+        needs, reason = hermes_runs.needs_agent_loop_parity(github_pat="   ")
+        self.assertFalse(needs)
+        self.assertIsNone(reason)
+
+    def test_custom_tools_empty_list_is_not_explicit(self):
+        needs, reason = hermes_runs.needs_agent_loop_parity(custom_tools=[])
+        self.assertFalse(needs)
+        self.assertIsNone(reason)
+
+    def test_moa_case_insensitive_provider_match(self):
+        needs, reason = hermes_runs.needs_agent_loop_parity(
+            explicit_provider="MOA",
+            moa_provider_id="moa",
+            moa_runs_allowed=False,
+        )
+        self.assertTrue(needs)
+        self.assertIn("moa", reason or "")
+
+    def test_worktree_with_parity_but_repo_mode_still_forces_loop(self):
+        needs, reason = hermes_runs.needs_agent_loop_parity(
+            runs_parity_available=True,
+            worktree_active=True,
+            repo_mode=True,
+        )
+        self.assertTrue(needs)
+        self.assertIn("repo_mode", reason or "")
+
 class BuildRunSubmitBodyTests(unittest.TestCase):
     def test_minimal_body(self):
         body = hermes_runs.build_run_submit_body(
