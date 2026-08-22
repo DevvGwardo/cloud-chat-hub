@@ -13,7 +13,8 @@ import { motion } from 'framer-motion';
 import { Check, Loader2, X, AlertCircle, Sparkles, Download, RefreshCw, Copy } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { getApiBaseUrl } from '@/lib/api';
-import { OnboardingMotionConfig, SOFT_SPRING, SPRING, EASE_OUT } from '@/components/onboarding/motion';
+import { OnboardingMotionConfig } from '@/components/onboarding/motion';
+import { SOFT_SPRING, SPRING, EASE_OUT } from '@/components/onboarding/motion-presets';
 
 interface ServerBridgeStatus {
   pythonPath: string | null;

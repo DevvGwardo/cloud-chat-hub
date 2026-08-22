@@ -114,13 +114,4 @@ function ToastProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
-function useToastContext(): ToastContextValue {
-  const context = React.useContext(ToastContext);
-  if (!context) {
-    throw new Error('useToastContext must be used within ToastProvider');
-  }
-  return context;
-}
-
-export { ToastProvider, ToastContainer, useToastContext };
-export { toast as addToast, dismiss, clear } from '@/lib/toast';
+export { ToastProvider, ToastContainer };

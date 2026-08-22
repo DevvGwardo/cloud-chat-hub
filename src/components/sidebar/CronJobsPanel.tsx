@@ -345,7 +345,7 @@ export interface CronJobsPanelProps {
   conversationTitle?: string | null;
 }
 
-export function filterJobsForConversation(jobs: CronJob[], conversationId?: string | null): CronJob[] {
+function filterJobsForConversation(jobs: CronJob[], conversationId?: string | null): CronJob[] {
   if (!conversationId) {
     return jobs;
   }

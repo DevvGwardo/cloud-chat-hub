@@ -1,7 +1,7 @@
 import React from 'react';
 import { motion } from 'framer-motion';
 import { useTour, type ProviderProps, type StepType } from '@reactour/tour';
-import { SPRING } from '@/components/onboarding/motion';
+import { SPRING } from '@/components/onboarding/motion-presets';
 
 // Presentational step body — keeps every popover consistent with the dark, dense
 // UI. Re-keyed on the current step so the content replays its entrance each time

@@ -17,7 +17,8 @@ import { motion } from 'framer-motion';
 import { Check, Loader2, X, AlertCircle, Sparkles, Download, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { WebBridgeSetup } from './WebBridgeSetup';
-import { OnboardingMotionConfig, SOFT_SPRING, SPRING, EASE_OUT } from '@/components/onboarding/motion';
+import { OnboardingMotionConfig } from '@/components/onboarding/motion';
+import { SOFT_SPRING, SPRING, EASE_OUT } from '@/components/onboarding/motion-presets';
 
 type BridgeStatus = NonNullable<NonNullable<typeof window.electronAPI>['bridge']> extends infer B
   ? B extends { status: () => Promise<infer S> }

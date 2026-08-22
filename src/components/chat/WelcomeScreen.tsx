@@ -8,7 +8,8 @@ import { usePreviewStore } from '@/stores/preview-store';
 import { getApiBaseUrl, fetchRepoFileTreeResult } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { WelcomeHeroMark } from './WelcomeHeroMark';
-import { OnboardingMotionConfig, Stagger, StaggerItem, SOFT_SPRING, fadeInUp } from '@/components/onboarding/motion';
+import { OnboardingMotionConfig, Stagger, StaggerItem } from '@/components/onboarding/motion';
+import { SOFT_SPRING, fadeInUp } from '@/components/onboarding/motion-presets';
 
 interface GitHubRepo {
   id: number;
