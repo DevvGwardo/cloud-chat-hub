@@ -370,3 +370,118 @@ class AcpDispatchMappingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OutputTruncationEdgeTests(unittest.TestCase):
+    def test_exact_cap_not_truncated(self):
+        text = "x" * 500
+        self.assertEqual(bridge_events.output_truncation_info(text, 500), (False, 0))
+
+    def test_removed_tail_with_partial_line_counts_extra(self):
+        # Removed tail "a\nb" → one full line + one partial = 2.
+        self.assertEqual(bridge_events.output_truncation_info("head\na\nb", 5), (True, 2))
+
+    def test_empty_text(self):
+        self.assertEqual(bridge_events.output_truncation_info("", 10), (False, 0))
+
+
+class ExtractExitCodeEdgeTests(unittest.TestCase):
+    def test_exitCode_camel_case(self):
+        self.assertEqual(
+            bridge_events.extract_exit_code(SimpleNamespace(raw_output={"exitCode": 3})), 3
+        )
+
+    def test_negative_string_exit_code(self):
+        self.assertEqual(
+            bridge_events.extract_exit_code(SimpleNamespace(raw_output={"exit_code": "-9"})), -9
+        )
+
+    def test_non_int_non_numeric_string_ignored(self):
+        self.assertIsNone(
+            bridge_events.extract_exit_code(SimpleNamespace(raw_output={"exit_code": "sigterm"}))
+        )
+
+    def test_no_raw_output_attr(self):
+        self.assertIsNone(bridge_events.extract_exit_code(SimpleNamespace()))
+
+
+class ExtractApprovalCommandEdgeTests(unittest.TestCase):
+    def test_cmd_key_fallback(self):
+        tool_call = SimpleNamespace(raw_input={"cmd": "echo hi"})
+        self.assertEqual(bridge_events.extract_approval_command(tool_call), "echo hi")
+
+    def test_script_key_fallback(self):
+        tool_call = SimpleNamespace(raw_input={"script": "python x.py"})
+        self.assertEqual(bridge_events.extract_approval_command(tool_call), "python x.py")
+
+    def test_shell_key_fallback(self):
+        tool_call = SimpleNamespace(raw_input={"shell": "make all"})
+        self.assertEqual(bridge_events.extract_approval_command(tool_call), "make all")
+
+    def test_blank_values_skipped_in_priority_order(self):
+        tool_call = SimpleNamespace(raw_input={"command": "   ", "cmd": "real-cmd"})
+        self.assertEqual(bridge_events.extract_approval_command(tool_call), "real-cmd")
+
+    def test_long_commands_capped_at_2000(self):
+        tool_call = SimpleNamespace(raw_input={"command": "z" * 5000})
+        result = bridge_events.extract_approval_command(tool_call)
+        self.assertEqual(len(result), 2000)
+
+    def test_whitespace_only_bare_string_returns_none(self):
+        tool_call = SimpleNamespace(raw_input="   ")
+        self.assertIsNone(bridge_events.extract_approval_command(tool_call))
+
+
+class CallbackKwargCacheTests(unittest.TestCase):
+    def tearDown(self):
+        bridge_events._CALLBACK_KWARG_CACHE.clear()
+
+    def test_result_is_cached_by_identity(self):
+        calls = []
+
+        def cb(a, call_id=None):
+            calls.append(a)
+            return call_id
+
+        self.assertTrue(bridge_events.callback_accepts_kwarg(cb, "call_id"))
+        self.assertTrue(bridge_events.callback_accepts_kwarg(cb, "call_id"))
+        # Second probe served from cache — no re-introspection side effects.
+        self.assertTrue(bridge_events.callback_accepts_kwarg(cb, "call_id"))
+
+    def test_uninspectable_callback_returns_false(self):
+        class NotProbed:
+            __call__ = property(lambda self: None)  # signature() raises
+
+        cb = NotProbed()
+        self.assertFalse(bridge_events.callback_accepts_kwarg(cb, "call_id"))
+        # Cached False — second probe doesn't raise either.
+        self.assertFalse(bridge_events.callback_accepts_kwarg(cb, "call_id"))
+
+
+class ToolCallEndEventCoercionTests(unittest.TestCase):
+    def test_non_int_exit_code_coerced_to_null(self):
+        event = bridge_events.tool_call_end_event("c", "n", success=True, exit_code="7")
+        self.assertIsNone(event["exit_code"])
+
+    def test_duration_and_truncation_fields_coerced(self):
+        event = bridge_events.tool_call_end_event(
+            "c", "n", success=False,
+            duration_ms=None, output_truncated=1, output_truncated_lines="4",
+        )
+        self.assertEqual(event["duration_ms"], 0)
+        self.assertTrue(event["output_truncated"])
+        self.assertEqual(event["output_truncated_lines"], 4)
+
+
+class PlanModeFilterMalformedTests(unittest.TestCase):
+    def test_filter_toolsets_handles_none_and_junk(self):
+        self.assertEqual(bridge_events.filter_toolsets_for_plan_mode(None), [])
+        self.assertEqual(bridge_events.filter_toolsets_for_plan_mode(["web", 123]), ["web", 123])
+
+    def test_mutating_prefix_match_is_case_insensitive(self):
+        self.assertTrue(bridge_events.is_mutating_tool_name("  RUN_COMMAND "))
+        self.assertTrue(bridge_events.is_mutating_tool_name("Bash"))
+
+    def test_empty_name_not_mutating(self):
+        self.assertFalse(bridge_events.is_mutating_tool_name(""))
+        self.assertFalse(bridge_events.is_mutating_tool_name(None))

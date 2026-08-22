@@ -371,7 +371,7 @@ def is_mutating_tool_name(name: Any) -> bool:
 
 def filter_toolsets_for_plan_mode(toolsets: Any) -> list[str]:
     """Drop whole toolsets that are pure mutation/execution vectors."""
-    return [t for t in toolsets if str(t).strip().lower() not in PLAN_MODE_BLOCKED_TOOLSETS]
+    return [t for t in (toolsets or []) if str(t).strip().lower() not in PLAN_MODE_BLOCKED_TOOLSETS]
 
 
 def filter_tool_defs_for_plan_mode(tool_defs: Any) -> list[dict]:
