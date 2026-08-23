@@ -4927,6 +4927,20 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
 
     #   0. Explicit provider header (strongest — caller named the provider)
     model_prefix_provider = _resolve_provider_from_model(body.model)
+    # A vendor prefix only names the provider when we can verify it against a
+    # catalog. When the catalog is empty/unknown (no hermes_cli.models import,
+    # fresh installs, CI), the prefix is unverified guesswork — an explicit
+    # config.yaml provider or auth.json active_provider naming a DIFFERENT
+    # provider must win instead of 401-ing at the guessed native API.
+    if (
+        model_prefix_provider
+        and not _models_for_provider(model_prefix_provider)
+        and (
+            (cli_provider and cli_provider in _PROVIDER_CONFIG and cli_provider != model_prefix_provider)
+            or (active_provider and active_provider in _PROVIDER_CONFIG and active_provider != model_prefix_provider)
+        )
+    ):
+        model_prefix_provider = None
     # Synthetic CLI custom id from /v1/providers (e.g. custom:api.bullinf.fun).
     # Treat as an explicit request to use config.yaml's custom base_url — NOT openrouter.
     cli_custom_id = _synthetic_cli_provider_id(cli_cfg) if cli_is_custom else ""

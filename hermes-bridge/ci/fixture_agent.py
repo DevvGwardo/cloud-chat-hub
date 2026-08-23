@@ -38,27 +38,27 @@ class _Entry:
 
 class ToolRegistry:
     def __init__(self):
-        self._entries = {}
+        self._tools = {}
 
     def register(self, name=None, toolset=None, schema=None, handler=None,
                  check_fn=None, override=False, **kwargs):
-        self._entries[name] = _Entry(name, toolset, schema, handler, check_fn)
+        self._tools[name] = _Entry(name, toolset, schema, handler, check_fn)
 
     def deregister(self, name):
-        self._entries.pop(name, None)
+        self._tools.pop(name, None)
 
     def get_entry(self, name):
-        return self._entries.get(name)
+        return self._tools.get(name)
 
     def get_definitions(self, toolset=None, **kwargs):
-        return [e.schema for e in self._entries.values()
+        return [e.schema for e in self._tools.values()
                 if toolset is None or e.toolset == toolset]
 
     def register_toolset_alias(self, alias, target, **kwargs):
         pass
 
     def dispatch(self, name, *args, **kwargs):
-        entry = self._entries.get(name)
+        entry = self._tools.get(name)
         if entry and entry.handler:
             return entry.handler(*args, **kwargs)
         raise KeyError(name)
