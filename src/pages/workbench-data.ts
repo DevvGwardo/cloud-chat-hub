@@ -15,7 +15,14 @@
 
 // ── Live counts (computed at runtime — cannot drift) ──────────────────────
 
-const srcModules = import.meta.glob('/src/**/*.{ts,tsx}', { eager: false });
+// `query: '?url'` on the counting globs: we only need file PATHS, never the
+// module code. Default globbing turns every match into a dynamic import,
+// which drags server-only code (crypto, fs) into the browser bundle and
+// breaks `vite build`.
+const srcModules = import.meta.glob('/src/**/*.{ts,tsx}', {
+  query: '?url',
+  import: 'default',
+});
 const bridgeTests = import.meta.glob('/hermes-bridge/test_*.py', {
   query: '?raw',
   import: 'default',
@@ -33,8 +40,12 @@ function countByDirectory(paths: string[]): Record<string, number> {
 
 export const LIVE_COUNTS = (() => {
   const allSrc = Object.keys(srcModules).filter((p) => !/\.test\.(ts|tsx)$/.test(p));
-  const frontendSuites = Object.keys(import.meta.glob('/src/test/*.test.{ts,tsx}')).length;
-  const serverSuites = Object.keys(import.meta.glob('/server/__tests__/*.test.ts')).length;
+  const frontendSuites = Object.keys(
+    import.meta.glob('/src/test/*.test.{ts,tsx}', { query: '?url', import: 'default' }),
+  ).length;
+  const serverSuites = Object.keys(
+    import.meta.glob('/server/__tests__/*.test.ts', { query: '?url', import: 'default' }),
+  ).length;
   return {
     totalModules: allSrc.length,
     bridgeTestFiles: Object.keys(bridgeTests).length,
