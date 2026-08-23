@@ -1,5 +1,6 @@
-import { createContext, useContext } from 'react';
 import type { ReactNode } from 'react';
+
+import { CommandCallbacksContext } from './command-callbacks-context-value';
 
 export interface CommandCallbacks {
   stopAgent?: () => void;
@@ -14,8 +15,6 @@ export interface CommandCallbacks {
   resumeSession?: (sessionId?: string) => Promise<string>;
 }
 
-const CommandCallbacksContext = createContext<CommandCallbacks>({});
-
 export function CommandCallbacksProvider({
   callbacks,
   children,
@@ -28,8 +27,4 @@ export function CommandCallbacksProvider({
       {children}
     </CommandCallbacksContext.Provider>
   );
-}
-
-export function useCommandCallbacks(): CommandCallbacks {
-  return useContext(CommandCallbacksContext);
 }

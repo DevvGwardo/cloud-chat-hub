@@ -301,6 +301,15 @@ export interface AcpApprovalRequest {
   summary?: string;
   excerpt?: string;
   options?: Array<{ option_id: string; name: string }>;
+  /** Extended contract (bridge + server): shell command under approval. */
+  command?: string;
+  /** Working directory for the command. */
+  cwd?: string;
+  /** Human-readable reason for the approval request. */
+  reason?: string;
+  /** Fixed decision set the backend accepts for this request (server
+   *  approval-engine and the enriched bridge payloads both emit it). */
+  available_decisions?: string[];
 }
 
 /** The user's decision on an ACP permission request (once/session/always/deny). */
@@ -318,6 +327,78 @@ export async function postAcpApproval(
     method: 'POST',
     body: JSON.stringify({ option_id: optionId }),
   });
+}
+
+// ─── Server-side tool approvals (approval-engine) ───────────────────────────
+
+/** Decision on a server-side tool approval (POST /api/hermes/approvals/:id). */
+export type ServerApprovalDecision = 'approved' | 'approved_for_session' | 'denied';
+
+/**
+ * POST a server-side tool approval decision. The Express server resolves
+ * parked approvals from its approval-engine; the contract mirrors the
+ * bridge's ACP /v1/approvals/{id} flow so the client uses one endpoint for
+ * both paths.
+ */
+export async function postServerApproval(
+  approvalId: string,
+  decision: ServerApprovalDecision,
+  reason?: string,
+): Promise<{ ok: boolean; approval_id: string; decision: string }> {
+  return hermesFetch<{ ok: boolean; approval_id: string; decision: string }>(
+    `/approvals/${encodeURIComponent(approvalId)}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ decision, ...(reason ? { reason } : {}) }),
+    },
+  );
+}
+
+/**
+ * Map a unified ladder decision onto the bridge's ACP option_ids. Used by
+ * the direct-to-bridge fallback for approvals the Express server doesn't own.
+ */
+export function acpOptionIdForDecision(decision: ServerApprovalDecision | 'prefix'): AcpApprovalDecision {
+  switch (decision) {
+    case 'approved':
+      return 'allow_once';
+    case 'approved_for_session':
+      return 'allow_session';
+    case 'denied':
+      return 'deny';
+    case 'prefix':
+      return 'allow_always';
+  }
+}
+
+/**
+ * Direct-to-bridge fallback for ACP approvals when the Express server can't
+ * resolve them (its approvals route only knows server-side parked approvals).
+ * Uses the Electron-managed bridge port; resolves to false in plain web
+ * contexts where the bridge isn't reachable from the browser.
+ */
+export async function postBridgeAcpApprovalDirect(
+  approvalId: string,
+  decision: ServerApprovalDecision | 'prefix',
+): Promise<boolean> {
+  try {
+    const status = await window.electronAPI?.bridge?.status();
+    const port = status?.bridgePort;
+    if (!port) {
+      return false;
+    }
+    const response = await fetch(
+      `http://127.0.0.1:${port}/v1/approvals/${encodeURIComponent(approvalId)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ option_id: acpOptionIdForDecision(decision) }),
+      },
+    );
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 export async function fetchMoaConfig(): Promise<MoaConfig> {

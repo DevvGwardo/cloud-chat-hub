@@ -1,29 +1,119 @@
 import React, { useCallback, useState } from 'react';
 import { ShieldAlert } from 'lucide-react';
 import { useHermesStore } from '@/stores/hermes-store';
-import { postAcpApproval } from '@/lib/hermes-api';
+import {
+  HermesApiError,
+  postAcpApproval,
+  postBridgeAcpApprovalDirect,
+  postServerApproval,
+  type AcpApprovalDecision,
+  type ServerApprovalDecision,
+} from '@/lib/hermes-api';
 import { cn } from '@/lib/utils';
+import { usePanelId } from '@/hooks/use-panel-context';
+
+/** Unified ladder decisions: server approvals accept the first three; the
+ *  optional 4th ("Always for prefix") is sent as decision "approved" with
+ *  reason "prefix" so the server approval-engine inserts a durable prefix
+ *  rule (kind: 'prefix') that auto-approves future commands with the same
+ *  prefix. */
+type LadderDecision = ServerApprovalDecision | 'prefix';
+
+function legacyOptionIdForDecision(decision: LadderDecision): AcpApprovalDecision {
+  switch (decision) {
+    case 'approved':
+      return 'allow_once';
+    case 'approved_for_session':
+      return 'allow_session';
+    case 'denied':
+      return 'deny';
+    case 'prefix':
+      return 'allow_always';
+  }
+}
+
+function commandPrefix(command: string | undefined, max = 40): string {
+  if (!command) {
+    return '';
+  }
+  const trimmed = command.trim();
+  const prefix = trimmed.split(/\s+/).slice(0, 2).join(' ');
+  return prefix.length > max ? `${prefix.slice(0, max - 1)}…` : prefix;
+}
 
 /**
- * Inline banner for ACP permission requests: the real hermes-agent paused a
- * risky tool (edit, terminal, …) and is waiting on the user's decision. The
- * choice is POSTed to the bridge, which resolves the agent's parked request.
+ * Inline banner for tool permission requests — renders for BOTH the real
+ * hermes-agent's ACP approvals (resolved by the bridge) and the new
+ * server-side tool approvals (approval-engine, resolved by the Express
+ * server). The ladder maps available_decisions onto buttons; the choice is
+ * POSTed with the unified {decision, reason?} contract to
+ * /api/hermes/approvals/{id}, falling back to the bridge's own
+ * /v1/approvals/{id} (option_id contract) for ACP approvals the server
+ * doesn't own.
  */
 export const AcpApprovalBanner: React.FC = () => {
   const pending = useHermesStore((state) => state.pendingAcpApproval);
   const setPendingAcpApproval = useHermesStore((state) => state.setPendingAcpApproval);
+  const panelId = usePanelId();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const decide = useCallback(
-    async (optionId: 'allow_once' | 'allow_session' | 'allow_always' | 'deny') => {
+    async (decision: LadderDecision) => {
       if (!pending) {
         return;
       }
       setBusy(true);
       setError(null);
+      const approved = decision !== 'denied';
       try {
-        await postAcpApproval(pending.approval_id, optionId);
+        const hasUnifiedContract =
+          Array.isArray(pending.available_decisions) && pending.available_decisions.length > 0;
+        if (hasUnifiedContract) {
+          const serverDecision: ServerApprovalDecision =
+            decision === 'prefix' ? 'approved' : decision;
+          try {
+            await postServerApproval(
+              pending.approval_id,
+              serverDecision,
+              decision === 'prefix' ? 'prefix' : undefined,
+            );
+          } catch (err) {
+            // The server route only knows its own parked approvals. ACP
+            // payloads carry a session_id — deliver those straight to the
+            // bridge (option_id contract) via its own port.
+            const isBridgeAcp = typeof pending.session_id === 'string' && pending.session_id.length > 0;
+            if (!isBridgeAcp || !(err instanceof HermesApiError)) {
+              throw err;
+            }
+            const delivered = await postBridgeAcpApprovalDirect(pending.approval_id, decision);
+            if (!delivered) {
+              throw new Error('Approval could not be delivered to the agent (unknown or expired).');
+            }
+          }
+        } else {
+          // Legacy ACP payloads (options only) — existing bridge flow.
+          const optionId = legacyOptionIdForDecision(decision);
+          try {
+            await postAcpApproval(pending.approval_id, optionId);
+          } catch (err) {
+            if (!(err instanceof HermesApiError)) {
+              throw err;
+            }
+            const delivered = await postBridgeAcpApprovalDirect(pending.approval_id, decision);
+            if (!delivered) {
+              throw err;
+            }
+          }
+        }
+        // One-line assistant-side audit entry appended to the transcript by
+        // the chat runtime (persisted like other messages).
+        useHermesStore.getState().requestChatAction(panelId, {
+          kind: 'approval_audit',
+          tool: pending.tool,
+          command: pending.command,
+          approved,
+        });
         setPendingAcpApproval(null);
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to send decision');
@@ -31,7 +121,7 @@ export const AcpApprovalBanner: React.FC = () => {
         setBusy(false);
       }
     },
-    [pending, setPendingAcpApproval],
+    [panelId, pending, setPendingAcpApproval],
   );
 
   if (!pending) {
@@ -42,9 +132,24 @@ export const AcpApprovalBanner: React.FC = () => {
   const detail = pending.summary && pending.excerpt && pending.excerpt !== pending.summary
     ? pending.excerpt
     : null;
-  const options = pending.options ?? [];
-  const hasSession = options.some((o) => o.option_id === 'allow_session');
-  const hasAlways = options.some((o) => o.option_id === 'allow_always');
+  const decisions = pending.available_decisions ?? [];
+  const unified = decisions.length > 0;
+  const hasApproved = !unified || decisions.includes('approved');
+  const hasApprovedSession = !unified || decisions.includes('approved_for_session');
+  const hasDenied = !unified || decisions.includes('denied');
+  // "Always for prefix" is only offered when the payload carries a command
+  // and the session-scoped decision it maps to is available.
+  const hasPrefix = Boolean(pending.command && hasApprovedSession);
+  const prefixLabel = commandPrefix(pending.command);
+
+  const buttonClass = (tone: 'default' | 'danger') =>
+    cn(
+      'inline-flex items-center justify-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors duration-150',
+      tone === 'danger'
+        ? 'border-destructive/40 bg-background/70 text-destructive hover:bg-destructive/10'
+        : 'border-border/60 bg-background/70 text-foreground hover:bg-muted',
+      busy && 'opacity-60',
+    );
 
   return (
     <div className="mt-2" data-testid="acp-approval-banner">
@@ -70,7 +175,23 @@ export const AcpApprovalBanner: React.FC = () => {
               {headline}
             </p>
 
-            {detail && (
+            {pending.command && (
+              <div className="mt-1.5">
+                <pre className="overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/40 bg-muted/30 px-2.5 py-2 font-mono text-[11px] leading-5 text-foreground/90">
+                  {pending.command}
+                </pre>
+                <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground/60">
+                  {pending.cwd ? (
+                    <span className="font-mono truncate" title={pending.cwd}>{pending.cwd}</span>
+                  ) : null}
+                  {pending.reason ? (
+                    <span className="italic">{pending.reason}</span>
+                  ) : null}
+                </div>
+              </div>
+            )}
+
+            {!pending.command && detail && (
               <p className="mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/40 bg-muted/30 px-2.5 py-2 font-mono text-[11px] leading-5 text-muted-foreground">
                 {detail}
               </p>
@@ -85,58 +206,47 @@ export const AcpApprovalBanner: React.FC = () => {
 
           <div className="flex shrink-0 flex-col items-stretch gap-2 sm:items-end">
             <div className="flex flex-col gap-2 sm:flex-row">
-              <button
-                type="button"
-                onClick={() => decide('allow_once')}
-                disabled={busy}
-                className={cn(
-                  'inline-flex items-center justify-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors duration-150',
-                  'border-border/60 bg-background/70 text-foreground hover:bg-muted',
-                  busy && 'opacity-60',
-                )}
-              >
-                Allow once
-              </button>
-              {hasSession && (
+              {hasApproved && (
                 <button
                   type="button"
-                  onClick={() => decide('allow_session')}
+                  onClick={() => decide('approved')}
                   disabled={busy}
-                  className={cn(
-                    'inline-flex items-center justify-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors duration-150',
-                    'border-border/60 bg-background/70 text-foreground hover:bg-muted',
-                    busy && 'opacity-60',
-                  )}
+                  className={buttonClass('default')}
                 >
-                  Allow for session
+                  Approve once
                 </button>
               )}
-              {hasAlways && (
+              {hasApprovedSession && (
                 <button
                   type="button"
-                  onClick={() => decide('allow_always')}
+                  onClick={() => decide('approved_for_session')}
                   disabled={busy}
-                  className={cn(
-                    'inline-flex items-center justify-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors duration-150',
-                    'border-border/60 bg-background/70 text-foreground hover:bg-muted',
-                    busy && 'opacity-60',
-                  )}
+                  className={buttonClass('default')}
                 >
-                  Allow always
+                  Approve for session
                 </button>
               )}
-              <button
-                type="button"
-                onClick={() => decide('deny')}
-                disabled={busy}
-                className={cn(
-                  'inline-flex items-center justify-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors duration-150',
-                  'border-destructive/40 bg-background/70 text-destructive hover:bg-destructive/10',
-                  busy && 'opacity-60',
-                )}
-              >
-                Deny
-              </button>
+              {hasPrefix && (
+                <button
+                  type="button"
+                  onClick={() => decide('prefix')}
+                  disabled={busy}
+                  className={buttonClass('default')}
+                  title={`Always allow ${prefixLabel}…`}
+                >
+                  Always for prefix
+                </button>
+              )}
+              {hasDenied && (
+                <button
+                  type="button"
+                  onClick={() => decide('denied')}
+                  disabled={busy}
+                  className={buttonClass('danger')}
+                >
+                  Deny
+                </button>
+              )}
             </div>
           </div>
         </div>

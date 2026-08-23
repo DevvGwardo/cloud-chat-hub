@@ -3,7 +3,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { generateSuggestions, type ContextualSuggestion } from '@/lib/contextual-suggestions';
 import { useChangesetStore } from '@/stores/changeset-store';
-import { useChatScopeId } from '@/contexts/PanelContext';
+import { useChatScopeId } from '@/hooks/use-panel-context';
 
 interface ContextualSuggestionsProps {
   messages: { role: string; content: string }[];
@@ -46,7 +46,7 @@ export const ContextualSuggestions: React.FC<ContextualSuggestionsProps> = ({
     }
 
     const result = generateSuggestions({
-      lastAssistantContent: lastAssistant?.content || '',
+      lastAssistantContent: lastAssistant.content,
       lastUserContent: lastUser?.content || '',
       hasRepo: isRepoMode,
       hasChanges: changeCount > 0,
@@ -60,7 +60,7 @@ export const ContextualSuggestions: React.FC<ContextualSuggestionsProps> = ({
       setVisible(result.length > 0);
     }, 300);
     return () => clearTimeout(timer);
-  }, [isStreaming, messages.length, lastAssistant?.content, lastUser?.content, isRepoMode, changeCount, dismissed]);
+  }, [isStreaming, messages.length, lastAssistant, lastUser, isRepoMode, changeCount, dismissed]);
 
   // Track scroll state for arrow indicators
   const updateScrollState = useCallback(() => {

@@ -17,6 +17,15 @@ import httpx
 import pricing
 import mcp_telemetry
 import delegation_live
+from bridge_events import (
+    build_plan_update_event,
+    filter_toolsets_for_plan_mode,
+    output_truncation_info,
+    stream_retry_event,
+    todo_plan_steps,
+    tool_call_begin_event,
+    tool_call_end_event,
+)
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -2480,6 +2489,91 @@ _PROVIDER_CONFIG: dict[str, dict] = {
         "auth_json_provider": "custom:Cursor-Composer",
         "env_var": "CURSOR_API_KEY",
     },
+    # --- Providers synced from hermes-agent's PROVIDER_REGISTRY (hermes_cli/auth.py) ---
+    # Sync check:
+    #   python3 -c "import re;auth=open('~/.hermes/hermes-agent/hermes_cli/auth.py').read();\
+    #   ids=set(re.findall(r'id=\"([a-z0-9_]+)\"',auth));main=open('hermes-bridge/main.py').read();\
+    #   m=re.search(r'_PROVIDER_CONFIG[^=]*=\s*\{',main);keys=set(re.findall(r'\"([a-z0-9_]+)\":\s*\{',main[m.end():]));\
+    #   print(sorted(ids-keys))"
+    "xiaomi": {
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "name": "Xiaomi MiMo",
+        "model_prefixes": ["xiaomi/", "mimo"],
+        "auth_json_provider": "xiaomi",
+        "env_var": "XIAOMI_API_KEY",
+    },
+    "gemini": {
+        # Distinct registry id upstream; same endpoint as google/ai-studio.
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "name": "Google AI Studio (gemini)",
+        "model_prefixes": ["gemini/"],
+        "auth_json_provider": "gemini",
+        "env_var": "GEMINI_API_KEY",
+    },
+    "lmstudio": {
+        "base_url": "http://127.0.0.1:1234/v1",
+        "name": "LM Studio (local)",
+        "model_prefixes": ["lmstudio/"],
+        "auth_json_provider": "lmstudio",
+        "env_var": "LM_API_KEY",
+    },
+    "copilot": {
+        "base_url": "https://api.githubcopilot.com",
+        "name": "GitHub Copilot",
+        "model_prefixes": ["copilot/"],
+        "auth_json_provider": "copilot",
+        "env_var": "COPILOT_GITHUB_TOKEN",
+    },
+    "stepfun": {
+        "base_url": "https://api.stepfun.ai/step_plan/v1",
+        "name": "StepFun Step Plan",
+        "model_prefixes": ["stepfun/"],
+        "auth_json_provider": "stepfun",
+        "env_var": "STEPFUN_API_KEY",
+    },
+    "arcee": {
+        "base_url": "https://api.arcee.ai/api/v1",
+        "name": "Arcee AI",
+        "model_prefixes": ["arcee/"],
+        "auth_json_provider": "arcee",
+        "env_var": "ARCEEAI_API_KEY",
+    },
+    "gmi": {
+        "base_url": "https://api.gmi-serving.com/v1",
+        "name": "GMI Cloud",
+        "model_prefixes": ["gmi/"],
+        "auth_json_provider": "gmi",
+        "env_var": "GMI_API_KEY",
+    },
+    "actual": {
+        "base_url": "https://api.actual.inc/v1",
+        "name": "Actual Computer",
+        "model_prefixes": ["actual/"],
+        "auth_json_provider": "actual",
+        "env_var": "ACTUAL_API_KEY",
+    },
+    "nvidia": {
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "name": "NVIDIA NIM",
+        "model_prefixes": ["nvidia/", "nvidia-nim/"],
+        "auth_json_provider": "nvidia",
+        "env_var": "NVIDIA_API_KEY",
+    },
+    # aws_sdk / vertex auth types — no bearer-token proxying via the bridge;
+    # registered so model-prefix routing and /health credential reporting
+    # recognize them instead of falling through to OpenRouter with a wrong key.
+    "bedrock": {
+        "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "name": "AWS Bedrock (no bridge proxying — SDK auth)",
+        "model_prefixes": ["bedrock/"],
+        "auth_json_provider": "bedrock",
+    },
+    "vertex": {
+        "base_url": "",
+        "name": "Google Vertex AI (no bridge proxying — ADC auth)",
+        "model_prefixes": ["vertex/"],
+        "auth_json_provider": "vertex",
+    },
 }
 
 # Build a reverse lookup: model_prefix → provider_id
@@ -2489,9 +2583,33 @@ for _pid, _cfg in _PROVIDER_CONFIG.items():
         _MODEL_PREFIX_TO_PROVIDER[_pfx] = _pid
 
 # Known hosts for custom base_url detection
+def _known_host_label(hostname: str) -> str:
+    """Collapse a provider's public host to its matchable form.
+
+    Strips only a LEADING ``api.`` / ``www.`` label. ``str.replace`` also
+    mangled hosts where those labels appear mid-name — e.g. Nous's
+    ``inference-api.nousresearch.com`` became ``inference-nousresearch.com``,
+    an entry that never substring-matches the real base_url, so the native
+    nous config was misclassified as a custom endpoint (bogus synthetic
+    ``custom:<host>`` provider row + stale UI pins routing to OpenRouter).
+    """
+    for prefix in ("api.", "www."):
+        if hostname.startswith(prefix):
+            return hostname[len(prefix):]
+    return hostname
+
+
 _KNOWN_HOSTS: tuple[str, ...] = tuple(
-    {u.split("://")[-1].split("/")[0].replace("api.", "").replace("www.", "")
-     for u in [_c["base_url"] for _c in _PROVIDER_CONFIG.values()]}
+    # Filter empty strings: a provider entry with base_url "" (e.g. vertex,
+    # resolved at request time) would otherwise yield "" as a host and
+    # `"" in url` is always True — silently marking every base_url "known"
+    # and killing the cli_is_custom passthrough path.
+    h
+    for h in {
+        _known_host_label(u.split("://")[-1].split("/")[0])
+        for u in [_c["base_url"] for _c in _PROVIDER_CONFIG.values()]
+    }
+    if h
 )
 
 # Backward-compatible constants
@@ -2920,9 +3038,12 @@ except Exception:
 # Bridge provider id → hermes_cli provider id (where they differ)
 _BRIDGE_TO_CLI_PROVIDER = {
     "anthropic": "anthropic", "deepseek": "deepseek", "google": "gemini",
-    "openai": "openai-api", "xai": "xai", "kimi": "kimi-coding",
+    "gemini": "gemini", "openai": "openai-api", "xai": "xai", "kimi": "kimi-coding",
     "zai": "zai", "alibaba": "alibaba", "huggingface": "huggingface",
     "kilocode": "kilocode", "nous": "nous", "minimax": "minimax",
+    "xiaomi": "xiaomi", "copilot": "copilot", "stepfun": "stepfun",
+    "arcee": "arcee", "gmi": "gmi", "actual": "actual", "nvidia": "nvidia",
+    "lmstudio": "lmstudio",
 }
 
 # Static fallbacks for bridge ids with no clean cli source.
@@ -3176,6 +3297,24 @@ def _default_model_credentialed(hermes_home: Optional[Path] = None) -> bool:
     if provider and _get_credential_pool_key(provider):
         return True
     return bool(_get_local_gateway_key())
+
+
+def _provider_ids_for_chat_routing(profile_home: Optional[Path] = None) -> set[str]:
+    """Provider ids a chat request may legitimately pin via x-hermes-provider.
+
+    Mirrors what /v1/providers exposes: the built-in _PROVIDER_CONFIG ids, the
+    synthetic CLI custom endpoint id (custom:<host> / custom:<name>), and the
+    MoA virtual provider. A pin outside this set is stale UI state (the CLI
+    config moved on) and must be dropped rather than forwarded to routing —
+    forwarding it makes the real agent resolve an unknown custom endpoint and
+    400 at OpenRouter with "<host>:<model> is not a valid model ID".
+    """
+    ids = set(_PROVIDER_CONFIG.keys())
+    ids.add(MOA_PROVIDER_ID)
+    cfg = _load_cli_model_config(profile_home)
+    if _cli_config_is_custom(cfg):
+        ids.add(_synthetic_cli_provider_id(cfg))
+    return ids
 
 
 @app.get("/health")
@@ -4590,6 +4729,18 @@ def _finalize_tracked_session(
 async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
     toolsets_header = request.headers.get("x-hermes-toolsets", DEFAULT_TOOLSETS)
     enabled_toolsets = [t.strip() for t in toolsets_header.split(",") if t.strip()]
+    # Plan mode: mutating tools are stripped before the agent is built (the
+    # server sends this in the request extra fields for the streamText path).
+    plan_mode = bool((body.model_extra or {}).get("plan_mode"))
+    if plan_mode:
+        print(f"[hermes-bridge] plan_mode: stripping mutating toolsets from {enabled_toolsets}", flush=True)
+    # Wall-clock run budget (seconds) — optional request extra, forwarded to
+    # the real AIAgent (agent.run_budget_seconds). 0/absent = unlimited.
+    _raw_budget = (body.model_extra or {}).get("run_budget_seconds")
+    try:
+        run_budget_seconds = max(0, int(_raw_budget)) if _raw_budget else None
+    except (TypeError, ValueError):
+        run_budget_seconds = None
     execution_mode = request.headers.get("x-hermes-execution-mode", "agent-loop").strip().lower() or "agent-loop"
     request_profile = _resolve_profile_name(request)
     repo_owner = request.headers.get("x-hermes-repo-owner", "")
@@ -4776,6 +4927,20 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
 
     #   0. Explicit provider header (strongest — caller named the provider)
     model_prefix_provider = _resolve_provider_from_model(body.model)
+    # A vendor prefix only names the provider when we can verify it against a
+    # catalog. When the catalog is empty/unknown (no hermes_cli.models import,
+    # fresh installs, CI), the prefix is unverified guesswork — an explicit
+    # config.yaml provider or auth.json active_provider naming a DIFFERENT
+    # provider must win instead of 401-ing at the guessed native API.
+    if (
+        model_prefix_provider
+        and not _models_for_provider(model_prefix_provider)
+        and (
+            (cli_provider and cli_provider in _PROVIDER_CONFIG and cli_provider != model_prefix_provider)
+            or (active_provider and active_provider in _PROVIDER_CONFIG and active_provider != model_prefix_provider)
+        )
+    ):
+        model_prefix_provider = None
     # Synthetic CLI custom id from /v1/providers (e.g. custom:api.bullinf.fun).
     # Treat as an explicit request to use config.yaml's custom base_url — NOT openrouter.
     cli_custom_id = _synthetic_cli_provider_id(cli_cfg) if cli_is_custom else ""
@@ -5314,9 +5479,24 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             resources.append(resource)
         return resources
 
-    def on_tool_start(tool_name: str, tool_input: str):
+    # Structured tool-call state for the agent-loop transport (worker-thread
+    # callbacks may fire from parallel tool execution, hence the lock).
+    tool_state_lock = threading.Lock()
+    _active_tool_state: dict = {}  # call_id -> {"ts": monotonic, "name": tool}
+    _pending_tool_ids: dict[str, list] = {}  # tool_name -> [call_ids] (FIFO fallback)
+
+    def on_tool_start(tool_name: str, tool_input: str, call_id: Optional[str] = None):
         # Record MCP tool activity for the MCP dashboard (no-op for non-mcp_ tools).
         mcp_telemetry.record_tool_start(tool_name, tool_input)
+        # Structured tool_call_begin: stable call_id across begin/delta/end.
+        # Agents that know the provider's tool_call id pass it through; the
+        # bridge generates one otherwise and pairs begin/end FIFO per tool.
+        with tool_state_lock:
+            if call_id is None:
+                call_id = f"hermes-{uuid.uuid4().hex[:16]}"
+                _pending_tool_ids.setdefault(tool_name, []).append(call_id)
+            _active_tool_state[call_id] = {"ts": time.monotonic(), "name": tool_name}
+        _qput(("tool_call_begin", tool_call_begin_event(call_id, tool_name)))
         # Emit tool start as visible text so user sees activity
         _qput(("tool_start", tool_name, tool_input))
         _append_session_chat_chunk(
@@ -5329,13 +5509,41 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             for resource in _repo_claim_resources(tool_name, tool_input):
                 _brain_claim(resource, ttl=120)
 
-    def on_tool_end(tool_name: str, tool_input: str, tool_output: str):
+    def on_tool_end(
+        tool_name: str,
+        tool_input: str,
+        tool_output: str,
+        call_id: Optional[str] = None,
+        exit_code: Optional[int] = None,
+        output_truncated: bool = False,
+        output_truncated_lines: int = 0,
+    ):
         # The composer task panel parses these tools' JSON output (todo lists,
         # subagent results, background process previews) — a 500-char cap
         # truncates the JSON mid-document, so give them more headroom.
         cap = 4000 if tool_name in ("todo", "delegate_task", "process", "terminal") else 500
         # Record MCP tool completion (latency, ok/err) for the MCP dashboard.
         mcp_telemetry.record_tool_end(tool_name, tool_output)
+        # Pair the end with the matching begin (agent-provided id wins).
+        with tool_state_lock:
+            if call_id is None:
+                pending = _pending_tool_ids.get(tool_name) or []
+                call_id = pending.pop(0) if pending else f"hermes-{uuid.uuid4().hex[:16]}"
+            state = _active_tool_state.pop(call_id, {})
+        started_ts = state.get("ts")
+        duration_ms = int((time.monotonic() - started_ts) * 1000) if started_ts else 0
+        if not output_truncated:
+            output_truncated, output_truncated_lines = output_truncation_info(tool_output, cap)
+        success = not (tool_output or "").strip().lower().startswith(("error:", "failed:"))
+        _qput(("tool_call_end", tool_call_end_event(
+            call_id,
+            tool_name,
+            success=success,
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            output_truncated=output_truncated,
+            output_truncated_lines=output_truncated_lines,
+        )))
         _qput(("tool_end", tool_name, tool_output[:cap]))
         _append_session_chat_chunk(
             session_id,
@@ -5346,6 +5554,12 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
         if tool_name in REPO_EDIT_TOOL_NAMES:
             for resource in _repo_claim_resources(tool_name, tool_input):
                 _brain_release(resource)
+        # Plan mode-ish: the hermes ``todo`` tool carries a checklist — surface
+        # it as a structured plan_update when parseable (agent-loop path).
+        if tool_name == "todo":
+            steps = todo_plan_steps(tool_output)
+            if steps:
+                _qput(("plan_update", {"type": "plan_update", "steps": steps}))
 
     def on_text(text: str):
         _append_session_chat_chunk(session_id, "assistant", text)
@@ -5378,8 +5592,20 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
             event["reason"] = reason
         _qput(("transport_status", event))
 
+    def on_stream_retry(attempt: int, max_attempts: int, reason: str, delay_ms: int):
+        # The agent-loop retried an upstream stream — surface it once per retry.
+        _qput(("stream_retry", stream_retry_event(attempt, max_attempts, reason, delay_ms)))
+
     def on_computer_use_frame(frame: dict):
         _qput(("computer_use_frame", frame))
+
+    def on_notice(notice: dict):
+        # Structured AgentNotice (credits warnings, run-budget wrap-up) from
+        # the real hermes agent — surfaced as an SSE agent_notice event.
+        _qput(("agent_notice", notice))
+
+    def on_notice_clear(key: str):
+        _qput(("agent_notice_clear", {"key": key}))
 
     def _run_agent_sync():
         wt_info = None
@@ -5486,6 +5712,8 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                 if worktree_active
                 else enabled_toolsets
             )
+            if plan_mode:
+                agent_toolsets = filter_toolsets_for_plan_mode(agent_toolsets)
             agent_repo_mode = has_repo_tools and not worktree_active
             if worktree_active and has_repo_tools:
                 print(
@@ -5643,14 +5871,21 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                 "custom_tools": custom_tools,
                 "workspace_id": workspace_id,
                 "reasoning_effort": reasoning_effort,
+                "plan_mode": plan_mode,
                 "on_tool_start": on_tool_start,
                 "on_tool_end": on_tool_end,
                 "on_text": on_text,
                 "on_server_tool_event": on_server_tool_event,
+                "on_stream_retry": on_stream_retry,
             }
             if _using_real_agent:
                 agent_kwargs["on_fallback_switch"] = on_fallback_switch
                 agent_kwargs["on_computer_use_frame"] = on_computer_use_frame
+                # Structured notices (credits/run-budget) — real-agent only.
+                agent_kwargs["on_notice"] = on_notice
+                agent_kwargs["on_notice_clear"] = on_notice_clear
+                if run_budget_seconds:
+                    agent_kwargs["run_budget_seconds"] = run_budget_seconds
             if resolved_provider == MOA_PROVIDER_ID:
                 agent_kwargs["provider_override"] = MOA_PROVIDER_ID
             agent = AIAgent(**agent_kwargs)
@@ -5748,6 +5983,16 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                     yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
                         "tool_activity": {"tool": tool_name, "status": "completed", "input": "", "output": tool_output}
                     }))
+                elif event[0] == "tool_call_begin":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"tool_call_begin": event[1]}))
+                elif event[0] == "tool_call_delta":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"tool_call_delta": event[1]}))
+                elif event[0] == "tool_call_end":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"tool_call_end": event[1]}))
+                elif event[0] == "stream_retry":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"stream_retry": event[1]}))
+                elif event[0] == "plan_update":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"plan_update": event[1]}))
                 elif event[0] == "thinking":
                     iteration = event[1]
                     status_label = (
@@ -5790,6 +6035,16 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                     frame = event[1]
                     yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
                         "computer_use_frame": frame
+                    }))
+                elif event[0] == "agent_notice":
+                    notice = event[1]
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
+                        "agent_notice": notice
+                    }))
+                elif event[0] == "agent_notice_clear":
+                    clear = event[1]
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
+                        "agent_notice_clear": clear
                     }))
 
             if not done_event.is_set():
@@ -5963,10 +6218,37 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
     provider = request.headers.get("x-hermes-provider", "").strip().lower()
     if provider in ("", "auto", "default"):
         provider = None
+    # A stale UI pin (e.g. `custom:inference-api.nousresearch.com` saved when
+    # the CLI config was last a custom endpoint) must not reach hermes-acp's
+    # set_session_model: parse_model_input there doesn't know the synthetic id,
+    # so it resolves (provider="custom", model="inference-api...:stealth/ox-alpha")
+    # and the real agent routes to OpenRouter with an empty key →
+    # "HTTP 400: <host>:<model> is not a valid model ID". When the pinned id is
+    # no longer exposed by /v1/providers, drop the pin and let routing follow
+    # config.yaml — same policy the agent-loop path applies via cli_is_custom.
+    if provider and provider not in _provider_ids_for_chat_routing(
+        _resolve_hermes_home(request_profile)
+    ):
+        print(
+            f"[hermes-bridge] Dropping stale provider pin {provider!r} "
+            "(not in current provider list) — falling back to CLI routing",
+            flush=True,
+        )
+        provider = None
 
     workspace_id = _resolve_workspace_id(request, body)
     session_id = workspace_id
-    cwd = repo_root_header or os.getcwd()
+    # The bridge process can outlive its original working directory (a build
+    # or cleanup step may delete it). os.getcwd() then raises FileNotFoundError
+    # and every chat request 500s — fall back to the home directory so requests
+    # keep working regardless of what happens to the launch cwd.
+    try:
+        cwd = repo_root_header or os.getcwd()
+    except OSError:
+        cwd = repo_root_header or os.path.expanduser("~")
+    # Plan mode: passed to hermes-acp as an env hint + prompt suffix (the real
+    # agent owns its tool registration; this is best-effort enforcement).
+    plan_mode = bool((body.model_extra or {}).get("plan_mode"))
 
     request_messages = _normalize_chat_messages(body.messages, model=body.model, strip_images=True)
     last_user_idx = None
@@ -6055,6 +6337,14 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
             on_approval_request(payload[0])
         elif kind == "plan":
             _qput(("plan", payload[0]))
+        elif kind == "tool_call_begin":
+            _qput(("tool_call_begin", payload[0]))
+        elif kind == "tool_call_delta":
+            _qput(("tool_call_delta", payload[0]))
+        elif kind == "tool_call_end":
+            _qput(("tool_call_end", payload[0]))
+        elif kind == "stream_retry":
+            _qput(("stream_retry", payload[0]))
 
     request_outcome = {"success": True, "error": None}
 
@@ -6068,6 +6358,7 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
                 emit=_acp_emit,
                 provider=provider,
                 model=body.model,
+                plan_mode=plan_mode,
             )
             print(f"[hermes-bridge] ACP conversation completed. conversation={workspace_id}", flush=True)
             _finalize_session(True)
@@ -6122,6 +6413,16 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
                     yield sse_chunk(make_delta_chunk(chunk_id, body.model, {
                         "tool_activity": {"tool": tool_name, "status": "completed", "input": tool_input, "output": tool_output}
                     }))
+                elif event[0] == "tool_call_begin":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"tool_call_begin": event[1]}))
+                elif event[0] == "tool_call_delta":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"tool_call_delta": event[1]}))
+                elif event[0] == "tool_call_end":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"tool_call_end": event[1]}))
+                elif event[0] == "stream_retry":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"stream_retry": event[1]}))
+                elif event[0] == "plan_update":
+                    yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"plan_update": event[1]}))
                 elif event[0] == "reasoning":
                     yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"reasoning": event[1]}))
                 elif event[0] == "thinking":
@@ -6136,9 +6437,16 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
                 elif event[0] == "approval_request":
                     yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"approval_request": event[1]}))
                 elif event[0] == "plan":
-                    plan_text = _format_plan_text(event[1])
+                    # Keep the legacy markdown flattening (backward compat) and
+                    # ALSO emit the structured checklist for the UI.
+                    source = event[1]
+                    entries = source if isinstance(source, list) else []
+                    plan_text = _format_plan_text(entries)
                     if plan_text:
                         yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"content": plan_text}))
+                    plan_update = build_plan_update_event(source)
+                    if plan_update:
+                        yield sse_chunk(make_delta_chunk(chunk_id, body.model, {"plan_update": plan_update}))
 
             if not done_event.is_set():
                 now = time.monotonic()

@@ -80,7 +80,7 @@ export const SwarmRoomPanel: React.FC<SwarmRoomPanelProps> = ({ roomId, onBack, 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const members = activeRoom?.members ?? [];
+  const members = useMemo(() => activeRoom?.members ?? [], [activeRoom]);
   const lastMessageId = messages[messages.length - 1]?.id;
 
   // ── Derive which members are @mentioned in the current input ──

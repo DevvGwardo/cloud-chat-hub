@@ -8,7 +8,7 @@ import {
   type HermesReasoningEffort,
 } from '@/stores/hermes-store';
 
-export const HERMES_EFFORT_LABELS: Record<HermesReasoningEffort, string> = {
+const HERMES_EFFORT_LABELS: Record<HermesReasoningEffort, string> = {
   none: 'Off',
   minimal: 'Minimal',
   low: 'Low',

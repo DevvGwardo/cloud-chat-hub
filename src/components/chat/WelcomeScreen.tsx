@@ -2,13 +2,14 @@ import React, { useState, useEffect, useRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { FolderGit2, X, ChevronDown, Loader2, Code2, Globe, FileCode, Server, Search, Bug, TestTube2, Zap } from 'lucide-react';
 import { useChangesetStore } from '@/stores/changeset-store';
-import { useChatScopeId } from '@/contexts/PanelContext';
+import { useChatScopeId } from '@/hooks/use-panel-context';
 import { useSettingsStore } from '@/stores/settings-store';
 import { usePreviewStore } from '@/stores/preview-store';
 import { getApiBaseUrl, fetchRepoFileTreeResult } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { WelcomeHeroMark } from './WelcomeHeroMark';
-import { OnboardingMotionConfig, Stagger, StaggerItem, SOFT_SPRING, fadeInUp } from '@/components/onboarding/motion';
+import { OnboardingMotionConfig, Stagger, StaggerItem } from '@/components/onboarding/motion';
+import { fadeInUp } from '@/components/onboarding/motion-presets';
 
 interface GitHubRepo {
   id: number;
@@ -140,31 +141,25 @@ export const WelcomeScreen = React.forwardRef<HTMLDivElement, WelcomeScreenProps
     <OnboardingMotionConfig>
     <div ref={ref} className="flex flex-col items-center justify-center h-full px-4 md:px-6">
       <Stagger className="w-full text-center max-w-[520px]">
-        {/* Hero mark — refined sizing, with a soft entrance pop + idle float */}
+        {/* Hero mark — Codex-calm: no glow halo, no idle float loop */}
         <StaggerItem className="flex justify-center mb-5 md:mb-6">
           <motion.div
-            initial={{ opacity: 0, scale: 0.8, y: 8 }}
-            animate={{ opacity: 1, scale: 1, y: [0, -5, 0] }}
-            transition={{
-              opacity: { duration: 0.4, ease: [0.16, 1, 0.3, 1] },
-              scale: SOFT_SPRING,
-              y: { duration: 5, repeat: Infinity, ease: 'easeInOut', delay: 0.5 },
-            }}
-            className="relative"
+            initial={{ opacity: 0, scale: 0.94 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
           >
-            <div className="pointer-events-none absolute inset-0 -z-10 rounded-[24px] bg-primary/20 blur-2xl" aria-hidden />
-            <WelcomeHeroMark className="h-16 w-16 md:h-20 md:w-20 rounded-[20px] md:rounded-[24px]" />
+            <WelcomeHeroMark className="h-14 w-14 md:h-16 md:w-16 rounded-[18px] md:rounded-[20px]" />
           </motion.div>
         </StaggerItem>
 
         {/* Title block */}
         <StaggerItem>
-          <h1 className="text-[20px] md:text-[22px] font-semibold tracking-[-0.02em] text-foreground">
+          <h1 className="text-[18px] md:text-[20px] font-semibold tracking-[-0.02em] text-foreground">
             What do you want to build?
           </h1>
         </StaggerItem>
         <StaggerItem>
-          <p className="mt-1.5 text-[13px] md:text-[14px] text-muted-foreground">
+          <p className="mt-1.5 text-[13px] text-muted-foreground">
             {activeProvider === 'hermes'
               ? 'Chat, or hand off a task to your Hermes agent — it can browse, run code, and manage your repos.'
               : 'Start a conversation or pick a suggestion to get going.'}
@@ -271,25 +266,25 @@ export const WelcomeScreen = React.forwardRef<HTMLDivElement, WelcomeScreenProps
           ) : null}
         </StaggerItem>
 
-        {/* Suggestion chips */}
+        {/* Suggestion chips — flat quiet rows, no per-tile boxes */}
         <StaggerItem className="mt-6">
-          <Stagger className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          <Stagger className="grid grid-cols-1 sm:grid-cols-2 gap-1">
             {(isRepoMode && activeRepo ? repoSuggestions : generalSuggestions).map((chip) => (
               <motion.button
                 key={chip.label}
                 variants={fadeInUp}
-                whileHover={disableRepoActions ? undefined : { scale: 1.02, y: -2 }}
-                whileTap={disableRepoActions ? undefined : { scale: 0.98 }}
+                whileHover={disableRepoActions ? undefined : { y: -1 }}
+                whileTap={disableRepoActions ? undefined : { scale: 0.99 }}
                 onClick={() => onSendMessage?.(chip.prompt)}
                 disabled={disableRepoActions}
                 className={cn(
-                  'flex items-center gap-2.5 px-3.5 py-3 rounded-[10px] bg-[#1E1E1E] border border-[#2F2F2F] text-left',
-                  'hover:border-primary/30 hover:bg-[#252525] transition-colors duration-150',
-                  'text-[12px] text-[#8A8A8A] hover:text-foreground',
-                  disableRepoActions && 'cursor-not-allowed opacity-50 hover:border-[#2F2F2F] hover:bg-[#1E1E1E] hover:text-[#8A8A8A]',
+                  'flex items-center gap-2.5 px-3 py-2.5 rounded-[8px] text-left',
+                  'hover:bg-muted/50 transition-colors duration-150',
+                  'text-[12px] text-muted-foreground hover:text-foreground',
+                  disableRepoActions && 'cursor-not-allowed opacity-50 hover:bg-transparent hover:text-muted-foreground',
                 )}
               >
-                <span className="shrink-0 text-muted-foreground">{chip.icon}</span>
+                <span className="shrink-0 text-muted-foreground/70">{chip.icon}</span>
                 <span className="font-normal">{chip.label}</span>
               </motion.button>
             ))}

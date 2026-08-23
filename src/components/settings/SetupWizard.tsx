@@ -11,12 +11,14 @@ import {
   OnboardingMotionConfig,
   Stagger,
   StaggerItem,
+} from '@/components/onboarding/motion';
+import {
   stepVariants,
   popIn,
   SPRING,
   SOFT_SPRING,
   EASE_OUT,
-} from '@/components/onboarding/motion';
+} from '@/components/onboarding/motion-presets';
 
 const STEP_LABELS = ['Provider', 'API Key', 'Finish'] as const;
 const HERMES_AGENT_DOCS_URL = 'https://hermes-agent.nousresearch.com/docs/getting-started/quickstart';

@@ -181,7 +181,7 @@ function QuickInstallRow({
 
 export function HermesMCPPanel() {
   const setMcpStoreFullscreen = useUIStore((s) => s.setMcpStoreFullscreen);
-  const toolIndex = useHermesMcpToolIndex();
+  const { reload: reloadToolIndex, ...toolIndex } = useHermesMcpToolIndex();
 
   const [servers, setServers] = useState<HermesMcpServerInfo[]>([]);
   const [catalog, setCatalog] = useState<HermesMcpCatalogEntry[]>([]);
@@ -198,13 +198,13 @@ export function HermesMCPPanel() {
       const [s, c] = await Promise.all([fetchHermesMcpServers(), fetchHermesMcpCatalog()]);
       setServers(s);
       setCatalog(c);
-      await toolIndex.reload();
+      await reloadToolIndex();
     } catch (err) {
       setLoadError(err instanceof HermesApiError ? err.message : 'Could not reach the bridge.');
     } finally {
       setLoading(false);
     }
-  }, [toolIndex.reload]);
+  }, [reloadToolIndex]);
 
   useEffect(() => {
     void reload();

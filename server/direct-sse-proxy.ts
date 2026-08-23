@@ -2,6 +2,7 @@ import { logger } from './lib/logger';
 import express from 'express';
 import { formatDataStreamPart, type JSONValue } from 'ai';
 import { bindClientDisconnect } from './http-disconnect';
+import { buildUsageEvent } from './lib/usage-events';
 
 export type ProxyFinishReason = 'stop' | 'length' | 'tool-calls' | 'unknown';
 
@@ -9,12 +10,25 @@ export interface ProxyUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Tokens served from a provider cache (0 when unknown). */
+  cachedInputTokens?: number;
+}
+
+/** One tool-call fragment from an OpenAI-compatible upstream stream. */
+export interface ProxyToolCallFragment {
+  /** OpenAI tool-call index within the message (used to group fragments). */
+  index: number;
+  id?: string;
+  name?: string;
+  /** Raw JSON-string fragment of the tool arguments. */
+  argumentsDelta?: string;
 }
 
 export interface NormalizedProxyEvent {
   text?: string;
   reasoning?: string;
   data?: Record<string, unknown>[];
+  toolCalls?: ProxyToolCallFragment[];
   finishReason?: ProxyFinishReason;
   usage?: ProxyUsage;
 }
@@ -43,6 +57,11 @@ interface ProxySseToDataStreamInput {
    * writing to the dead response. Used for background session continuation.
    */
   continueOnClientDisconnect?: boolean;
+  /**
+   * Model name used to build the trailing `usage` custom field
+   * ({type:"usage", ...}) emitted once at stream end. Omit to skip the event.
+   */
+  modelName?: string;
 }
 
 /** Maximum size for the SSE buffer before forcibly flushing (1 MB). */
@@ -144,6 +163,13 @@ export async function proxySseToDataStream(input: ProxySseToDataStreamInput) {
   let sawDataEvent = false;
   let finishReason: ProxyFinishReason = 'unknown';
   let usage: ProxyUsage = EMPTY_USAGE;
+  // Accumulates OpenAI-compatible tool-call fragments (index → call) so they
+  // can be forwarded to the client as AI SDK tool_call parts.
+  const toolCallAccumulator = new Map<number, {
+    id: string;
+    name: string;
+    argsBuffer: string;
+  }>();
   const disconnect = bindClientDisconnect(input.req, input.res, () => {
     if (!input.continueOnClientDisconnect) {
       reader.cancel().catch(() => {});
@@ -190,6 +216,48 @@ export async function proxySseToDataStream(input: ProxySseToDataStreamInput) {
       input.onText?.(normalized.text);
       if (canWrite()) {
         await writeDataStreamChunk(input.res, formatDataStreamPart('text', normalized.text));
+      }
+    }
+
+    if (normalized.toolCalls && normalized.toolCalls.length > 0) {
+      for (const fragment of normalized.toolCalls) {
+        const index = fragment.index;
+        let call = toolCallAccumulator.get(index);
+        if (!call) {
+          call = {
+            id: fragment.id || `tool-call-${index}`,
+            name: fragment.name || 'unknown',
+            argsBuffer: '',
+          };
+          toolCallAccumulator.set(index, call);
+          if (canWrite()) {
+            await writeDataStreamChunk(
+              input.res,
+              formatDataStreamPart('tool_call_streaming_start', {
+                toolCallId: call.id,
+                toolName: call.name,
+              }),
+            );
+          }
+        }
+        if (fragment.id && fragment.id !== call.id) {
+          call.id = fragment.id;
+        }
+        if (fragment.name && fragment.name !== call.name) {
+          call.name = fragment.name;
+        }
+        if (fragment.argumentsDelta) {
+          call.argsBuffer += fragment.argumentsDelta;
+          if (canWrite()) {
+            await writeDataStreamChunk(
+              input.res,
+              formatDataStreamPart('tool_call_delta', {
+                toolCallId: call.id,
+                argsTextDelta: fragment.argumentsDelta,
+              }),
+            );
+          }
+        }
       }
     }
 
@@ -288,6 +356,45 @@ export async function proxySseToDataStream(input: ProxySseToDataStreamInput) {
 
   if (!sawVisibleOutput && !sawDataEvent && input.throwOnEmpty) {
     throw new Error(input.throwOnEmpty);
+  }
+
+  // Flush any accumulated upstream tool calls as AI SDK tool_call parts so the
+  // client can render/execute them (plan-mode direct proxy path).
+  if (toolCallAccumulator.size > 0 && canWrite()) {
+    for (const call of toolCallAccumulator.values()) {
+      let args: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(call.argsBuffer || '{}');
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          args = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Unparsable args — forward an empty object; the client renders the
+        // streaming deltas it already received.
+        args = {};
+      }
+      await writeDataStreamChunk(
+        input.res,
+        formatDataStreamPart('tool_call', {
+          toolCallId: call.id,
+          toolName: call.name,
+          args,
+        }),
+      );
+    }
+  }
+
+  // Trailing `usage` custom field ({type:"usage", ...}) — once per stream end.
+  if (input.modelName && canWrite()) {
+    const usageEvent = buildUsageEvent(
+      {
+        inputTokens: usage.promptTokens,
+        outputTokens: usage.completionTokens,
+        cachedInputTokens: usage.cachedInputTokens ?? 0,
+      },
+      input.modelName,
+    );
+    await writeDataStreamChunk(input.res, formatDataStreamPart('data', [usageEvent] as unknown as JSONValue[]));
   }
 
   if (!manageResponse) {

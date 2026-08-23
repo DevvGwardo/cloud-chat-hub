@@ -365,13 +365,17 @@ def _format_checkpoint_entries(raw: list[dict[str, Any]]) -> list[dict[str, Any]
         commit_hash = str(row.get("hash") or "").strip()
         if not commit_hash:
             continue
+        try:
+            files_changed = max(0, int(row.get("files_changed") or 0))
+        except (TypeError, ValueError):
+            files_changed = 0
         entries.append({
             "index": i,
             "path": commit_hash,
             "label": str(row.get("reason") or "checkpoint").strip() or "checkpoint",
             "mtime": row.get("timestamp"),
             "short_hash": row.get("short_hash"),
-            "files_changed": int(row.get("files_changed") or 0),
+            "files_changed": files_changed,
         })
     return entries
 

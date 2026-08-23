@@ -1,12 +1,35 @@
 import { create } from 'zustand';
 import { addTag, archiveConversation, db, removeTag, unarchiveConversation, type Conversation } from '@/lib/db';
 
+/** One step of a plan emitted by the backend `plan_update` event. */
+export type PlanStep = {
+  step: string;
+  status: 'pending' | 'in_progress' | 'completed';
+};
+
+/** Latest stream retry signal from the backend `stream_retry` event. */
+export type StreamRetryInfo = {
+  attempt: number;
+  maxAttempts: number;
+  reason: string;
+};
+
 interface ChatState {
   planMode: boolean;
   setPlanMode: (enabled: boolean) => void;
   conversations: Conversation[];
   archivedConversations: Conversation[];
   activeConversationId: string | null;
+
+  /** Current plan checklist (null = no plan in flight). */
+  planSteps: PlanStep[] | null;
+  setPlanSteps: (steps: PlanStep[] | null) => void;
+  /** Raw prompt text shown above the plan checklist / implementation gate. */
+  planGatePrompt: string | null;
+  setPlanGatePrompt: (prompt: string | null) => void;
+  /** Last stream retry signal, or null when the stream is healthy. */
+  streamRetry: StreamRetryInfo | null;
+  setStreamRetry: (retry: StreamRetryInfo | null) => void;
 
   loadConversations: () => Promise<void>;
   createConversation: (provider: string, model: string, systemPrompt: string) => Promise<string>;
@@ -32,6 +55,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   conversations: [],
   archivedConversations: [],
   activeConversationId: null,
+
+  planSteps: null,
+  setPlanSteps: (planSteps) => set({ planSteps }),
+  planGatePrompt: null,
+  setPlanGatePrompt: (planGatePrompt) => set({ planGatePrompt }),
+  streamRetry: null,
+  setStreamRetry: (streamRetry) => set({ streamRetry }),
 
   loadConversations: async () => {
     const [conversations, archivedConversations] = await Promise.all([

@@ -126,6 +126,47 @@ export const DIRECT_COMPAT_PROXY_PROVIDERS = new Set([
   'kimi-coding',
 ]);
 
+/**
+ * Server-executed tool names that mutate state. In plan mode these are never
+ * forwarded to the bridge (custom_tools) nor sent upstream by the compatible
+ * proxy; read-only tools (read_repo_file, read_file, propose_changes, web
+ * search, artifact creators, …) are kept.
+ */
+export const MUTATING_TOOL_NAMES = new Set([
+  'run_command',
+  'execute_python',
+  'write_file',
+  'edit_repo_file',
+  'create_repo_file',
+  'delete_repo_file',
+  'batch_edit_repo_files',
+]);
+
+function toolNameOf(customTool: unknown): string | null {
+  if (!customTool || typeof customTool !== 'object') {
+    return null;
+  }
+  const record = customTool as { name?: unknown; function?: { name?: unknown } };
+  if (typeof record.name === 'string' && record.name.trim().length > 0) {
+    return record.name.trim();
+  }
+  if (typeof record.function?.name === 'string' && record.function.name.trim().length > 0) {
+    return record.function.name.trim();
+  }
+  return null;
+}
+
+/** Strip mutating tool definitions from a client-supplied custom tool list. */
+export function filterReadOnlyCustomTools(customTools: unknown[]): unknown[] {
+  if (!Array.isArray(customTools)) {
+    return customTools;
+  }
+  return customTools.filter((customTool) => {
+    const name = toolNameOf(customTool);
+    return name === null || !MUTATING_TOOL_NAMES.has(name);
+  });
+}
+
 function createUpstreamHttpError(message: string, status: number, responseBody?: string): Error & {
   status: number;
   responseBody?: string;
@@ -231,6 +272,9 @@ export function normalizeHermesUsage(usage: unknown): ProxyUsage {
         prompt_tokens?: unknown;
         completion_tokens?: unknown;
         total_tokens?: unknown;
+        cached_input_tokens?: unknown;
+        prompt_tokens_details?: { cached_tokens?: unknown };
+        usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
       }
     : {};
 
@@ -240,10 +284,18 @@ export function normalizeHermesUsage(usage: unknown): ProxyUsage {
     ? record.total_tokens
     : promptTokens + completionTokens;
 
+  const cachedRaw =
+    typeof record.cached_input_tokens === 'number'
+      ? record.cached_input_tokens
+      : typeof record.prompt_tokens_details?.cached_tokens === 'number'
+        ? record.prompt_tokens_details.cached_tokens
+        : 0;
+
   return {
     promptTokens,
     completionTokens,
     totalTokens,
+    cachedInputTokens: Math.max(0, cachedRaw),
   };
 }
 
@@ -258,6 +310,32 @@ export function extractHermesChoiceText(choice: {
   return extractHermesDeltaText(choice.message?.content);
 }
 
+/**
+ * Bridge custom fields that are forwarded to the client UNCHANGED (same field
+ * names, raw payload). B1 (hermes-bridge) emits these inside
+ * `choices[0].delta` and/or at the top level of the SSE payload; the server
+ * normalizes them into `data` parts the client pre-scanner collects.
+ */
+const PASSTHROUGH_CUSTOM_FIELDS = [
+  'tool_call_begin',
+  'tool_call_delta',
+  'tool_call_end',
+  'stream_retry',
+  'plan_update',
+] as const;
+
+function collectPassthroughCustomFields(
+  source: Record<string, unknown>,
+  data: Record<string, unknown>[],
+): void {
+  for (const field of PASSTHROUGH_CUSTOM_FIELDS) {
+    const value = source[field];
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      data.push({ type: field, ...(value as Record<string, unknown>) });
+    }
+  }
+}
+
 export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProxyEvent | null {
   let parsed: {
     usage?: unknown;
@@ -267,6 +345,11 @@ export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProx
     agent_status?: unknown;
     fallback_switch?: unknown;
     approval_request?: unknown;
+    tool_call_begin?: unknown;
+    tool_call_delta?: unknown;
+    tool_call_end?: unknown;
+    stream_retry?: unknown;
+    plan_update?: unknown;
     choices?: Array<{
       finish_reason?: unknown;
       delta?: {
@@ -278,6 +361,11 @@ export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProx
         fallback_switch?: unknown;
         transport_status?: unknown;
         approval_request?: unknown;
+        tool_call_begin?: unknown;
+        tool_call_delta?: unknown;
+        tool_call_end?: unknown;
+        stream_retry?: unknown;
+        plan_update?: unknown;
       };
       message?: {
         content?: unknown;
@@ -317,6 +405,9 @@ export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProx
   if (choice?.delta?.approval_request && typeof choice.delta.approval_request === 'object') {
     data.push({ type: 'approval_request', ...(choice.delta.approval_request as Record<string, unknown>) });
   }
+  if (choice?.delta) {
+    collectPassthroughCustomFields(choice.delta as Record<string, unknown>, data);
+  }
   if (parsed.transport_status && typeof parsed.transport_status === 'object') {
     data.push({ type: 'transport_status', ...(parsed.transport_status as Record<string, unknown>) });
   }
@@ -340,6 +431,7 @@ export function normalizeHermesAgentLoopPayload(payload: string): NormalizedProx
   if (parsed.approval_request && typeof parsed.approval_request === 'object') {
     data.push({ type: 'approval_request', ...(parsed.approval_request as Record<string, unknown>) });
   }
+  collectPassthroughCustomFields(parsed as Record<string, unknown>, data);
 
   const reasoning = typeof choice?.delta?.reasoning === 'string' ? choice.delta.reasoning : undefined;
 
@@ -362,7 +454,14 @@ export function normalizeCompatibleProviderPayload(provider: string, payload: st
     usage?: unknown;
     choices?: Array<{
       finish_reason?: unknown;
-      delta?: { content?: unknown };
+      delta?: {
+        content?: unknown;
+        tool_calls?: Array<{
+          index?: number;
+          id?: string;
+          function?: { name?: string; arguments?: string };
+        }>;
+      };
       message?: { content?: unknown };
     }>;
   };
@@ -388,12 +487,32 @@ export function normalizeCompatibleProviderPayload(provider: string, payload: st
     };
   }
 
+  // OpenAI-compatible tool-call streaming fragments (plan-mode direct proxy):
+  // forwarded to the client as AI SDK tool_call parts by the SSE proxy.
+  const toolCalls: NormalizedProxyEvent['toolCalls'] = [];
+  const rawToolCalls = choice.delta?.tool_calls;
+  if (Array.isArray(rawToolCalls)) {
+    for (const rawCall of rawToolCalls) {
+      if (!rawCall || typeof rawCall !== 'object') {
+        continue;
+      }
+      const index = typeof rawCall.index === 'number' ? rawCall.index : toolCalls.length;
+      toolCalls.push({
+        index,
+        ...(typeof rawCall.id === 'string' ? { id: rawCall.id } : {}),
+        ...(typeof rawCall.function?.name === 'string' ? { name: rawCall.function.name } : {}),
+        ...(typeof rawCall.function?.arguments === 'string' ? { argumentsDelta: rawCall.function.arguments } : {}),
+      });
+    }
+  }
+
   return {
     usage: normalizeHermesUsage(parsed.usage),
     finishReason: choice.finish_reason !== undefined && choice.finish_reason !== null
       ? normalizeHermesFinishReason(choice.finish_reason)
       : undefined,
     text: extractHermesChoiceText(choice),
+    ...(toolCalls.length > 0 ? { toolCalls } : {}),
   };
 }
 
@@ -513,6 +632,8 @@ export async function proxyHermesAgentLoopToDataStream(input: {
   hermesWorktree?: boolean;
   /** Local checkout path the bridge uses as the worktree repo root / ACP cwd. */
   repoRoot?: string | null;
+  /** Plan mode: the bridge restricts itself to read-only exploration. */
+  planMode?: boolean;
 }) {
   const bridgeUrl = `${OPENAI_COMPATIBLE.hermes}/chat/completions`;
   const abortController = new AbortController();
@@ -593,11 +714,18 @@ export async function proxyHermesAgentLoopToDataStream(input: {
         top_p: input.topP ?? 0.9,
         max_tokens: input.maxTokens ?? 32768,
         stream: true,
+        // Plan mode: bridge restricts itself to read-only exploration and the
+        // server strips mutating tools from any definitions it forwards.
+        ...(input.planMode ? { plan_mode: true } : {}),
         ...(input.repoFileTree && input.repoFileTree.length > 0
           ? { repo_file_tree: input.repoFileTree }
           : {}),
         ...(input.customTools && input.customTools.length > 0
-          ? { custom_tools: input.customTools }
+          ? {
+              custom_tools: input.planMode
+                ? filterReadOnlyCustomTools(input.customTools)
+                : input.customTools,
+            }
           : {}),
         ...(input.conversationId ? { conversation_id: input.conversationId } : {}),
         ...(input.reasoningEffort ? { reasoning_effort: input.reasoningEffort } : {}),
@@ -638,6 +766,7 @@ export async function proxyHermesAgentLoopToDataStream(input: {
       corsHeaders: buildCorsHeaders(input.req.headers.origin),
       normalizePayload: normalizeHermesAgentLoopPayload,
       continueOnClientDisconnect: canRunInBackground,
+      modelName: input.model,
       onText: (text) => {
         accumulatedText += text;
         // Mirror into the run registry so a reopened panel can poll the
@@ -701,6 +830,12 @@ function formatLoopStatusPart(status: {
   return { type: 'hermes_loop_status', status };
 }
 
+/** Renders a compact iteration header injected between loop passes so the
+ * chat transcript itself shows loop progress even without the toggle label. */
+function formatLoopIterationHeader(iteration: number, maxIterations: number): string {
+  return `\n\n---\n\n**Loop iteration ${iteration}/${maxIterations}**\n\n`;
+}
+
 const LOOP_JUDGE_MAX_ATTEMPTS = 3;
 const LOOP_JUDGE_RETRY_DELAY_MS = 2000;
 
@@ -713,6 +848,7 @@ async function judgeLoopIteration(input: {
   goal: string;
   attempt: string;
   activeProfile?: string;
+  systemPrompt?: string;
   signal: AbortSignal;
 }): Promise<{ met: boolean; feedback: string }> {
   let lastError: unknown;
@@ -745,6 +881,7 @@ async function judgeLoopIterationOnce(input: {
   goal: string;
   attempt: string;
   activeProfile?: string;
+  systemPrompt?: string;
   signal: AbortSignal;
 }): Promise<{ met: boolean; feedback: string }> {
   const response = await fetchHermesWithReadinessRetry(`${OPENAI_COMPATIBLE.hermes}/chat/completions`, {
@@ -763,6 +900,9 @@ async function judgeLoopIterationOnce(input: {
       stream: false,
       temperature: 0,
       max_tokens: 1024,
+      // The judge must see the same constraints the agent ran with, or it
+      // judges against a goal that was never actually given to the agent.
+      ...(input.systemPrompt ? { system: input.systemPrompt } : {}),
       messages: [
         { role: 'system', content: LOOP_JUDGE_SYSTEM_PROMPT },
         {
@@ -853,6 +993,10 @@ export async function proxyHermesLoopToDataStream(input: {
   customTools?: unknown[];
   activeProfile?: string;
   conversationId?: string;
+  /** System prompt forwarded as a real system role on every loop iteration
+   * (normalizeChatMessages folds it into a leading fake user message, which
+   * only leads iteration 1 — follow-up turns and the judge would lose it). */
+  systemPrompt?: string;
   /** Run the agent in an isolated git worktree of the local checkout. */
   hermesWorktree?: boolean;
   /** Local checkout path the bridge uses as the worktree repo root / ACP cwd. */
@@ -905,7 +1049,7 @@ export async function proxyHermesLoopToDataStream(input: {
 
       await emitLoopStatus({ phase: 'agent', iteration, maxIterations });
       if (iteration > 1) {
-        await emitText(`\n\n---\n\n**Loop iteration ${iteration}/${maxIterations}**\n\n`);
+        await emitText(formatLoopIterationHeader(iteration, maxIterations));
       }
 
       const startedAt = Date.now();
@@ -933,6 +1077,7 @@ export async function proxyHermesLoopToDataStream(input: {
         },
         body: JSON.stringify({
           model: input.model,
+          ...(input.systemPrompt ? { system: input.systemPrompt } : {}),
           messages: conversation,
           temperature: input.temperature ?? 0.7,
           top_p: input.topP ?? 0.9,
@@ -962,6 +1107,7 @@ export async function proxyHermesLoopToDataStream(input: {
         corsHeaders: {},
         normalizePayload: normalizeHermesAgentLoopPayload,
         manageResponse: false,
+        modelName: input.model,
         onText: (text) => {
           iterationText += text;
         },
@@ -978,6 +1124,7 @@ export async function proxyHermesLoopToDataStream(input: {
         goal,
         attempt: iterationText,
         activeProfile: input.activeProfile,
+        systemPrompt: input.systemPrompt,
         signal: abortController.signal,
       });
       logger.info(`[chat] Hermes loop iteration ${iteration} verdict met=${verdict.met}`);
@@ -985,9 +1132,21 @@ export async function proxyHermesLoopToDataStream(input: {
       if (verdict.met) {
         stopReason = 'verdict-met';
         finalPhase = 'done';
-        await emitLoopStatus({ phase: 'done', iteration, maxIterations, stopReason });
+        // Surface the passing verdict inline so the transcript explains WHY
+        // the loop stopped, not just that it did.
+        if (verdict.feedback) {
+          await emitText(`\n\n> ✅ **Loop verdict (met):** ${verdict.feedback}\n`);
+        }
+        await emitLoopStatus({ phase: 'done', iteration, maxIterations, stopReason, feedback: verdict.feedback });
         break;
       }
+
+      // Not met — show the judge's critique inline before the next pass so
+      // the user sees what the loop is fixing.
+      if (verdict.feedback) {
+        await emitText(`\n\n> 🔁 **Judge feedback (iteration ${iteration}):** ${verdict.feedback}\n`);
+      }
+      await emitLoopStatus({ phase: 'judge', iteration, maxIterations, feedback: verdict.feedback });
 
       if (iteration === maxIterations) {
         stopReason = 'max-iterations';
@@ -1133,6 +1292,7 @@ export async function proxyHermesSwarmToDataStream(input: {
     upstreamResponse: bridgeResponse,
     corsHeaders: buildCorsHeaders(input.req.headers.origin),
     normalizePayload: normalizeHermesAgentLoopPayload,
+    modelName: input.model,
     onFirstEvent: (kind) => {
       if (firstEventLogged) {
         return;
@@ -1349,6 +1509,14 @@ export async function proxyCompatibleProviderToDataStream(input: {
   temperature?: number;
   topP?: number;
   maxTokens?: number;
+  /**
+   * Plan mode: forwards only read-only tool definitions upstream (the caller
+   * passes the already-filtered set) and streams any upstream tool calls back
+   * to the client as AI SDK tool_call parts.
+   */
+  planMode?: boolean;
+  /** Read-only OpenAI function definitions forwarded upstream in plan mode. */
+  planModeTools?: unknown[];
 }) {
   const abortController = new AbortController();
   const disconnect = bindClientDisconnect(input.req, input.res, () => {
@@ -1370,6 +1538,14 @@ export async function proxyCompatibleProviderToDataStream(input: {
         top_p: input.topP ?? 0.9,
         max_tokens: input.maxTokens ?? 4096,
         stream: true,
+        // Plan mode: only read-only tools are defined, and only when the
+        // caller actually built a read-only set (e.g. artifact creators).
+        ...(input.planMode && input.planModeTools && Object.keys(input.planModeTools).length > 0
+          ? {
+              tools: Object.values(input.planModeTools),
+              tool_choice: 'auto' as const,
+            }
+          : {}),
       }),
       signal: abortController.signal,
     });
@@ -1396,5 +1572,6 @@ export async function proxyCompatibleProviderToDataStream(input: {
     corsHeaders: buildCorsHeaders(input.req.headers.origin),
     normalizePayload: (payload) => normalizeCompatibleProviderPayload(input.provider, payload),
     throwOnEmpty: `${input.provider} returned an empty response stream.`,
+    modelName: input.model,
   });
 }

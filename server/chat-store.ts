@@ -9,6 +9,7 @@ import type {
   ConversationFiles,
   Message,
 } from '../src/lib/db';
+import { approvalPolicyStore } from './approval-engine';
 
 interface ConversationRow {
   id: string;
@@ -864,6 +865,9 @@ export function registerChatStoreRoutes(app: express.Express) {
       }
 
       chatStore.deleteConversation(req.params.id);
+      // Drop per-conversation approval policy state (rules, auto-approve,
+      // parked approvals) so deleted conversations cannot leak memory.
+      approvalPolicyStore.cleanupConversation(req.params.id);
       res.status(204).end();
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : String(error) });

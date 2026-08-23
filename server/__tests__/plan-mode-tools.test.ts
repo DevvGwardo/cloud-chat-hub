@@ -79,12 +79,26 @@ describe('plan mode tool routing', () => {
     vi.unstubAllGlobals()
   })
 
-  it('keeps compatible providers on the tool path in plan mode so create_html_file remains available', async () => {
+  it('keeps compatible providers on the read-only direct-proxy path in plan mode so create_html_file remains available', async () => {
     const actualFetchLocal = global.fetch
+    let upstreamBody: { tools?: unknown[]; tool_choice?: unknown } | null = null
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
       if (url.includes('/functions/v1/chat')) {
         return actualFetchLocal(input, init)
+      }
+
+      if (url.includes('api.minimax.io/v1/chat/completions')) {
+        upstreamBody = JSON.parse(String(init?.body)) as { tools?: unknown[]; tool_choice?: unknown }
+        const upstreamSse = [
+          'data: {"id":"mm-1","choices":[{"index":0,"delta":{"role":"","content":"Plan: inspect the repo and draft the HTML artifact."}}]}\n\n',
+          'data: {"id":"mm-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":9,"total_tokens":21}}\n\n',
+          'data: [DONE]\n\n',
+        ].join('')
+        return new Response(upstreamSse, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
       }
 
       throw new Error(`Unexpected upstream fetch during plan mode: ${url}`)
@@ -110,14 +124,33 @@ describe('plan mode tool routing', () => {
       })
 
       expect(response.ok).toBe(true)
-      expect(aiMocks.streamText).toHaveBeenCalledTimes(1)
+      // Plan mode routes compatible providers through the read-only direct
+      // proxy instead of the server tool loop.
+      expect(aiMocks.streamText).not.toHaveBeenCalled()
 
-      const tools = (aiMocks.streamText.mock.calls.at(-1)?.[0] as { tools?: Record<string, unknown> })?.tools ?? {}
-      expect(Object.keys(tools)).toContain('create_html_file')
-      expect(Object.keys(tools)).not.toContain('create_css_file')
-      expect(Object.keys(tools)).not.toContain('create_js_file')
-      expect(Object.keys(tools)).not.toContain('create_react_component')
-      expect(Object.keys(tools)).not.toContain('create_markdown_file')
+      // The upstream tool definitions are filtered to read-only tools only —
+      // create_html_file is kept, every write/terminal tool is dropped.
+      const capturedUpstreamBody = upstreamBody as { tools?: unknown[]; tool_choice?: unknown } | null
+      const toolNames = (capturedUpstreamBody?.tools ?? []).map(
+        (toolDef) => (toolDef as { function?: { name?: string } }).function?.name,
+      )
+      expect(toolNames).toContain('create_html_file')
+      expect(toolNames).not.toContain('create_css_file')
+      expect(toolNames).not.toContain('create_js_file')
+      expect(toolNames).not.toContain('create_react_component')
+      expect(toolNames).not.toContain('create_markdown_file')
+      expect(toolNames).not.toContain('run_command')
+      expect(toolNames).not.toContain('execute_python')
+      expect(toolNames).not.toContain('write_file')
+      expect(toolNames).not.toContain('edit_repo_file')
+      expect(capturedUpstreamBody?.tool_choice).toBe('auto')
+
+      const body = await response.text()
+      expect(body).toContain('Plan: inspect the repo')
+      // The trailing usage event is emitted on the direct-proxy path too.
+      expect(body).toContain('"type":"usage"')
+      expect(body).toContain('"input_tokens":12')
+      expect(body).toContain('"model":"MiniMax-M2.5"')
     } finally {
       await server.close()
     }

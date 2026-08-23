@@ -62,20 +62,8 @@ extraResources:
     to: "patches"
     filter:
       - "*.patch"
-mac:
-  icon: build/spark-icon.icns
-  # Architecture is chosen per release job via the electron-builder CLI flag
-  # (--arm64 / --x64 in release.yml); both build on the arm64 runner, with x64
-  # cross-compiled. Each job bundles a standalone Python runtime matching its
-  # target arch. Omitting `arch` here lets the CLI flag decide.
-  target:
-    - target: dmg
-    - target: zip
-  category: public.app-category.developer-tools
-  entitlements: build/entitlements.mac.plist
-  entitlementsInherit: build/entitlements.mac.plist
-  hardenedRuntime: true
-  gatekeeperAssess: false
+# Windows-only distribution: no Apple Developer license is held, so macOS
+# builds (which require signing + notarization to be usable) are not produced.
 win:
   # NSIS requires a proper .ico — generated from build/spark-icon.png via
   # `magick build/spark-icon.png -define icon:auto-resize=256,128,64,48,32,16 build/spark-icon.ico`
@@ -91,19 +79,6 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: Spark
-dmg:
-  # ${arch} keeps the arm64 and x64 DMGs from overwriting each other when both
-  # macOS jobs publish to the same release.
-  artifactName: "Spark-${version}-${arch}-mac.${ext}"
-linux:
-  icon: build/spark-icon.png
-  category: Development
-  target:
-    - target: AppImage
-      arch: [x64]
-    - target: deb
-      arch: [x64]
-  artifactName: "Spark-${version}-linux-${arch}.${ext}"
 publish:
   provider: github
   owner: DevvGwardo

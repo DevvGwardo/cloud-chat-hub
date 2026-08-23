@@ -94,8 +94,8 @@ export const features: Feature[] = [
     id: 11,
     name: "Native Desktop",
     category: "desktop",
-    tag: "cross-platform",
-    note: "A real Electron app for macOS, Windows, and Linux with system tray, notifications, and offline support.",
+    tag: "native app",
+    note: "A real Electron app for Windows 10/11 with system tray, notifications, and offline support.",
     icon: "desktop",
   },
   {

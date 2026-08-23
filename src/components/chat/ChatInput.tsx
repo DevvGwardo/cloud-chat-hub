@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useCallback, useState } from 'react';
-import { ArrowUp, Square, Plus, ChevronDown, Mic, MicOff, CornerDownLeft, Bot, ClipboardList, Loader2, Repeat, X, Flag } from 'lucide-react';
+import { ArrowUp, Square, Plus, ChevronDown, Mic, MicOff, CornerDownLeft, Bot, ClipboardList, Loader2, Repeat, X, Flag, SlidersHorizontal } from 'lucide-react';
 import { useHermesStore, DEFAULT_LOOP_STATE } from '@/stores/hermes-store';
-import { usePanelId, useChatScopeId } from '@/contexts/PanelContext';
+import { usePanelId, useChatScopeId } from '@/hooks/use-panel-context';
 import { useChangesetStore } from '@/stores/changeset-store';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '@/stores/ui-store';
@@ -18,13 +18,15 @@ import { toolbarPopoverAlignment } from '@/hooks/chat-utils';
 import { PROVIDERS, REASONING_EFFORTS, getVisibleModelOptions, supportsReasoningEffort } from '@/lib/providers';
 import type { QueuedMessage } from '@/lib/chat-queue';
 import { StreamingStatusBar } from './StreamingStatusBar';
+import { ContextMeter } from './ContextMeter';
 import { useChatStore } from '@/stores/chat-store';
 import { QueuedMessageTray } from './QueuedMessageTray';
-import { CommandSuggestions, commandTakesArgs } from './CommandSuggestions';
-import { ContextRefSuggestions, buildPickerSuggestions, type ContextRefSuggestion } from './ContextRefSuggestions';
+import { CommandSuggestions } from './CommandSuggestions';
+import { buildPickerSuggestions, type ContextRefSuggestion } from '@/lib/context-refs';
+import { ContextRefSuggestions } from './ContextRefSuggestions';
 import { HermesModelPicker } from './HermesModelPicker';
 import { HermesEffortSlider } from './HermesEffortSlider';
-import { parseCommand, findCommand, filterCommands, ensureHermesAgentCommandsLoaded, type CommandContext } from '@/lib/hermes-commands';
+import { parseCommand, findCommand, filterCommands, ensureHermesAgentCommandsLoaded, commandTakesArgs, type CommandContext } from '@/lib/hermes-commands';
 import {
   detectContextRefQuery,
   estimateContextRefTokens,
@@ -35,7 +37,7 @@ import {
   type ContextRefQuery,
 } from '@/lib/context-refs';
 import { fetchGoalsConfig, updateGoalsConfig, type GoalsConfig } from '@/lib/hermes-api';
-import { useCommandCallbacks } from '@/contexts/CommandCallbacksContext';
+import { useCommandCallbacks } from '@/hooks/use-command-callbacks';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -140,6 +142,7 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
   const reasoningLabel = REASONING_EFFORT_LABELS[config.reasoningEffort];
   const planMode = useChatStore((s) => s.planMode);
   const setPlanMode = useChatStore((s) => s.setPlanMode);
+  const streamRetry = useChatStore((s) => s.streamRetry);
   const panelId = usePanelId();
   const scopeId = useChatScopeId();
   const activeRepo = useChangesetStore((s) => s.getChangeset(scopeId).activeRepo);
@@ -148,34 +151,44 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
   const setLoopEnabled = useHermesStore((s) => s.setLoopEnabled);
   const setLoopConfig = useHermesStore((s) => s.setLoopConfig);
   const [showLoopConfig, setShowLoopConfig] = useState(false);
-  const loopConfigRef = useRef<HTMLDivElement>(null);
   const [goalsConfig, setGoalsConfig] = useState<GoalsConfig>({ max_turns: 20, enabled: true });
   const [goalsBusy, setGoalsBusy] = useState(false);
   const [showGoalsConfig, setShowGoalsConfig] = useState(false);
-  const goalsConfigRef = useRef<HTMLDivElement>(null);
 
-  // Close the loop config popover on outside click.
-  useEffect(() => {
-    if (!showLoopConfig) return;
-    const onPointerDown = (e: PointerEvent) => {
-      if (loopConfigRef.current && !loopConfigRef.current.contains(e.target as Node)) {
-        setShowLoopConfig(false);
-      }
-    };
-    document.addEventListener('pointerdown', onPointerDown);
-    return () => document.removeEventListener('pointerdown', onPointerDown);
-  }, [showLoopConfig]);
-
+  // Close the goals popover on outside click (popover lives in the menu).
   useEffect(() => {
     if (!showGoalsConfig) return;
     const onPointerDown = (e: PointerEvent) => {
-      if (goalsConfigRef.current && !goalsConfigRef.current.contains(e.target as Node)) {
+      if (optionsMenuRef.current && !optionsMenuRef.current.contains(e.target as Node)) {
         setShowGoalsConfig(false);
       }
     };
     document.addEventListener('pointerdown', onPointerDown);
     return () => document.removeEventListener('pointerdown', onPointerDown);
   }, [showGoalsConfig]);
+
+  // Codex-style simplification: Plan / Loop / Goals live in one overflow menu
+  // instead of three always-visible toggles on the composer toolbar.
+  const [optionsMenuOpen, setOptionsMenuOpen] = useState(false);
+  const optionsMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!optionsMenuOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (optionsMenuRef.current && !optionsMenuRef.current.contains(e.target as Node)) {
+        setOptionsMenuOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOptionsMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [optionsMenuOpen]);
 
   useEffect(() => {
     if (selectedProvider !== 'hermes') return;
@@ -653,17 +666,32 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
 
         <div
           className={cn(
-            'relative overflow-visible border border-[#3F3F3F] bg-[#222222]',
-            hasQueuedMessages ? 'rounded-b-[10px] rounded-t-none border-t-0' : 'rounded-[10px]',
+            'relative overflow-visible rounded-[12px] bg-card/60 ring-1 ring-border/60',
+            'focus-within:ring-border focus-within:bg-card transition-colors duration-150',
+            hasQueuedMessages ? 'rounded-t-none' : '',
           )}
         >
           <StreamingStatusBar
             isStreaming={isStreaming}
             toolCallCount={toolCallCount}
-            statusLabel={agentStatusLabel}
+            statusLabel={agentStatusLabel ?? 'Working'}
             startedAt={streamStartedAt}
             embedded
+            onStop={onStop}
           />
+
+          {/* Secondary stream-retry line (auto-cleared by the store on the
+              next stream event): ⟳ Reconnecting… 2/5 */}
+          {isStreaming && streamRetry && (
+            <div className="flex items-center justify-center gap-1.5 border-b border-amber-500/15 bg-amber-500/[0.04] px-3 py-1 text-[11px] font-mono text-amber-400/90">
+              <span>
+                ⟳ Reconnecting… {streamRetry.attempt}/{streamRetry.maxAttempts}
+              </span>
+              {streamRetry.reason ? (
+                <span className="truncate text-muted-foreground/60">· {streamRetry.reason}</span>
+              ) : null}
+            </div>
+          )}
 
           {showContextRefSuggestions && contextRefQuery && (
             <div className="px-3 relative">
@@ -819,211 +847,178 @@ export const ChatInput: React.FC<ChatInputProps> = React.memo(({
               </DropdownMenu>
             )}
 
-            {/* Plan mode toggle */}
-            <button
-              onClick={() => setPlanMode(!planMode)}
-              className={cn(
-                'inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors',
-                planMode
-                  ? 'bg-purple-500/15 text-purple-400 ring-1 ring-purple-500/30'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-              )}
-              title={planMode ? 'Exit Plan Mode' : 'Enter Plan Mode (read-only exploration)'}
-            >
-              <ClipboardList className="h-3.5 w-3.5 shrink-0" />
-              <span className="hidden sm:inline">Plan</span>
-            </button>
-
-            {/* Loop mode toggle — Hermes only. Reruns the agent until a judge
-                verdict says the goal is met, bounded by iteration/time caps. */}
-            {selectedProvider === 'hermes' && (
-              <div className="relative shrink-0" ref={loopConfigRef}>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={loop.enabled}
-                  onClick={handleLoopToggle}
-                  className={cn(
-                    'inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors',
-                    loop.enabled
-                      ? 'text-emerald-400'
-                      : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-                  )}
-                  title={
-                    loop.enabled
-                      ? 'Loop Mode on — click to disable'
-                      : 'Enable Loop Mode (rerun the agent until the goal is met)'
-                  }
-                >
-                  <Repeat className="h-3.5 w-3.5 shrink-0" />
-                  <span className="hidden sm:inline tabular-nums">
-                    {loop.enabled && isStreaming && loop.iteration > 0
-                      ? loop.phase === 'judge'
-                        ? `Judging ${loop.iteration}/${loop.config.maxIterations}`
-                        : `Loop ${loop.iteration}/${loop.config.maxIterations}`
-                      : 'Loop'}
-                  </span>
-                  {/* Switch track + thumb */}
+            {/* Codex-style options menu — Plan / Loop / Goals collapsed into
+                one overflow control. Active modes show a status dot on the
+                trigger so state is visible without spending toolbar space. */}
+            <div className="relative shrink-0" ref={optionsMenuRef}>
+              <button
+                type="button"
+                onClick={() => setOptionsMenuOpen((v) => !v)}
+                aria-expanded={optionsMenuOpen}
+                aria-label="Composer options"
+                title="Plan mode, Loop and Goals"
+                className={cn(
+                  'inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-xs transition-colors',
+                  optionsMenuOpen || planMode || loop.enabled || goalsConfig.enabled
+                    ? 'text-foreground'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted/50',
+                )}
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5" />
+                {(planMode || loop.enabled || goalsConfig.enabled) && (
                   <span
                     aria-hidden="true"
                     className={cn(
-                      'relative inline-flex h-3.5 w-6 shrink-0 items-center rounded-full transition-colors duration-150',
-                      loop.enabled ? 'bg-emerald-500' : 'bg-muted-foreground/30'
+                      'h-1.5 w-1.5 rounded-full',
+                      planMode ? 'bg-purple-400' : loop.enabled ? 'bg-emerald-400' : 'bg-amber-400',
                     )}
-                  >
-                    <span
-                      className={cn(
-                        'absolute h-2.5 w-2.5 rounded-full bg-background shadow-sm transition-transform duration-150',
-                        loop.enabled ? 'translate-x-3' : 'translate-x-0.5'
-                      )}
-                    />
-                  </span>
-                </button>
-                {loop.enabled && !isStreaming && (
-                  <button
-                    onClick={() => setShowLoopConfig((v) => !v)}
-                    className="ml-0.5 p-0.5 rounded text-emerald-400/70 hover:text-emerald-400"
-                    title="Loop settings"
-                    aria-label="Loop settings"
-                  >
-                    <ChevronDown className="h-3 w-3" />
-                  </button>
+                  />
                 )}
-                {showLoopConfig && (
-                  <div
-                    className={cn(
-                      'absolute bottom-full mb-2 z-50 w-60 rounded-lg border border-border bg-popover p-3 shadow-lg space-y-3',
-                      toolbarPopoverAlignment(loopConfigRef.current),
-                    )}
-                  >
-                    <div>
-                      <p className="text-xs font-semibold text-foreground">Loop until the goal is met</p>
-                      <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
-                        After each pass a judge checks your goal. The agent reruns with the judge's feedback until it passes or a cap is hit.
-                      </p>
-                    </div>
-                    <label className="flex items-center justify-between gap-2 text-xs text-foreground">
-                      Max iterations
-                      <input
-                        type="number"
-                        min={1}
-                        max={25}
-                        value={loop.config.maxIterations}
-                        onChange={(e) => {
-                          const n = parseInt(e.target.value, 10);
-                          if (Number.isFinite(n)) setLoopConfig(panelId, { maxIterations: Math.min(25, Math.max(1, n)) });
-                        }}
-                        className="w-16 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
-                      />
-                    </label>
-                    <label className="flex items-center justify-between gap-2 text-xs text-foreground">
-                      Time budget (min)
-                      <input
-                        type="number"
-                        min={1}
-                        max={480}
-                        placeholder="∞"
-                        value={loop.config.timeBudgetMinutes ?? ''}
-                        onChange={(e) => {
-                          const raw = e.target.value;
-                          if (raw === '') {
-                            setLoopConfig(panelId, { timeBudgetMinutes: null });
-                            return;
-                          }
-                          const n = parseInt(raw, 10);
-                          if (Number.isFinite(n) && n > 0) setLoopConfig(panelId, { timeBudgetMinutes: Math.min(480, n) });
-                        }}
-                        className="w-16 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
-                      />
-                    </label>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Standing goals toggle — Hermes Ralph-loop enable + quick max_turns */}
-            {selectedProvider === 'hermes' && (
-              <div className="relative shrink-0" ref={goalsConfigRef}>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={goalsConfig.enabled}
-                  onClick={() => void handleGoalsToggle()}
-                  disabled={goalsBusy}
+              </button>
+              {optionsMenuOpen && (
+                <div
                   className={cn(
-                    'inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors disabled:opacity-50',
-                    goalsConfig.enabled
-                      ? 'text-amber-400'
-                      : 'text-muted-foreground hover:text-foreground hover:bg-muted/50',
+                    'absolute bottom-full mb-2 z-50 w-64 rounded-lg border border-border bg-popover p-1.5 shadow-lg',
+                    toolbarPopoverAlignment(optionsMenuRef.current),
                   )}
-                  title={
-                    goalsConfig.enabled
-                      ? `Goals on · max ${goalsConfig.max_turns} turns · /goal in chat`
-                      : 'Enable standing goals (Ralph loop)'
-                  }
+                  role="menu"
                 >
-                  <Flag className="h-3.5 w-3.5 shrink-0" />
-                  <span className="hidden sm:inline tabular-nums">
-                    {goalsConfig.enabled ? `Goals ${goalsConfig.max_turns}` : 'Goals'}
-                  </span>
-                  <span
-                    aria-hidden="true"
-                    className={cn(
-                      'relative inline-flex h-3.5 w-6 shrink-0 items-center rounded-full transition-colors duration-150',
-                      goalsConfig.enabled ? 'bg-amber-500' : 'bg-muted-foreground/30',
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        'absolute h-2.5 w-2.5 rounded-full bg-background shadow-sm transition-transform duration-150',
-                        goalsConfig.enabled ? 'translate-x-3' : 'translate-x-0.5',
-                      )}
-                    />
-                  </span>
-                </button>
-                {goalsConfig.enabled && (
+                  {/* Plan mode */}
                   <button
                     type="button"
-                    onClick={() => setShowGoalsConfig((v) => !v)}
-                    className="ml-0.5 p-0.5 rounded text-amber-400/70 hover:text-amber-400"
-                    title="Goals settings"
-                    aria-label="Goals settings"
-                  >
-                    <ChevronDown className="h-3 w-3" />
-                  </button>
-                )}
-                {showGoalsConfig && goalsConfig.enabled && (
-                  <div
+                    role="menuitemcheckbox"
+                    aria-checked={planMode}
+                    onClick={() => setPlanMode(!planMode)}
                     className={cn(
-                      'absolute bottom-full mb-2 z-50 w-52 rounded-lg border border-border bg-popover p-3 shadow-lg space-y-2',
-                      toolbarPopoverAlignment(goalsConfigRef.current),
+                      'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted/60',
+                      planMode ? 'text-purple-400' : 'text-muted-foreground hover:text-foreground',
                     )}
                   >
-                    <p className="text-xs font-semibold text-foreground">Standing goals</p>
-                    <p className="text-[11px] leading-snug text-muted-foreground">
-                      Set objectives with <span className="font-mono">/goal</span>. Max turns caps auto-continue.
-                    </p>
-                    <label className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                      Max turns
-                      <input
-                        type="number"
-                        min={1}
-                        max={200}
-                        value={goalsConfig.max_turns}
-                        onChange={(e) => {
-                          const n = parseInt(e.target.value, 10);
-                          if (Number.isFinite(n)) void handleGoalsMaxTurns(n);
-                        }}
-                        disabled={goalsBusy}
-                        className="w-16 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
-                      />
-                    </label>
-                  </div>
-                )}
-              </div>
-            )}
+                    <ClipboardList className="h-3.5 w-3.5 shrink-0" />
+                    <span className="flex-1">Plan mode</span>
+                    {planMode && <span className="text-[10px] font-medium">On</span>}
+                  </button>
 
+                  {/* Loop mode */}
+                  <button
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={loop.enabled}
+                    onClick={handleLoopToggle}
+                    className={cn(
+                      'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted/60',
+                      loop.enabled ? 'text-emerald-400' : 'text-muted-foreground hover:text-foreground',
+                    )}
+                  >
+                    <Repeat className="h-3.5 w-3.5 shrink-0" />
+                    <span className="flex-1">Loop until goal met</span>
+                    {loop.enabled && isStreaming && loop.iteration > 0 && (
+                      <span className="tabular-nums text-[10px]">
+                        {loop.phase === 'judge' ? `Judging ${loop.iteration}/${loop.config.maxIterations}` : `${loop.iteration}/${loop.config.maxIterations}`}
+                      </span>
+                    )}
+                    {loop.enabled && !isStreaming && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowLoopConfig((v) => !v);
+                        }}
+                        className="p-0.5 rounded text-emerald-400/70 hover:text-emerald-400"
+                        title="Loop settings"
+                        aria-label="Loop settings"
+                      >
+                        <ChevronDown className="h-3 w-3" />
+                      </button>
+                    )}
+                  </button>
+                  {showLoopConfig && loop.enabled && (
+                    <div className="mx-1 mb-1 space-y-2 rounded-md bg-muted/40 p-2.5">
+                      <label className="flex items-center justify-between gap-2 text-xs text-foreground">
+                        Max iterations
+                        <input
+                          type="number"
+                          min={1}
+                          max={25}
+                          value={loop.config.maxIterations}
+                          onChange={(e) => {
+                            const n = parseInt(e.target.value, 10);
+                            if (Number.isFinite(n)) setLoopConfig(panelId, { maxIterations: Math.min(25, Math.max(1, n)) });
+                          }}
+                          className="w-16 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+                        />
+                      </label>
+                      <label className="flex items-center justify-between gap-2 text-xs text-foreground">
+                        Time budget (min)
+                        <input
+                          type="number"
+                          min={1}
+                          max={480}
+                          placeholder="∞"
+                          value={loop.config.timeBudgetMinutes ?? ''}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            if (raw === '') {
+                              setLoopConfig(panelId, { timeBudgetMinutes: null });
+                              return;
+                            }
+                            const n = parseInt(raw, 10);
+                            if (Number.isFinite(n) && n > 0) setLoopConfig(panelId, { timeBudgetMinutes: Math.min(480, n) });
+                          }}
+                          className="w-16 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+                        />
+                      </label>
+                    </div>
+                  )}
+
+                  {/* Goals */}
+                  <button
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={goalsConfig.enabled}
+                    disabled={goalsBusy}
+                    onClick={() => void handleGoalsToggle()}
+                    className={cn(
+                      'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted/60 disabled:opacity-50',
+                      goalsConfig.enabled ? 'text-amber-400' : 'text-muted-foreground hover:text-foreground',
+                    )}
+                  >
+                    <Flag className="h-3.5 w-3.5 shrink-0" />
+                    <span className="flex-1">Standing goals</span>
+                    {goalsConfig.enabled && (
+                      <span className="tabular-nums text-[10px]">max {goalsConfig.max_turns}</span>
+                    )}
+                  </button>
+                  {showGoalsConfig && goalsConfig.enabled && (
+                    <div className="mx-1 mb-1 space-y-2 rounded-md bg-muted/40 p-2.5">
+                      <p className="text-[11px] leading-snug text-muted-foreground">
+                        Set objectives with <span className="font-mono">/goal</span>. Max turns caps auto-continue.
+                      </p>
+                      <label className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                        Max turns
+                        <input
+                          type="number"
+                          min={1}
+                          max={200}
+                          value={goalsConfig.max_turns}
+                          onChange={(e) => {
+                            const n = parseInt(e.target.value, 10);
+                            if (Number.isFinite(n)) void handleGoalsMaxTurns(n);
+                          }}
+                          disabled={goalsBusy}
+                          className="w-16 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+                        />
+                      </label>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
+            </div>
+
+            {/* Live context meter — renders nothing until the backend
+                reports usage, so the toolbar never shifts. */}
+            <ContextMeter />
 
             {contextRefsActive && hasContextRefs(safeValue) && (
               <span

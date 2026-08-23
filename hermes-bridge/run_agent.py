@@ -23,6 +23,11 @@ from kanban_tools import (
     kanban_list, kanban_create, kanban_link, kanban_unblock,
 )
 from team_tools import TEAM_TOOL_DEFINITIONS, TEAM_TOOL_NAMES, team_delegate_to_agent, team_report_progress, team_query_context, team_publish_finding, team_request_help, team_signal_completion
+from bridge_events import (
+    callback_accepts_kwarg,
+    filter_tool_defs_for_plan_mode,
+    filter_toolsets_for_plan_mode,
+)
 
 # ── hermes-agent toolset bridge ──────────────────────────────────────────────
 # Attempt to import hermes-agent's toolsets module to resolve ecosystem tool
@@ -1216,6 +1221,12 @@ def _tool_run_command(command: str) -> str:
             f"Hint: Command not found. Check if the program is installed and in PATH.\n"
             f"Command: {command}"
         )
+    except PermissionError:
+        return (
+            f"[Exit code: 126]\n"
+            f"Hint: Permission denied. The file may not be executable.\n"
+            f"Command: {command}"
+        )
     except subprocess.TimeoutExpired:
         return (
             f"Error: Command timed out after {RUN_COMMAND_TIMEOUT_SECONDS} seconds.\n"
@@ -1376,21 +1387,28 @@ class AIAgent:
         # Accepted for parity with HermesAgentAdapter — the custom fallback
         # agent has no reasoning controls, so this is currently unused.
         reasoning_effort: Optional[str] = None,
+        # Plan mode: strip mutating tools from the catalog so the agent can
+        # only research / plan (see bridge_events.plan-mode helpers).
+        plan_mode: bool = False,
         on_tool_start: Optional[Callable] = None,
         on_tool_end: Optional[Callable] = None,
         on_text: Optional[Callable] = None,
         on_server_tool_event: Optional[Callable] = None,
+        on_stream_retry: Optional[Callable] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.max_iterations = max_iterations
+        self.plan_mode = bool(plan_mode)
         requested_toolsets = enabled_toolsets or ["web", "browser", "terminal", "vision"]
         if repo_mode and not worktree_mode:
             requested_toolsets = [
                 toolset for toolset in requested_toolsets
                 if toolset not in REPO_MODE_BLOCKED_TOOLSETS
             ]
+        if self.plan_mode:
+            requested_toolsets = filter_toolsets_for_plan_mode(requested_toolsets)
         self.enabled_toolsets = requested_toolsets
         self.repo_mode = repo_mode
         self.worktree_mode = worktree_mode
@@ -1403,6 +1421,7 @@ class AIAgent:
         self.on_tool_end = on_tool_end
         self.on_text = on_text
         self.on_server_tool_event = on_server_tool_event
+        self.on_stream_retry = on_stream_retry
         self.on_thinking: Optional[Callable] = None
         self.on_reasoning: Optional[Callable] = None
         self.session_cache: dict[str, str] = {}
@@ -1465,6 +1484,69 @@ class AIAgent:
                     f"{', '.join(self._mcp_tool_routes.keys())}",
                     flush=True,
                 )
+
+        # Plan mode: drop any mutating tools that slipped through toolset
+        # filtering (mixed toolsets like ``files`` keep their read-only tools;
+        # repo edit tools and custom MCP mutators are stripped by name).
+        if self.plan_mode:
+            before = len(self.tools)
+            self.tools = filter_tool_defs_for_plan_mode(self.tools)
+            removed = before - len(self.tools)
+            if removed:
+                print(
+                    f"[hermes-agent] plan_mode: removed {removed} mutating tool(s) "
+                    f"from catalog ({len(self.tools)} remaining)",
+                    flush=True,
+                )
+
+    def _emit_tool_start(self, tool_name: str, tool_input: str, call_id: Optional[str] = None) -> None:
+        """Invoke on_tool_start, passing call_id only when the callback accepts it.
+
+        The bridge's on_tool_start callback takes the structured call_id kwarg;
+        other consumers (cron jobs, tests) register plain positional callbacks
+        — probing keeps both working.
+        """
+        if not self.on_tool_start:
+            return
+        if call_id is not None and callback_accepts_kwarg(self.on_tool_start, "call_id"):
+            self.on_tool_start(tool_name, tool_input, call_id=call_id)
+        else:
+            self.on_tool_start(tool_name, tool_input)
+
+    def _emit_tool_end(
+        self,
+        tool_name: str,
+        tool_input: str,
+        tool_output: str,
+        call_id: Optional[str] = None,
+        exit_code: Optional[int] = None,
+        output_truncated: bool = False,
+        output_truncated_lines: int = 0,
+    ) -> None:
+        """Invoke on_tool_end, passing structured kwargs only when accepted."""
+        if not self.on_tool_end:
+            return
+        if call_id is not None and callback_accepts_kwarg(self.on_tool_end, "call_id"):
+            self.on_tool_end(
+                tool_name,
+                tool_input,
+                tool_output,
+                call_id=call_id,
+                exit_code=exit_code,
+                output_truncated=output_truncated,
+                output_truncated_lines=output_truncated_lines,
+            )
+        else:
+            self.on_tool_end(tool_name, tool_input, tool_output)
+
+    def _emit_stream_retry(self, attempt: int, max_attempts: int, reason: str, delay_ms: int) -> None:
+        """Surface an upstream stream retry to the bridge (best-effort)."""
+        if not self.on_stream_retry:
+            return
+        try:
+            self.on_stream_retry(attempt, max_attempts, reason, delay_ms)
+        except Exception as e:
+            print(f"[hermes-agent] on_stream_retry failed: {e}", flush=True)
 
     def _emit_event(self, event: dict) -> None:
         """Safely emit a server tool event, logging but not raising on failure."""
@@ -2254,6 +2336,12 @@ class AIAgent:
                         f"retrying in {delay:.1f}s: {error_message[:120]}",
                         flush=True,
                     )
+                    self._emit_stream_retry(
+                        attempt=attempt + 1,
+                        max_attempts=API_MAX_RETRIES + 1,
+                        reason=f"http_{status_code}",
+                        delay_ms=int(delay * 1000),
+                    )
                     time.sleep(delay)
                     continue
 
@@ -2271,6 +2359,12 @@ class AIAgent:
                         f"[hermes-agent] Network error (attempt {attempt + 1}/{API_MAX_RETRIES + 1}), "
                         f"retrying in {delay:.1f}s: {exc}",
                         flush=True,
+                    )
+                    self._emit_stream_retry(
+                        attempt=attempt + 1,
+                        max_attempts=API_MAX_RETRIES + 1,
+                        reason="network_error",
+                        delay_ms=int(delay * 1000),
                     )
                     time.sleep(delay)
                     continue
@@ -2687,7 +2781,7 @@ class AIAgent:
                     tc, tool_name, arguments = tc_tuple
                     tool_input = json.dumps(arguments)
                     if self.on_tool_start:
-                        self.on_tool_start(tool_name, tool_input)
+                        self._emit_tool_start(tool_name, tool_input, call_id=tc["id"])
                     if tool_name in REPO_TOOL_NAMES:
                         try:
                             result = self._execute_repo_tool(tool_name, arguments)
@@ -2701,7 +2795,7 @@ class AIAgent:
                     else:
                         result = _execute_tool(tool_name, arguments)
                     if self.on_tool_end:
-                        self.on_tool_end(tool_name, tool_input, result)
+                        self._emit_tool_end(tool_name, tool_input, result, call_id=tc["id"])
                     return tc["id"], result
 
                 with ThreadPoolExecutor(max_workers=min(_MAX_PARALLEL_WORKERS, len(parsed_tool_calls))) as executor:
@@ -2743,7 +2837,7 @@ class AIAgent:
                         continue
 
                     if self.on_tool_start:
-                        self.on_tool_start(tool_name, tool_input)
+                        self._emit_tool_start(tool_name, tool_input, call_id=tc["id"])
 
                     if is_mcp:
                         route = self._mcp_tool_routes[tool_name]
@@ -2754,7 +2848,7 @@ class AIAgent:
                         result = _execute_tool(tool_name, arguments)
 
                     if self.on_tool_end:
-                        self.on_tool_end(tool_name, tool_input, result)
+                        self._emit_tool_end(tool_name, tool_input, result, call_id=tc["id"])
 
                     # Add tool result to messages
                     messages.append({

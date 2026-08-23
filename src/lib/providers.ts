@@ -54,6 +54,9 @@ export const HERMES_RECOMMENDED_MODELS = [
   // Mistral direct API
   'mistral-large-latest',
   'mistral-small-latest',
+  // Xiaomi MiMo direct API (xiaomimimo.com)
+  'xiaomi/mimo-v2.5-pro',
+  'mimo-v2.5-pro',
   // Free models (OpenRouter free tier)
   'deepseek/deepseek-r1-0528',
   'google/gemini-2.0-flash-001',

@@ -4,19 +4,7 @@ import { useUIStore } from '@/stores/ui-store';
 import { useSettingsStore } from '@/stores/settings-store';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { appTourSteps } from './tour-config';
-
-/**
- * Puts the UI into a known state (sidebar open, Threads tab, chat view) so every
- * tour target is mounted, then opens the tour. Runs once on first run after setup;
- * marks the tour as seen when it closes so it never auto-starts again.
- */
-export function prepareUiForTour() {
-  const ui = useUIStore.getState();
-  ui.setSidebarOpen(true);
-  ui.setActiveTab('chat');
-  ui.setActiveSubTab('threads');
-  ui.setKanbanFullscreen(false);
-}
+import { prepareUiForTour } from '@/lib/tour-setup';
 
 export function TourController() {
   const { setIsOpen, isOpen, setCurrentStep, currentStep, setSteps } = useTour();

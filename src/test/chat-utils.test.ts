@@ -4,6 +4,7 @@ import {
   formatMissingRepoFileError,
   isFallbackSwitchData,
   parseFallbackSwitchDelta,
+  synthesizeToolInvocationsForPersistence,
 } from '@/hooks/chat-utils';
 
 describe('chat-utils fallback switch', () => {
@@ -57,5 +58,39 @@ describe('chat-utils repo path recovery', () => {
 
     expect(message).toContain('Possible matches:');
     expect(message).toContain('server/src/routes/cards.ts');
+  });
+});
+
+describe('chat-utils synthesized tool persistence', () => {
+  it('carries structured enrichment (exitCode/durationMs/success) through persistence', () => {
+    const invocations = synthesizeToolInvocationsForPersistence([
+      {
+        tool: 'run_command',
+        status: 'completed',
+        input: 'npm run build',
+        output: 'built',
+        exitCode: 1,
+        durationMs: 2345,
+        success: false,
+      },
+    ]);
+    expect(invocations).toHaveLength(1);
+    const invocation = invocations[0];
+    expect(invocation.state).toBe('result');
+    expect(invocation.result).toMatchObject({
+      output: 'built',
+      exitCode: 1,
+      durationMs: 2345,
+      success: false,
+    });
+  });
+
+  it('omits enrichment fields when the activity has none (legacy streams)', () => {
+    const invocations = synthesizeToolInvocationsForPersistence([
+      { tool: 'run_command', status: 'completed', input: 'ls', output: 'src' },
+    ]);
+    expect(invocations[0].result).toEqual({ output: 'src' });
+    expect(invocations[0].result).not.toHaveProperty('exitCode');
+    expect(invocations[0].result).not.toHaveProperty('durationMs');
   });
 });

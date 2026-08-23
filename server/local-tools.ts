@@ -66,15 +66,53 @@ async function resolveSafePath(path: string): Promise<{ resolved: string; error?
 
 // ─── Shared exec helper ────────────────────────────────────────────────────
 
-interface ExecResult {
+export interface ExecResultInfo {
   output: string;
+  /** Process exit code (null when the tool is not a shell command). */
+  exitCode: number | null;
+  outputTruncated: boolean;
+  outputTruncatedLines: number;
 }
 
-function truncateOutput(output: string): string {
+/** Result of a server-executed tool call, reported for `tool_call_end`. */
+export interface ToolExecutionInfo {
+  toolCallId: string;
+  toolName: string;
+  exitCode: number | null;
+  outputTruncated: boolean;
+  outputTruncatedLines: number;
+}
+
+export type ApprovalOutcome = 'approved' | 'denied' | 'timed_out' | 'abort';
+
+export interface LocalToolHooks {
+  /**
+   * Ask the approval engine whether a tool call may proceed. The engine
+   * classifies safe commands and consults policy rules internally; when a
+   * decision is required it parks the execution and emits an
+   * `approval_request` custom field to the client.
+   */
+  requestApproval?: (input: {
+    tool: string;
+    command?: string;
+    cwd?: string;
+    reason: string;
+  }) => Promise<ApprovalOutcome>;
+  /** Reports structured execution info (exit code, truncation) for events. */
+  onExecuted?: (info: ToolExecutionInfo) => void;
+}
+
+function truncateOutput(output: string): { output: string; truncated: boolean; truncatedLines: number } {
   if (output.length > MAX_OUTPUT_LENGTH) {
-    return output.slice(0, MAX_OUTPUT_LENGTH) + `\n\n[Output truncated at ${MAX_OUTPUT_LENGTH.toLocaleString()} chars]`;
+    const kept = output.slice(0, MAX_OUTPUT_LENGTH);
+    const droppedLines = output.split('\n').length - kept.split('\n').length;
+    return {
+      output: kept + `\n\n[Output truncated at ${MAX_OUTPUT_LENGTH.toLocaleString()} chars]`,
+      truncated: true,
+      truncatedLines: Math.max(0, droppedLines - 1),
+    };
   }
-  return output;
+  return { output, truncated: false, truncatedLines: 0 };
 }
 
 function formatExecOutput(stdout: string, stderr: string): string {
@@ -88,8 +126,8 @@ function execWithTimeout(
   command: string,
   args: string[] | null,
   options: { timeoutMs: number; shell?: string },
-): Promise<ExecResult> {
-  return new Promise<ExecResult>((resolve) => {
+): Promise<ExecResultInfo> {
+  return new Promise<ExecResultInfo>((resolve) => {
     const execOptions = {
       encoding: 'utf8' as const,
       timeout: options.timeoutMs,
@@ -101,11 +139,15 @@ function execWithTimeout(
       if (error?.killed) {
         resolve({
           output: `Error: Command timed out after ${options.timeoutMs / 1000} seconds.`,
+          exitCode: null,
+          outputTruncated: false,
+          outputTruncatedLines: 0,
         });
         return;
       }
 
       let output = formatExecOutput(stdout, stderr);
+      const exitCode = error?.code ?? 0;
 
       if (error?.code) {
         output += `\n[Exit code: ${error.code}]`;
@@ -116,7 +158,13 @@ function execWithTimeout(
         }
       }
 
-      resolve({ output: truncateOutput(output) || '(no output)' });
+      const { output: truncatedOutput, truncated, truncatedLines } = truncateOutput(output);
+      resolve({
+        output: truncatedOutput || '(no output)',
+        exitCode,
+        outputTruncated: truncated,
+        outputTruncatedLines: truncatedLines,
+      });
     };
 
     if (args !== null) {
@@ -154,10 +202,33 @@ export interface LocalToolsets {
  * Build local execution tools that run on the Node.js server.
  * These tools give any AI provider terminal, file I/O, and Python execution
  * capabilities — the same tools that were previously Hermes-only.
+ *
+ * `hooks.requestApproval` gates run_command / execute_python through the
+ * server-side approval engine (safe commands and matching policy rules are
+ * allowed silently; anything else parks the execution on an approval_request).
+ * `hooks.onExecuted` reports structured execution info for `tool_call_end`.
  */
-export function buildLocalExecutionTools(toolsets: LocalToolsets) {
+export function buildLocalExecutionTools(toolsets: LocalToolsets, hooks?: LocalToolHooks) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tools: Record<string, CoreTool<any, any>> = {};
+
+  /** Gate a tool call through the approval engine; true when it may proceed. */
+  async function approved(
+    tool: string,
+    command: string,
+    reason: string,
+  ): Promise<boolean> {
+    if (!hooks?.requestApproval) {
+      return true;
+    }
+    const outcome = await hooks.requestApproval({
+      tool,
+      command,
+      cwd: process.cwd(),
+      reason,
+    });
+    return outcome === 'approved';
+  }
 
   if (toolsets.terminal) {
     tools.run_command = tool({
@@ -166,10 +237,20 @@ export function buildLocalExecutionTools(toolsets: LocalToolsets) {
       parameters: z.object({
         command: z.string().describe('The shell command to execute'),
       }),
-      execute: async ({ command }) => {
+      execute: async ({ command }, options) => {
+        if (!(await approved('run_command', command, `Run shell command: ${command}`))) {
+          return `error: run_command was denied: the command "${command.slice(0, 200)}" was not approved. Read-only commands (cat, ls, grep, head, tail, pwd, wc, find, rg, git status/log/diff/show/branch) run without approval.`;
+        }
         const result = await execWithTimeout(command, null, {
           timeoutMs: RUN_COMMAND_TIMEOUT_MS,
           shell: '/bin/sh',
+        });
+        hooks?.onExecuted?.({
+          toolCallId: options.toolCallId,
+          toolName: 'run_command',
+          exitCode: result.exitCode,
+          outputTruncated: result.outputTruncated,
+          outputTruncatedLines: result.outputTruncatedLines,
         });
         return result.output;
       },
@@ -183,10 +264,21 @@ export function buildLocalExecutionTools(toolsets: LocalToolsets) {
       parameters: z.object({
         code: z.string().describe('The Python code to execute'),
       }),
-      execute: async ({ code }) => {
+      execute: async ({ code }, options) => {
+        const preview = code.length > 200 ? `${code.slice(0, 200)}…` : code;
+        if (!(await approved('execute_python', `python3 -c "${preview.replace(/"/g, '\\"')}"`, 'Execute Python code on the local machine'))) {
+          return 'error: execute_python was denied: the code execution was not approved.';
+        }
         // Use execFile (no shell) to avoid shell injection via code content
         const result = await execWithTimeout('python3', ['-c', code], {
           timeoutMs: EXECUTE_PYTHON_TIMEOUT_MS,
+        });
+        hooks?.onExecuted?.({
+          toolCallId: options.toolCallId,
+          toolName: 'execute_python',
+          exitCode: result.exitCode,
+          outputTruncated: result.outputTruncated,
+          outputTruncatedLines: result.outputTruncatedLines,
         });
         return result.output;
       },

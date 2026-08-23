@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
-import { Copy, Check, RotateCcw, Pencil, ChevronDown, Loader2, Wrench, FileCode, FileCode2, FilePlus, FileX, FileSearch, GitPullRequestDraft, CheckCircle2, ArrowRight, GitBranch } from 'lucide-react';
+import { Copy, Check, RotateCcw, Pencil, ChevronDown, Loader2, Wrench, FileCode, FileCode2, FilePlus, FileX, FileSearch, GitPullRequestDraft, CheckCircle2, ArrowRight, GitBranch, X, XCircle } from 'lucide-react';
 import { GhostIcon } from './GhostIcon';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { useChangesetStore } from '@/stores/changeset-store';
-import { useChatScopeId } from '@/contexts/PanelContext';
+import { useChatScopeId } from '@/hooks/use-panel-context';
 import { usePreviewStore } from '@/stores/preview-store';
 import type { Message } from '@/lib/db';
 import { computeDiffLines, getChangeLineDelta, summarizeChangeLines } from '@/lib/change-diff';
@@ -12,6 +12,8 @@ import { AgentActivity, type ToolActivityEvent } from './AgentActivity';
 import { extractPseudoToolInvocations, extractTextFileEdits, getPseudoToolSourceText, stripPseudoToolInvocations } from '@/lib/pseudo-tool-calls';
 import { getLocalImageTarget } from '@/lib/local-images';
 import { getToolInvocationKey, parseToolActivityInput } from '@/lib/tool-activity';
+import type { ToolCallRecords } from '@/stores/hermes-store';
+import { formatToolDuration, splitToolOutputHeadTail } from '@/hooks/useChat';
 import '@shoelace-style/shoelace/dist/components/details/details.js';
 
 /**
@@ -128,11 +130,36 @@ function getToolOutputMessage(result: unknown): string | null {
   return null;
 }
 
+/** Best-effort exit code embedded in a tool result ({ exitCode } from the
+ *  structured tool_call_end enrichment or an error payload). */
+function extractExitCode(result: unknown): number | null {
+  if (result && typeof result === 'object') {
+    const exitCode = (result as { exitCode?: unknown }).exitCode;
+    if (typeof exitCode === 'number') {
+      return exitCode;
+    }
+  }
+  return null;
+}
+
+/** Best-effort duration (ms) embedded in a tool result. */
+function extractDurationMs(result: unknown): number | null {
+  if (result && typeof result === 'object') {
+    const durationMs = (result as { durationMs?: unknown }).durationMs;
+    if (typeof durationMs === 'number' && Number.isFinite(durationMs)) {
+      return durationMs;
+    }
+  }
+  return null;
+}
+
 interface MessagePart {
-  type: 'text' | 'reasoning' | 'tool-invocation' | 'step-start' | 'source' | 'file';
+  type: 'text' | 'reasoning' | 'tool-invocation' | 'step-start' | 'source' | 'file' | 'tool_approval';
   text?: string;
   reasoning?: string;
   toolInvocation?: ToolInvocation;
+  /** Tool-approval audit line (`tool_approval` parts) — true when approved. */
+  approved?: boolean;
 }
 
 const LOCAL_IMAGE_OUTPUT_LINE_RE = /^(?:MEDIA:|:)?(?:~\/\S+|\/(?:Users|home|tmp|var|opt|etc|private)\/\S+)\.(?:png|jpe?g|gif|webp|svg|avif|bmp)$/i;
@@ -160,6 +187,10 @@ interface MessageBubbleProps {
   isReasoningStreaming?: boolean;
   toolInvocations?: ToolInvocation[];
   toolActivity?: ToolActivityEvent[];
+  /** Structured tool-call records for this message (enriched card data). */
+  toolCallRecords?: ToolCallRecords;
+  /** Explicit retry for a failed tool card. */
+  onRetryTool?: (toolName: string, callId?: string) => void;
   allowPseudoRepoWrites?: boolean;
   onRegenerate?: () => void;
   onEdit?: (content: string) => void;
@@ -786,15 +817,93 @@ function FileEditPreview({ filePath }: { filePath: string }) {
   );
 }
 
-function ToolInvocationDisplay({ invocation, isLatest }: { invocation: ToolInvocation; isLatest?: boolean }) {
+/** HEAD+TAIL truncated tool output with an expandable "… +N lines" row.
+ *  Server-side truncation numbers (outputTruncated/outputTruncatedLines)
+ *  win when the backend reports them. */
+const OUTPUT_COLLAPSE_THRESHOLD = 40;
+
+function ToolOutputBlock({
+  text,
+  outputTruncated,
+  outputTruncatedLines,
+  outputExpanded,
+  onToggleOutput,
+}: {
+  text: string;
+  outputTruncated?: boolean;
+  outputTruncatedLines?: number;
+  outputExpanded: boolean;
+  onToggleOutput: () => void;
+}) {
+  const split = splitToolOutputHeadTail(text);
+  const serverHidden = outputTruncated ? Math.max(0, outputTruncatedLines ?? 0) : 0;
+  const isLong = split.totalLines > OUTPUT_COLLAPSE_THRESHOLD;
+  const hiddenLines = isLong ? Math.max(split.hiddenLines, serverHidden) : serverHidden;
+  const hasTail = split.tail.length > 0;
+  const preClass = 'text-[11px] font-mono text-foreground/80 bg-muted/30 rounded-md px-2.5 py-2 max-h-[200px] overflow-auto whitespace-pre-wrap break-all';
+
+  if (hiddenLines === 0) {
+    return <pre className={preClass}>{text}</pre>;
+  }
+
+  const label = `… +${hiddenLines} line${hiddenLines === 1 ? '' : 's'}`;
+
+  return (
+    <>
+      <pre className={preClass}>{split.head}</pre>
+      {hasTail ? (
+        <button
+          type="button"
+          onClick={onToggleOutput}
+          className="mt-1 flex w-full items-center gap-1 rounded-md border border-border/30 bg-muted/20 px-2 py-1 text-[10px] font-mono text-muted-foreground/70 transition-colors duration-75 hover:bg-muted/40"
+        >
+          <span>{outputExpanded ? 'Hide middle' : label}</span>
+          <ChevronDown className={`h-3 w-3 transition-transform duration-100 ${outputExpanded ? 'rotate-180' : ''}`} />
+        </button>
+      ) : (
+        <div className="mt-1 px-2 py-1 text-[10px] font-mono text-muted-foreground/50">
+          {label} (truncated server-side)
+        </div>
+      )}
+      {outputExpanded && hasTail && <pre className={preClass}>{split.tail}</pre>}
+    </>
+  );
+}
+
+function ToolInvocationDisplay({
+  invocation,
+  isLatest,
+  toolCallRecords,
+  onRetryTool,
+}: {
+  invocation: ToolInvocation;
+  isLatest?: boolean;
+  toolCallRecords?: ToolCallRecords;
+  onRetryTool?: (toolName: string, callId?: string) => void;
+}) {
   const scopeId = useChatScopeId();
   const [expanded, setExpanded] = useState(false);
+  const [outputExpanded, setOutputExpanded] = useState(false);
   const toolInfo = TOOL_LABELS[invocation.toolName] || { label: invocation.toolName, icon: Wrench };
   const Icon = toolInfo.icon;
   const isComplete = invocation.state === 'result';
   const isInProgress = invocation.state === 'call' || invocation.state === 'partial-call';
   const errorMessage = getToolErrorMessage(invocation.result);
   const hasError = !!errorMessage;
+  // Structured execution enrichment: prefer the live tool-call record (keyed
+  // by the SDK call id — matches for server-executed tools), else fall back
+  // to fields embedded in the result object.
+  const record = invocation.toolCallId ? toolCallRecords?.[invocation.toolCallId] : undefined;
+  const exitCode = record?.exitCode !== undefined && record?.exitCode !== null
+    ? record.exitCode
+    : extractExitCode(invocation.result);
+  const durationMs = record?.durationMs !== undefined && record?.durationMs !== null
+    ? record.durationMs
+    : extractDurationMs(invocation.result);
+  const isFailed = record?.status === 'failed' || hasError || (exitCode !== null && exitCode !== 0);
+  // Pseudo-synthesized rows (parsed from text, not real executions) keep the
+  // legacy "done" tag — the lifecycle verbs are for actual tool calls.
+  const isSynthesizedPseudo = (invocation.result as { synthesized?: unknown } | null)?.synthesized === true;
   const outputMessage: string | null = getToolOutputMessage(invocation.result);
   const hasOutput = isComplete && !hasError && !!outputMessage && outputMessage !== '(no output)';
   const renderOutputAsMarkdown = !!outputMessage && shouldRenderToolOutputAsMarkdown(outputMessage);
@@ -937,32 +1046,35 @@ function ToolInvocationDisplay({ invocation, isLatest }: { invocation: ToolInvoc
   }
 
   return (
-    <div className="rounded-md border border-amber-500/20 bg-amber-500/5 my-1.5 overflow-hidden">
-      {/* Accordion header — always visible, click to expand */}
+    <div className="rounded-md border border-border/50 my-1 overflow-hidden">
+      {/* Accordion header — always visible, click to expand. Codex-style:
+          one quiet neutral line, color only for failure states. */}
       <button
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
-        className="flex items-center gap-2 w-full px-3 py-1.5 text-left hover:bg-amber-500/10 transition-colors"
+        className="flex items-center gap-2 w-full px-3 py-1.5 text-left hover:bg-muted/40 transition-colors"
       >
         <ChevronDown
           className={cn(
-            'h-3.5 w-3.5 text-amber-500/70 transition-transform duration-200 flex-shrink-0',
+            'h-3.5 w-3.5 text-muted-foreground/60 transition-transform duration-200 flex-shrink-0',
             expanded ? 'rotate-0' : '-rotate-90'
           )}
         />
         {isInProgress ? (
           <GhostIcon />
+        ) : hasError ? (
+          <XCircle className="h-3.5 w-3.5 shrink-0 text-red-400" />
         ) : isComplete ? (
-          <CheckCircle2 className={cn('h-3.5 w-3.5 shrink-0', hasError ? 'text-amber-500' : 'text-green-500')} />
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
         ) : (
-          <Icon className="h-3.5 w-3.5 text-amber-500/70 shrink-0" />
+          <Icon className="h-3.5 w-3.5 text-muted-foreground/60 shrink-0" />
         )}
-        <span className="text-[11px] font-medium text-amber-600/80 dark:text-amber-400/80">
+        <span className="text-[11px] font-medium text-muted-foreground truncate min-w-0">
           {displayLabel}
         </span>
         {toolTargetLabel && (
           <code
-            className="text-[11px] text-foreground/70 bg-muted/50 px-1.5 py-0.5 rounded font-mono truncate min-w-0 max-w-[160px] sm:max-w-[300px]"
+            className="text-[11px] text-muted-foreground/70 bg-muted/40 px-1.5 py-0.5 rounded font-mono truncate min-w-0 max-w-[160px] sm:max-w-[300px]"
             title={toolTargetLabel}
           >
             {toolTargetLabel}
@@ -988,13 +1100,41 @@ function ToolInvocationDisplay({ invocation, isLatest }: { invocation: ToolInvoc
             showStaged={isComplete}
           />
         )}
-        {!isInProgress && hasError && (
-          <span className="ml-auto text-[10px] text-amber-500/70">error</span>
+        {!isInProgress && isFailed && !isSynthesizedPseudo && (
+          <span className="ml-auto text-[10px] font-mono text-red-500/90 shrink-0">Failed {invocation.toolName}</span>
         )}
-        {!isInProgress && isComplete && !hasError && (
+        {!isInProgress && isComplete && !isFailed && !isSynthesizedPseudo && (
+          <span className="ml-auto text-[10px] font-mono text-muted-foreground/50 shrink-0">{invocation.toolName}</span>
+        )}
+        {!isInProgress && isComplete && isSynthesizedPseudo && (
           <span className="ml-auto text-[10px] text-muted-foreground/60">done</span>
         )}
+        {!isInProgress && isFailed && !isSynthesizedPseudo && exitCode !== null && (
+          <span className="text-[10px] font-mono text-red-500/90 shrink-0">✗ ({exitCode})</span>
+        )}
+        {!isInProgress && !isSynthesizedPseudo && durationMs !== null && (
+          <span className={cn('text-[10px] font-mono shrink-0', isFailed ? 'text-red-400/70' : 'text-muted-foreground/50')}>
+            {formatToolDuration(durationMs)}
+          </span>
+        )}
       </button>
+
+      {/* Explicit retry for a failed tool — a sibling action row so it stays
+          outside the toggle button. Idempotent: the runtime caps retries per
+          message and only acts when the stream is idle. */}
+      {!isInProgress && isFailed && !isSynthesizedPseudo && onRetryTool && (
+        <div className="flex items-center justify-end gap-2 px-3 pb-1.5">
+          <button
+            type="button"
+            onClick={() => onRetryTool(invocation.toolName, invocation.toolCallId)}
+            className="inline-flex items-center gap-1 rounded-md border border-red-500/30 bg-red-500/5 px-2 py-0.5 text-[10px] font-medium text-red-400 transition-colors duration-100 hover:bg-red-500/10"
+            title={`Retry ${invocation.toolName} with the same arguments`}
+          >
+            <RotateCcw className="h-2.5 w-2.5" />
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Accordion body — slides open. grid-rows 0fr/1fr keeps the animation
           without a fixed max-height, so long batch diffs are never clipped. */}
@@ -1028,11 +1168,15 @@ function ToolInvocationDisplay({ invocation, isLatest }: { invocation: ToolInvoc
                 <div className="rounded-md bg-muted/30 px-2.5 py-2">
                   <MarkdownRenderer content={outputMessage} />
                 </div>
-              ) : (
-                <pre className="text-[11px] font-mono text-foreground/80 bg-muted/30 rounded-md px-2.5 py-2 max-h-[200px] overflow-auto whitespace-pre-wrap break-all">
-                  {outputMessage}
-                </pre>
-              )}
+              ) : outputMessage ? (
+                <ToolOutputBlock
+                  text={outputMessage}
+                  outputTruncated={record?.outputTruncated}
+                  outputTruncatedLines={record?.outputTruncatedLines}
+                  outputExpanded={outputExpanded}
+                  onToggleOutput={() => setOutputExpanded((current) => !current)}
+                />
+              ) : null}
             </div>
           )}
 
@@ -1147,6 +1291,8 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
   isReasoningStreaming,
   toolInvocations,
   toolActivity,
+  toolCallRecords,
+  onRetryTool,
   allowPseudoRepoWrites = true,
   onRegenerate,
   onEdit,
@@ -1239,22 +1385,36 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
       return [];
     }
 
-    return toolActivity.map((event, index) => ({
-      toolCallId: `activity-${message.id}-${index}`,
-      toolName: event.tool,
-      args: parseToolActivityInput(event.input),
-      state: event.status === 'completed' ? 'result' as const : 'call' as const,
-      ...(event.status === 'completed'
-        ? {
-            result: event.output
-              ? (/^(error|failed)[:\s]/i.test(event.output.trim())
-                  ? { error: event.output.trim() }
-                  : { output: event.output })
-              : { ok: true },
-          }
-        : {}),
-      ...(typeof event.textOffset === 'number' ? { textOffset: event.textOffset } : {}),
-    }));
+    return toolActivity.map((event, index) => {
+      const resultBase = event.output
+        ? (/^(error|failed)[:\s]/i.test(event.output.trim())
+            ? { error: event.output.trim() }
+            : { output: event.output })
+        : { ok: true };
+      return {
+        toolCallId: `activity-${message.id}-${index}`,
+        toolName: event.tool,
+        args: parseToolActivityInput(event.input),
+        state: event.status === 'completed' ? 'result' as const : 'call' as const,
+        ...(event.status === 'completed'
+          ? {
+              result: {
+                ...resultBase,
+                // Structured execution enrichment (additive — legacy streams
+                // omit these and render exactly as before).
+                ...(event.success !== undefined ? { success: event.success } : {}),
+                ...(typeof event.exitCode === 'number' && event.exitCode !== null
+                  ? { exitCode: event.exitCode }
+                  : {}),
+                ...(typeof event.durationMs === 'number' && event.durationMs !== null
+                  ? { durationMs: event.durationMs }
+                  : {}),
+              },
+            }
+          : {}),
+        ...(typeof event.textOffset === 'number' ? { textOffset: event.textOffset } : {}),
+      };
+    });
   }, [isUser, message.id, toolActivity]);
   const orderedParts = React.useMemo(() => {
     if (isUser) return [];
@@ -1474,7 +1634,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
         ) : (
           <>
             {isUser ? (
-              <div className="rounded-2xl bg-muted px-4 py-2.5 text-sm whitespace-pre-wrap text-foreground">
+              <div className="chat-user-chip rounded-xl px-3.5 py-2 text-[13px] whitespace-pre-wrap text-foreground">
                 <UserMessageContent content={displayContent} />
               </div>
             ) : (
@@ -1503,7 +1663,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
                       >
                         <div
                           className="pl-3 border-l-2 border-muted-foreground/20 text-sm text-muted-foreground leading-relaxed"
-                          style={{ fontSize: '0.8rem' }}
+                          style={{ fontSize: '0.78rem' }}
                         >
                           <MarkdownRenderer content={part.reasoning} />
                         </div>
@@ -1518,7 +1678,25 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
                       key={part.toolInvocation.toolCallId || `tool-${index}`}
                       invocation={part.toolInvocation}
                       isLatest={isStreaming && index === lastToolIndex}
+                      toolCallRecords={toolCallRecords}
+                      onRetryTool={onRetryTool}
                     />
+                  );
+                }
+
+                if (part.type === 'tool_approval' && part.text) {
+                  return (
+                    <div
+                      key={`approval-${index}`}
+                      className="mt-1.5 flex items-center gap-1.5 rounded-md border border-border/30 bg-muted/20 px-2 py-1 font-mono text-[11px] text-muted-foreground/80"
+                    >
+                      {part.approved ? (
+                        <Check className="h-3 w-3 shrink-0 text-emerald-500" />
+                      ) : (
+                        <X className="h-3 w-3 shrink-0 text-red-500" />
+                      )}
+                      <span className="truncate">{part.text}</span>
+                    </div>
                   );
                 }
 
@@ -1536,7 +1714,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
                     <div
                       key={`text-${index}`}
                       className={cn(
-                        index > 0 ? 'mt-3' : undefined,
+                        index > 0 ? 'mt-2.5' : undefined,
                         showStreamCaret && 'streaming-caret-anchor',
                       )}
                     >
@@ -1549,7 +1727,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = React.memo(function M
               })
             )}
             {showAgentActivity && toolActivity && toolActivity.length > 0 && (
-              <AgentActivity events={toolActivity} />
+              <AgentActivity events={toolActivity} onRetryTool={onRetryTool} />
             )}
           </>
         )}

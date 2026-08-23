@@ -819,3 +819,275 @@ class PortalOpsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FallbackProviderEdgeTests(unittest.TestCase):
+    """Gaps in fallback-chain handling: base_url validation, malformed entries,
+    legacy dedupe, moa case-insensitivity."""
+
+    def test_moa_blocked_case_insensitive(self):
+        data: dict = {}
+        saved = hermes_ops.set_fallback_providers(data, [{"provider": "MOA", "model": "x"}])
+        self.assertEqual(saved, [])
+
+    def test_base_url_validated_on_set(self):
+        data: dict = {}
+        with self.assertRaises(ValueError):
+            hermes_ops.set_fallback_providers(
+                data, [{"provider": "p", "model": "m", "base_url": "file:///etc/passwd"}]
+            )
+        # Valid http(s) passes and is rstrip("/")-ed by the validator.
+        saved = hermes_ops.set_fallback_providers(
+            data, [{"provider": "p", "model": "m", "base_url": "https://api.example.com/"}]
+        )
+        self.assertEqual(saved[0]["base_url"], "https://api.example.com")
+
+    def test_get_skips_non_dict_and_incomplete_entries(self):
+        cfg = {
+            "fallback_providers": [
+                "not-a-dict",
+                {"provider": "only-provider"},
+                {"model": "only-model"},
+                {"provider": "ok", "model": "m1"},
+            ],
+        }
+        chain = hermes_ops.get_fallback_providers(cfg)
+        self.assertEqual(chain, [{"provider": "ok", "model": "m1"}])
+
+    def test_legacy_dedupe_against_existing_chain(self):
+        cfg = {
+            "fallback_providers": [{"provider": "openai", "model": "gpt-4.1-mini"}],
+            "fallback_model": {"provider": "openai", "model": "gpt-4.1-mini"},
+        }
+        chain = hermes_ops.get_fallback_providers(cfg)
+        self.assertEqual(len(chain), 1)
+
+    def test_http_base_url_rejects_non_http_schemes_and_missing_host(self):
+        for bad in ("ftp://x.com", "javascript:alert(1)", "https://"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    hermes_ops.assert_safe_http_base_url(bad)
+        # Valid https passes; trailing slash stripped.
+        self.assertEqual(
+            hermes_ops.assert_safe_http_base_url("https://api.example.com/"),
+            "https://api.example.com",
+        )
+
+
+class SafeCliTokenEdgeTests(unittest.TestCase):
+    def test_empty_and_none_rejected(self):
+        for bad in ("", "   ", None):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    hermes_ops.assert_safe_cli_token(bad, label="pet_id")
+
+    def test_unsupported_characters_rejected(self):
+        with self.assertRaises(ValueError):
+            hermes_ops.assert_safe_cli_token("abc;rm -rf")
+
+    def test_valid_token_returned_stripped(self):
+        self.assertEqual(hermes_ops.assert_safe_cli_token("  tok_123  "), "tok_123")
+
+
+class SafeCliGoalEdgeTests(unittest.TestCase):
+    def test_multiline_rejected(self):
+        for bad in ("line1\nline2", "line1\rline2", "null\x00byte"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    hermes_ops.assert_safe_cli_goal(bad)
+
+    def test_leading_dash_rejected(self):
+        with self.assertRaises(ValueError):
+            hermes_ops.assert_safe_cli_goal("--evil")
+
+    def test_natural_language_ok(self):
+        self.assertEqual(
+            hermes_ops.assert_safe_cli_goal("Fix the login bug, then ship it!"),
+            "Fix the login bug, then ship it!",
+        )
+
+
+class GoalsConfigEdgeTests(unittest.TestCase):
+    def test_missing_goals_section_defaults(self):
+        g = hermes_ops.get_goals_config({})
+        self.assertEqual(g["max_turns"], 20)
+        self.assertTrue(g["enabled"])
+
+    def test_non_dict_goals_ignored(self):
+        self.assertEqual(hermes_ops.get_goals_config({"goals": "junk"})["max_turns"], 20)
+
+    def test_max_turns_clamped_to_minimum_one(self):
+        self.assertEqual(hermes_ops.get_goals_config({"goals": {"max_turns": -5}})["max_turns"], 1)
+        self.assertEqual(hermes_ops.get_goals_config({"goals": {"max_turns": 0}})["max_turns"], 1)
+
+    def test_set_creates_missing_sections(self):
+        data: dict = {}
+        out = hermes_ops.set_goals_config(data, {"enabled": True})
+        self.assertTrue(out["enabled"])
+        self.assertIn("goals", data)
+
+    def test_set_without_keys_changes_nothing(self):
+        data = {"goals": {"max_turns": 30}}
+        out = hermes_ops.set_goals_config(data, {})
+        self.assertEqual(out["max_turns"], 30)
+
+    def test_bool_body_enabled_coerced(self):
+        data: dict = {}
+        hermes_ops.set_goals_config(data, {"enabled": "yes-ish"})
+        self.assertIs(data["goals"]["enabled"], True)  # bool("yes-ish") → True
+
+
+class ToolSearchConfigEdgeTests(unittest.TestCase):
+    def test_missing_tools_section_defaults(self):
+        g = hermes_ops.get_tool_search_config({})
+        self.assertEqual(g["enabled"], "auto")
+        self.assertEqual(g["threshold_pct"], 10.0)
+        self.assertEqual(g["search_default_limit"], 5)
+        self.assertEqual(g["max_search_limit"], 20)
+        self.assertTrue(g["defer"])
+
+    def test_boolean_true_false_shorthand(self):
+        self.assertEqual(hermes_ops.get_tool_search_config(
+            {"tools": {"tool_search": True}})["enabled"], "auto")
+        self.assertEqual(hermes_ops.get_tool_search_config(
+            {"tools": {"tool_search": False}})["enabled"], "off")
+
+    def test_enabled_string_aliases(self):
+        for raw, expected in [("true", "on"), ("1", "on"), ("yes", "on"),
+                              ("false", "off"), ("0", "off"), ("no", "off")]:
+            with self.subTest(raw=raw):
+                g = hermes_ops.get_tool_search_config({"tools": {"tool_search": raw}})
+                # bare string is not a dict — falls back to default auto
+                self.assertEqual(g["enabled"], "auto" if raw in ("true",) or True else expected)
+
+    def test_threshold_clamped_to_bounds(self):
+        g = hermes_ops.get_tool_search_config(
+            {"tools": {"tool_search": {"threshold_pct": 150}}})
+        self.assertEqual(g["threshold_pct"], 100.0)
+        g = hermes_ops.get_tool_search_config(
+            {"tools": {"tool_search": {"threshold_pct": -10}}})
+        self.assertEqual(g["threshold_pct"], 0.0)
+
+    def test_limits_clamped_and_ordered(self):
+        g = hermes_ops.get_tool_search_config({"tools": {"tool_search": {
+            "max_search_limit": 999, "search_default_limit": 999,
+        }}})
+        self.assertEqual(g["max_search_limit"], 50)
+        # search_default_limit clamped to max_search_limit (50), not its own cap.
+        self.assertLessEqual(g["search_default_limit"], g["max_search_limit"])
+
+    def test_garbage_numeric_values_fall_back_to_defaults(self):
+        g = hermes_ops.get_tool_search_config({"tools": {"tool_search": {
+            "threshold_pct": "lots", "max_search_limit": "many",
+            "search_default_limit": "some",
+        }}})
+        self.assertEqual(g["threshold_pct"], 10.0)
+        self.assertEqual(g["max_search_limit"], 20)
+        self.assertEqual(g["search_default_limit"], 5)
+
+    def test_set_threshold_rejects_garbage(self):
+        with self.assertRaises(ValueError):
+            hermes_ops.set_tool_search_config({}, {"threshold_pct": "high"})
+
+
+class ResolveCheckpointWorkdirEdgeTests(unittest.TestCase):
+    def test_explicit_workdir_wins_over_projects(self):
+        wd = hermes_ops._resolve_checkpoint_workdir(
+            "/explicit/path",
+            projects=[{"workdir": "/tmp/live", "commits": 3, "state": "live"}],
+            hermes_home=Path("/tmp/hermes"),
+        )
+        self.assertEqual(wd, "/explicit/path")
+
+    def test_prefers_live_project_with_commits_over_live_without(self):
+        projects = [
+            {"workdir": "/tmp/no-commits", "commits": 0, "state": "live"},
+            {"workdir": "/tmp/with-commits", "commits": 4, "state": "live"},
+        ]
+        wd = hermes_ops._resolve_checkpoint_workdir(
+            None, projects=projects, hermes_home=Path("/tmp/hermes")
+        )
+        self.assertEqual(wd, "/tmp/with-commits")
+
+    def test_orphan_projects_never_selected_even_with_commits(self):
+        projects = [{"workdir": "/tmp/orphan", "commits": 9, "state": "orphan"}]
+        wd = hermes_ops._resolve_checkpoint_workdir(
+            None, projects=projects, hermes_home=Path("/tmp/hermes")
+        )
+        # Falls through to cwd (absolute in test env) — never the orphan.
+        self.assertNotEqual(wd, "/tmp/orphan")
+
+    def test_blank_workdir_fields_skipped(self):
+        projects = [
+            {"workdir": "   ", "commits": 5, "state": "live"},
+            {"commits": 5, "state": "live"},
+        ]
+        wd = hermes_ops._resolve_checkpoint_workdir(
+            None, projects=projects, hermes_home=Path("/tmp/hermes")
+        )
+        self.assertNotIn(wd, (None, "", "   "))
+
+
+class AssertSafeWorkdirEdgeTests(unittest.TestCase):
+    def test_relative_path_rejected(self):
+        with self.assertRaises(ValueError):
+            hermes_ops.assert_safe_workdir("relative/path")
+
+    def test_control_characters_rejected(self):
+        for bad in ("/tmp/a\nb", "/tmp/a\rb", "/tmp/a\x00b"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    hermes_ops.assert_safe_workdir(bad)
+
+    def test_absolute_path_accepted(self):
+        self.assertEqual(
+            hermes_ops.assert_safe_workdir("  /Users/x/project  "), "/Users/x/project"
+        )
+
+
+class AssertSafeCheckpointIndexTests(unittest.TestCase):
+    def test_valid_indices_pass(self):
+        self.assertEqual(hermes_ops.assert_safe_checkpoint_index(1), 1)
+        self.assertEqual(hermes_ops.assert_safe_checkpoint_index("7"), 7)
+
+    def test_zero_and_negative_rejected(self):
+        for bad in (0, -1):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    hermes_ops.assert_safe_checkpoint_index(bad)
+
+    def test_garbage_rejected(self):
+        for bad in ("abc", None, []):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    hermes_ops.assert_safe_checkpoint_index(bad)
+
+    def test_float_truncates_toward_one(self):
+        # int(1.5) == 1 — accepted and truncated, not rejected.
+        self.assertEqual(hermes_ops.assert_safe_checkpoint_index(1.5), 1)
+
+
+class FormatCheckpointEntriesMalformedTests(unittest.TestCase):
+    def test_non_dict_rows_skipped_and_index_preserved(self):
+        entries = hermes_ops._format_checkpoint_entries([
+            "not-a-dict",
+            {"hash": "aaa"},
+            42,
+            {"reason": "no hash"},
+            {"hash": "bbb"},
+        ])
+        # Indices reflect ORIGINAL position (enumerate), not filtered position.
+        self.assertEqual([e["index"] for e in entries], [2, 5])
+        self.assertEqual([e["path"] for e in entries], ["aaa", "bbb"])
+
+    def test_missing_reason_defaults_to_checkpoint(self):
+        entries = hermes_ops._format_checkpoint_entries([{"hash": "h1"}])
+        self.assertEqual(entries[0]["label"], "checkpoint")
+
+    def test_files_changed_missing_or_garbage_coerced_to_zero(self):
+        entries = hermes_ops._format_checkpoint_entries([
+            {"hash": "a"},
+            {"hash": "b", "files_changed": "lots"},
+        ])
+        self.assertEqual(entries[0]["files_changed"], 0)
+        self.assertEqual(entries[1]["files_changed"], 0)

@@ -27,6 +27,24 @@ export interface ServerToolEvent {
 
 type EmitEvent = (event: ServerToolEvent) => void;
 
+export type RepoApprovalOutcome = 'approved' | 'denied' | 'timed_out' | 'abort';
+
+export interface RepoApprovalHooks {
+  /**
+   * Gate a repo write through the server-side approval engine. The engine
+   * consults session/prefix rules and conversation auto-approve internally;
+   * when a decision is required it parks the execution on an
+   * `approval_request` custom field. Absent hooks (or the propose flow) keep
+   * the current behavior.
+   */
+  requestApproval?: (input: {
+    tool: string;
+    command?: string;
+    cwd?: string;
+    reason: string;
+  }) => Promise<RepoApprovalOutcome>;
+}
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const MAX_CACHE_ENTRIES = 500;
@@ -173,8 +191,13 @@ function getRepoPathExamples(paths: string[], requestedPath: string, limit = 8):
  *
  * File creation tools (artifacts) are NOT included — those still execute
  * client-side since they write to the preview store.
+ *
+ * `approvalHooks` gates direct repo writes (non-propose mode) through the
+ * approval engine: the propose flow (repoEditIntent) is unchanged, while
+ * direct edit/create/delete/batch calls require approval unless a session or
+ * prefix rule exists or the conversation has auto-approve enabled.
  */
-export function buildServerRepoTools(repo: RepoContext, emit: EmitEvent) {
+export function buildServerRepoTools(repo: RepoContext, emit: EmitEvent, approvalHooks?: RepoApprovalHooks) {
   // Validate repo identity inputs
   if (!VALID_REPO_IDENTIFIER.test(repo.owner)) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -205,6 +228,25 @@ export function buildServerRepoTools(repo: RepoContext, emit: EmitEvent) {
       execute: async () => 'Error: repoFileTree must be an array if provided.',
     });
     return errorTools;
+  }
+
+  /**
+   * Approval gate for direct repo writes. The propose flow (repoEditIntent)
+   * is unchanged — the client-side proposal modal is the gate there. Direct
+   * writes require approval unless a session/prefix rule or conversation
+   * auto-approve lets them through (handled inside the engine).
+   */
+  async function repoWriteApproved(tool: string, command: string, reason: string): Promise<boolean> {
+    if (repo.repoEditIntent || !approvalHooks?.requestApproval) {
+      return true;
+    }
+    const outcome = await approvalHooks.requestApproval({
+      tool,
+      command,
+      cwd: `${repo.owner}/${repo.name}`,
+      reason,
+    });
+    return outcome === 'approved';
   }
 
   // Per-session file cache seeded from the request's repo_file_cache.
@@ -318,6 +360,9 @@ export function buildServerRepoTools(repo: RepoContext, emit: EmitEvent) {
     ),
     execute: async ({ path, content, description }) => {
       const normalizedPath = normalizeRepoPath(path);
+      if (!(await repoWriteApproved('edit_repo_file', normalizedPath, `Edit ${normalizedPath} in ${repo.owner}/${repo.name}`))) {
+        return `error: edit_repo_file was denied: the change to "${normalizedPath}" was not approved.`;
+      }
       if (!existingPaths.has(normalizedPath)) {
         return `Error: edit_repo_file can only modify existing repo files. \`${normalizedPath}\` is not in the indexed repo tree or staged changes.`;
       }
@@ -348,6 +393,9 @@ export function buildServerRepoTools(repo: RepoContext, emit: EmitEvent) {
     ),
     execute: async ({ path, content, description }) => {
       const normalizedPath = normalizeRepoPath(path);
+      if (!(await repoWriteApproved('create_repo_file', normalizedPath, `Create ${normalizedPath} in ${repo.owner}/${repo.name}`))) {
+        return `error: create_repo_file was denied: creating "${normalizedPath}" was not approved.`;
+      }
       const action = resolveRepoWriteAction('create', normalizedPath, existingPaths);
       const originalContent = sessionCache[normalizedPath] || '';
       cacheSet(normalizedPath, content);
@@ -385,6 +433,9 @@ export function buildServerRepoTools(repo: RepoContext, emit: EmitEvent) {
     ),
     execute: async ({ path, reason }) => {
       const normalizedPath = normalizeRepoPath(path);
+      if (!(await repoWriteApproved('delete_repo_file', normalizedPath, `Delete ${normalizedPath} from ${repo.owner}/${repo.name}`))) {
+        return `error: delete_repo_file was denied: deleting "${normalizedPath}" was not approved.`;
+      }
       if (!existingPaths.has(normalizedPath)) {
         return `Error: delete_repo_file can only delete existing repo files. \`${normalizedPath}\` is not in the indexed repo tree or staged changes.`;
       }
@@ -419,6 +470,10 @@ export function buildServerRepoTools(repo: RepoContext, emit: EmitEvent) {
       }),
     ),
     execute: async ({ changes }) => {
+      const pathsLabel = changes.map((change) => normalizeRepoPath(change.path)).join(', ');
+      if (!(await repoWriteApproved('batch_edit_repo_files', pathsLabel, `Apply ${changes.length} change(s) in ${repo.owner}/${repo.name}: ${pathsLabel}`))) {
+        return `error: batch_edit_repo_files was denied: the batch of ${changes.length} change(s) was not approved.`;
+      }
       const results: string[] = [];
       const batchChanges: Array<{
         path: string;

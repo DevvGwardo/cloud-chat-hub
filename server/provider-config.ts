@@ -51,6 +51,10 @@ export const HERMES_TOOL_CAPABLE_MODELS = [
   // Mistral direct
   'mistral-large-latest',
   'mistral-small-latest',
+  // Xiaomi MiMo direct (xiaomimimo.com)
+  'xiaomi/mimo-v2.5-pro',
+  'mimo-v2.5-pro',
+  'mimo-v2.5',
 ] as const;
 
 // Disable body timeout for streaming LLM responses — models can pause for
@@ -496,6 +500,10 @@ export const CONTEXT_WINDOW_SIZES: Record<string, number> = {
   'glm-5': 1_000_000,
   'mistral-large-latest': 256_000,
   'mistral-small-latest': 256_000,
+  // Xiaomi MiMo (xiaomimimo.com)
+  'xiaomi/mimo-v2.5-pro': 200_000,
+  'mimo-v2.5-pro': 200_000,
+  'mimo-v2.5': 200_000,
 };
 
 export function getContextWindow(modelName: string): number {

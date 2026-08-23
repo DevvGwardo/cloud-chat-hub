@@ -34,8 +34,10 @@ export function useRoomChat(roomId: string | null) {
   const [sending, setSending] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const members = activeRoom?.members ?? [];
-  const messages = roomMessages.map(toChatMessage);
+  const members = useMemo(() => activeRoom?.members ?? [], [activeRoom]);
+  // Stable identity so downstream consumers (ChatArea memo/effects keyed on
+  // `messages`) don't re-run on every render — only when room messages change.
+  const messages = useMemo(() => roomMessages.map(toChatMessage), [roomMessages]);
   const isStreaming = pendingAgents.length > 0;
 
   // ── @mention autocomplete state ──
@@ -101,7 +103,7 @@ export function useRoomChat(roomId: string | null) {
       .then(() => setInput(''))
       .catch(console.error)
       .finally(() => setSending(false));
-  }, [input, roomId, sending, postMessage]);
+  }, [input, roomId, sending, postMessage, setInput]);
 
   const handleStop = useCallback(() => {}, []);
 

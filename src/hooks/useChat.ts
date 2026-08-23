@@ -3,6 +3,7 @@ import { useChat as useAIChat, type Message as AIMessage } from '@ai-sdk/react';
 import { parseDataStreamPart } from 'ai';
 import { useShallow } from 'zustand/shallow';
 import { useChatStore } from '@/stores/chat-store';
+import { looksLikePlanText } from '@/lib/plan-steps';
 import { useSettingsStore } from '@/stores/settings-store';
 import { useKnowledgeStore } from '@/stores/knowledge-store';
 import { useChangesetStore } from '@/stores/changeset-store';
@@ -14,6 +15,8 @@ import { fetchRepoFileTreeResult, getApiBaseUrl } from '@/lib/api';
 import { createQueuedMessage, moveQueuedMessageToFront, removeQueuedMessage, type QueuedMessage } from '@/lib/chat-queue';
 import { PROVIDERS, supportsReasoningEffort } from '@/lib/providers';
 import { useHermesStore } from '@/stores/hermes-store';
+import type { ToolCallRecords, ToolCallRecordsByMessage, ToolCallStatus } from '@/stores/hermes-store';
+import { useContextUsageStore } from '@/stores/context-usage-store';
 import { getActiveProfile, useProfilesStore } from '@/stores/profiles-store';
 import { useChatQueueStore } from '@/stores/chat-queue-store';
 import { useStreamLockStore } from '@/stores/stream-lock-store';
@@ -115,6 +118,298 @@ const TOOL_INVOCATION_STATE_PRIORITY: Record<string, number> = {
 
 function asUnknownArray(value: unknown): unknown[] | undefined {
   return Array.isArray(value) ? value as unknown[] : undefined;
+}
+
+// ─── Structured tool-call events (bridge + server contract) ────────────────
+// The backend emits these as custom JSON fields on `data:` lines
+// (bridge: delta.* keys; server streamText path: data-part array items):
+//   tool_call_begin {type, call_id, name, ts}
+//   tool_call_delta {type, call_id, output}           (append-only chunks)
+//   tool_call_end   {type, call_id, name, success, exit_code, duration_ms,
+//                    output_truncated, output_truncated_lines}
+// The pure reducer below maintains the per-call record map so components can
+// render enriched tool cards (status verbs, exit codes, durations, output).
+
+export interface ToolCallBeginEvent {
+  type: 'tool_call_begin';
+  call_id: string;
+  name: string;
+  ts?: number;
+}
+
+export interface ToolCallDeltaEvent {
+  type: 'tool_call_delta';
+  call_id: string;
+  output: string;
+}
+
+export interface ToolCallEndEvent {
+  type: 'tool_call_end';
+  call_id: string;
+  name: string;
+  success: boolean;
+  exit_code: number | null;
+  duration_ms: number;
+  output_truncated: boolean;
+  output_truncated_lines: number;
+}
+
+export type ToolCallEvent = ToolCallBeginEvent | ToolCallDeltaEvent | ToolCallEndEvent;
+
+export function parseToolCallEvent(value: unknown): ToolCallEvent | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const callId = typeof record.call_id === 'string' && record.call_id ? record.call_id : null;
+  if (!callId) {
+    return null;
+  }
+  if (record.type === 'tool_call_begin') {
+    const name = typeof record.name === 'string' && record.name ? record.name : '';
+    if (!name) {
+      return null;
+    }
+    return {
+      type: 'tool_call_begin',
+      call_id: callId,
+      name,
+      ...(typeof record.ts === 'number' ? { ts: record.ts } : {}),
+    };
+  }
+  if (record.type === 'tool_call_delta') {
+    return {
+      type: 'tool_call_delta',
+      call_id: callId,
+      output: typeof record.output === 'string' ? record.output : '',
+    };
+  }
+  if (record.type === 'tool_call_end') {
+    return {
+      type: 'tool_call_end',
+      call_id: callId,
+      name: typeof record.name === 'string' ? record.name : '',
+      success: record.success === true,
+      exit_code: typeof record.exit_code === 'number' ? record.exit_code : null,
+      duration_ms: typeof record.duration_ms === 'number' ? record.duration_ms : 0,
+      output_truncated: record.output_truncated === true,
+      output_truncated_lines: typeof record.output_truncated_lines === 'number'
+        ? record.output_truncated_lines
+        : 0,
+    };
+  }
+  return null;
+}
+
+/**
+ * Pure reducer for the per-conversation tool-call record map. Applies
+ * begin/delta/end events; returns the same reference when nothing changed so
+ * callers can cheaply detect updates.
+ */
+export function reduceToolCallRecords(
+  records: ToolCallRecords,
+  event: unknown,
+): ToolCallRecords {
+  const parsed = parseToolCallEvent(event);
+  if (!parsed) {
+    return records;
+  }
+
+  const current = records[parsed.call_id];
+
+  if (parsed.type === 'tool_call_begin') {
+    // A begin for an already-running call id (duplicate/retry replay) is a no-op.
+    if (current && current.status === 'running') {
+      return records;
+    }
+    // A begin after a terminal record for the SAME call id is a fresh run.
+    if (current && current.name === parsed.name && current.status !== 'running') {
+      return records;
+    }
+    return {
+      ...records,
+      [parsed.call_id]: {
+        callId: parsed.call_id,
+        name: parsed.name,
+        status: 'running' as ToolCallStatus,
+        outputChunks: [],
+        output: '',
+        exitCode: null,
+        durationMs: null,
+        outputTruncated: false,
+        outputTruncatedLines: 0,
+      },
+    };
+  }
+
+  if (parsed.type === 'tool_call_delta') {
+    if (!current || current.status !== 'running') {
+      return records;
+    }
+    const outputChunks = [...current.outputChunks, parsed.output];
+    return {
+      ...records,
+      [parsed.call_id]: { ...current, outputChunks, output: outputChunks.join('') },
+    };
+  }
+
+  // tool_call_end
+  const status: ToolCallStatus = parsed.success ? 'completed' : 'failed';
+  if (!current) {
+    // End without a begin (snapshot replay / dropped begin) — synthesize.
+    return {
+      ...records,
+      [parsed.call_id]: {
+        callId: parsed.call_id,
+        name: parsed.name,
+        status,
+        outputChunks: [],
+        output: '',
+        exitCode: parsed.exit_code,
+        durationMs: parsed.duration_ms,
+        outputTruncated: parsed.output_truncated,
+        outputTruncatedLines: parsed.output_truncated_lines,
+      },
+    };
+  }
+  if (current.status !== 'running') {
+    return records;
+  }
+  return {
+    ...records,
+    [parsed.call_id]: {
+      ...current,
+      status,
+      exitCode: parsed.exit_code,
+      durationMs: parsed.duration_ms,
+      outputTruncated: parsed.output_truncated,
+      outputTruncatedLines: parsed.output_truncated_lines,
+    },
+  };
+}
+
+/** Compact duration: `1.2s` under a minute, `mm:ss` beyond. */
+export function formatToolDuration(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs < 0) {
+    return '';
+  }
+  const ms = Math.round(durationMs);
+  if (ms < 60_000) {
+    return `${(ms / 1000).toFixed(1)}s`;
+  }
+  const totalSeconds = Math.floor(ms / 1000);
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+export interface SplitToolOutputResult {
+  head: string;
+  tail: string;
+  hiddenLines: number;
+  totalLines: number;
+}
+
+/**
+ * HEAD+TAIL output splitter for tool cards: keeps the first `headLines` and
+ * last `tailLines` lines and reports how many middle lines were hidden so the
+ * UI can render an expandable "… +N lines" row. Returns the untouched output
+ * (hiddenLines 0) when everything fits.
+ */
+export function splitToolOutputHeadTail(
+  output: string,
+  opts?: { headLines?: number; tailLines?: number },
+): SplitToolOutputResult {
+  const headLines = Math.max(1, opts?.headLines ?? 12);
+  const tailLines = Math.max(1, opts?.tailLines ?? 8);
+  const lines = output.split('\n');
+  const totalLines = lines.length;
+  if (totalLines <= headLines + tailLines) {
+    return { head: output, tail: '', hiddenLines: 0, totalLines };
+  }
+  return {
+    head: lines.slice(0, headLines).join('\n'),
+    tail: lines.slice(totalLines - tailLines).join('\n'),
+    hiddenLines: totalLines - headLines - tailLines,
+    totalLines,
+  };
+}
+
+/** Short display prefix for a shell command used in approval audit lines. */
+export function getCommandDisplayPrefix(command: string, max = 40): string {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return '';
+  }
+  const prefix = trimmed.split(/\s+/).slice(0, 2).join(' ');
+  return prefix.length > max ? `${prefix.slice(0, max - 1)}…` : prefix;
+}
+
+interface PlanStepLike {
+  step: string;
+  status: 'pending' | 'in_progress' | 'completed';
+}
+
+function parsePlanSteps(payload: unknown): PlanStepLike[] | null {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const steps = (payload as { steps?: unknown }).steps;
+  if (!Array.isArray(steps)) {
+    return null;
+  }
+  const parsed: PlanStepLike[] = [];
+  for (const entry of steps) {
+    if (!entry || typeof entry !== 'object') continue;
+    const record = entry as Record<string, unknown>;
+    const step = typeof record.step === 'string' && record.step.trim() ? record.step : '';
+    if (!step) continue;
+    const status = record.status === 'in_progress' || record.status === 'completed'
+      ? record.status
+      : 'pending';
+    parsed.push({ step, status });
+  }
+  return parsed.length > 0 ? parsed : null;
+}
+
+/** Find a tool invocation's stored args in the message buffer (SDK parts or
+ *  persisted toolInvocations), preferring an exact call_id match. */
+function findToolInvocationArgs(
+  msgs: AIMessage[],
+  callId: string | undefined,
+  toolName: string,
+): { args?: Record<string, unknown> } | null {
+  const hasCallId = typeof callId === 'string' && callId.length > 0;
+  for (let i = msgs.length - 1; i >= 0; i -= 1) {
+    const message = msgs[i] as unknown as {
+      parts?: Array<{ toolInvocation?: { toolCallId?: string; toolName?: string; args?: Record<string, unknown> } }>;
+      toolInvocations?: Array<{ toolCallId?: string; toolName?: string; args?: Record<string, unknown> }>;
+    };
+    const invocations = [
+      ...(Array.isArray(message.parts) ? message.parts
+        .filter((part) => part?.toolInvocation)
+        .map((part) => part.toolInvocation as { toolCallId?: string; toolName?: string; args?: Record<string, unknown> }) : []),
+      ...(Array.isArray(message.toolInvocations) ? message.toolInvocations : []),
+    ];
+    const exact = hasCallId
+      ? invocations.find((inv) => inv?.toolCallId === callId)
+      : undefined;
+    const byName = exact
+      ? undefined
+      : invocations.find((inv) => inv?.toolName === toolName && typeof inv?.args === 'object');
+    const match = exact ?? byName;
+    if (match && typeof match.args === 'object' && match.args) {
+      return { args: match.args as Record<string, unknown> };
+    }
+  }
+  return null;
+}
+
+function truncateArgsJson(json: string, max = 2000): string {
+  if (json.length <= max) {
+    return json;
+  }
+  return `${json.slice(0, max)}…`;
 }
 
 function getPersistedToolInvocationKey(invocation: Record<string, unknown>, fallbackIndex: number): string {
@@ -662,6 +957,38 @@ When the user asks you to make changes:
   const hermesSessionIdOverrideRef = useRef<string | null>(null);
   const activeRequestBodyRef = useRef<Record<string, unknown> | null>(null);
   const toolActivityRef = useRef<Record<string, ToolActivityEvent[]>>({});
+  // Structured tool-call records (message id / 'current' → call_id → record)
+  // reduced from the tool_call_begin/delta/end custom fields. Mirrored into
+  // the hermes store (per panel) so chat components can render enriched
+  // cards. Keyed like toolActivityRef: 'current' while streaming, message id
+  // after finish.
+  const [toolCallRecords, setToolCallRecordsState] = useState<ToolCallRecordsByMessage>({});
+  const toolCallRecordsRef = useRef<ToolCallRecordsByMessage>({});
+  // True between a stream_retry event and the next stream event — the status
+  // row shows "Reconnecting…" while set, then clears itself.
+  const streamRetryShowingRef = useRef(false);
+  // Cap explicit user-initiated tool retries per message to avoid loops.
+  const visibleRetryCountRef = useRef(0);
+  const MAX_VISIBLE_TOOL_RETRIES = 3;
+  // Tool calls already explicitly retried this turn — makes the visible Retry
+  // idempotent (a queued duplicate click is dropped instead of double-firing).
+  const retriedToolsRef = useRef(new Set<string>());
+  // True between a send that had planMode enabled and the finish of that
+  // assistant turn. onFinish uses it to park the delivered plan text in
+  // `planGatePrompt` (the implementation gate). Only set on the send path, so
+  // mid-stream plan_update events (the live checklist) never trigger it.
+  const planModeTurnRef = useRef(false);
+
+  // Hook-level counterpart of the scanner's per-stream retry clear — used by
+  // onFinish/onError/sendMessage where the chatStreamFetch closure is out of
+  // scope.
+  const clearStreamRetryIndicator = useCallback(() => {
+    if (!streamRetryShowingRef.current) {
+      return;
+    }
+    streamRetryShowingRef.current = false;
+    useChatStore.getState().setStreamRetry(null);
+  }, []);
   const computerUsePermissionsCheckedRef = useRef(false);
   const serverToolEventsRef = useRef<Record<string, ServerToolEvent[]>>({});
   const serverToolEventKeysRef = useRef<Record<string, Set<string>>>({});
@@ -960,6 +1287,115 @@ When the user asks you to make changes:
       });
     };
 
+    // ─── Structured tool-call events (tool_call_begin/delta/end) ────────────
+
+    const applyToolCallRecords = (event: unknown) => {
+      const current = toolCallRecordsRef.current;
+      const nextCurrent = reduceToolCallRecords(current.current ?? {}, event);
+      if (nextCurrent === current.current) {
+        return;
+      }
+      const next = { ...current, current: nextCurrent };
+      toolCallRecordsRef.current = next;
+      setToolCallRecordsState(next);
+      useHermesStore.getState().setToolCallRecords(panelId, next);
+    };
+
+    const clearStreamRetry = () => {
+      clearStreamRetryIndicator();
+    };
+
+    // Only the conversation the user is currently viewing may write the
+    // global plan/usage/retry slices — a mid-stream switch to another thread
+    // must not clobber the visible conversation's state.
+    const isCurrentConversationStream = () => {
+      const viewed = viewedConvIdRef.current;
+      const streamed = streamConvIdRef.current ?? convIdRef.current;
+      return !viewed || !streamed || viewed === streamed;
+    };
+
+    const handleStreamRetry = (payload: unknown) => {
+      if (!payload || typeof payload !== 'object') {
+        return;
+      }
+      streamRetryShowingRef.current = true;
+      if (!isCurrentConversationStream()) {
+        return;
+      }
+      const record = payload as Record<string, unknown>;
+      useChatStore.getState().setStreamRetry({
+        attempt: typeof record.attempt === 'number' ? record.attempt : 1,
+        maxAttempts: typeof record.max_attempts === 'number' ? record.max_attempts : 1,
+        reason: typeof record.reason === 'string' ? record.reason : '',
+      });
+    };
+
+    const handlePlanUpdate = (payload: unknown) => {
+      const steps = parsePlanSteps(payload);
+      if (!steps || !isCurrentConversationStream()) {
+        return;
+      }
+      useChatStore.getState().setPlanSteps(steps);
+    };
+
+    const handleUsageEvent = (payload: unknown) => {
+      if (!payload || typeof payload !== 'object' || !isCurrentConversationStream()) {
+        return;
+      }
+      const record = payload as Record<string, unknown>;
+      const toNumber = (value: unknown): number =>
+        typeof value === 'number' && Number.isFinite(value) ? value : 0;
+      useContextUsageStore.getState().setUsage({
+        inputTokens: toNumber(record.input_tokens),
+        outputTokens: toNumber(record.output_tokens),
+        ...(typeof record.cached_input_tokens === 'number' && Number.isFinite(record.cached_input_tokens)
+          ? { cachedInputTokens: record.cached_input_tokens }
+          : {}),
+        contextWindow: toNumber(record.context_window),
+        model: typeof record.model === 'string' ? record.model : '',
+      });
+    };
+
+    // Enrich the matching toolActivity entry with structured execution info
+    // (exit code, duration, truncation) when a tool_call_end arrives, so the
+    // existing AgentActivity cards render the enriched UI without the cards
+    // needing access to the records map.
+    const enrichToolActivityFromRecord = (end: ToolCallEndEvent) => {
+      const msgId = 'current';
+      const prev = [...(toolActivityRef.current[msgId] || [])];
+      const idx = prev.findLastIndex((e) => e.tool === end.name && e.status === 'running');
+      if (idx < 0) {
+        return;
+      }
+      prev[idx] = {
+        ...prev[idx],
+        success: end.success,
+        exitCode: end.exit_code,
+        durationMs: end.duration_ms,
+        outputTruncated: end.output_truncated,
+        outputTruncatedLines: end.output_truncated_lines,
+      };
+      toolActivityRef.current = { ...toolActivityRef.current, [msgId]: prev };
+      setToolActivityMap({ ...toolActivityRef.current });
+    };
+
+    const handleToolCallEvent = (event: unknown) => {
+      applyToolCallRecords(event);
+      const parsed = parseToolCallEvent(event);
+      if (parsed?.type === 'tool_call_end') {
+        enrichToolActivityFromRecord(parsed);
+      }
+      clearStreamRetry();
+    };
+
+    const getCustomEventType = (value: unknown): string | null => {
+      if (!value || typeof value !== 'object') {
+        return null;
+      }
+      const type = (value as { type?: unknown }).type;
+      return typeof type === 'string' ? type : null;
+    };
+
     const notifyTransportStatus = (message: string | null) => {
       setTransportStatusMessage((current) => (current === message ? current : message));
     };
@@ -1046,6 +1482,40 @@ When the user asks you to make changes:
               if (isServerToolEvent(parsed)) {
                 applyServerToolEvent(parsed);
               }
+              // Structured tool-call / retry / plan / usage custom fields.
+              const toolCallEvent = delta?.tool_call_begin ?? delta?.tool_call_delta ?? delta?.tool_call_end;
+              if (toolCallEvent) {
+                handleToolCallEvent(toolCallEvent);
+              }
+              if (delta?.stream_retry && typeof delta.stream_retry === 'object') {
+                handleStreamRetry(delta.stream_retry);
+              }
+              if (delta?.plan_update && typeof delta.plan_update === 'object') {
+                handlePlanUpdate(delta.plan_update);
+              }
+              if (delta?.usage && typeof delta.usage === 'object') {
+                handleUsageEvent(delta.usage);
+              }
+              // Raw JSON `data:` lines may carry the same custom events directly
+              // (no OpenAI choices wrapper) — e.g. the direct SSE proxy path.
+              if (parsed && typeof parsed === 'object' && !('choices' in parsed)) {
+                const eventType = getCustomEventType(parsed);
+                if (eventType === 'tool_call_begin' || eventType === 'tool_call_delta' || eventType === 'tool_call_end') {
+                  handleToolCallEvent(parsed);
+                } else if (eventType === 'stream_retry') {
+                  handleStreamRetry(parsed);
+                } else if (eventType === 'plan_update') {
+                  handlePlanUpdate(parsed);
+                } else if (eventType === 'usage') {
+                  handleUsageEvent(parsed);
+                }
+              }
+              // Any stream activity after a retry supersedes the reconnecting
+              // indicator (auto-clear). stream_retry chunks themselves must
+              // not clear it — they set it.
+              if (delta && typeof delta === 'object' && !('stream_retry' in delta)) {
+                clearStreamRetry();
+              }
             } catch {
               // Not valid JSON, skip
             }
@@ -1058,6 +1528,8 @@ When the user asks you to make changes:
             // Track accumulated text length for tool-position interleaving
             if (parsedPart.type === 'text' && typeof parsedPart.value === 'string') {
               streamTextOffset += parsedPart.value.length;
+              // Resumed text output supersedes a reconnecting indicator.
+              clearStreamRetry();
             }
 
             if (
@@ -1104,6 +1576,27 @@ When the user asks you to make changes:
                 if (isServerToolEvent(item)) {
                   applyServerToolEvent(item);
                 }
+                const customEventType = getCustomEventType(item);
+                if (
+                  customEventType === 'tool_call_begin' ||
+                  customEventType === 'tool_call_delta' ||
+                  customEventType === 'tool_call_end'
+                ) {
+                  handleToolCallEvent(item);
+                  continue;
+                }
+                if (customEventType === 'stream_retry') {
+                  handleStreamRetry(item);
+                  continue;
+                }
+                if (customEventType === 'plan_update') {
+                  handlePlanUpdate(item);
+                  continue;
+                }
+                if (customEventType === 'usage') {
+                  handleUsageEvent(item);
+                  continue;
+                }
               }
             }
           } catch {
@@ -1121,7 +1614,7 @@ When the user asks you to make changes:
       status: response.status,
       statusText: response.statusText,
     });
-  }, [scopeId, getSessionProfile]);
+  }, [clearStreamRetryIndicator, panelId, scopeId, getSessionProfile]);
 
   const ensureRepoFileTreeLoaded = useCallback(async (): Promise<string[]> => {
     const currentChangeset = useChangesetStore.getState().getChangeset(scopeId);
@@ -1266,6 +1759,7 @@ When the user asks you to make changes:
     effectiveProvider,
     reasoningEffort,
     scopeId,
+    panelId,
   ]);
 
   const panelCount = usePanelStore((s) => s.panels.length);
@@ -1312,6 +1806,33 @@ When the user asks you to make changes:
       const convId = streamConvIdRef.current ?? convIdRef.current;
       if (!convId) return;
       setAgentStatus(null);
+      clearStreamRetryIndicator();
+
+      // Loop mode: the stream is over — release the toggle's transient
+      // phase so it doesn't stay stuck on "done"/"stopped" forever. The
+      // loop stays enabled; only iteration state resets.
+      {
+        const loop = useHermesStore.getState().getLoop(panelId);
+        if (loop.enabled && (loop.phase === 'agent' || loop.phase === 'judge' || loop.phase === 'done' || loop.phase === 'stopped' || loop.phase === 'error')) {
+          useHermesStore.getState().setLoopStatus(panelId, { phase: 'idle', iteration: 0 });
+        }
+      }
+
+      // Plan gate: when this turn was a plan-mode send and the assistant
+      // delivered a plan, park the text for the implementation gate. The live
+      // checklist (plan_update events) is separate — this fires once at turn
+      // completion, only for the conversation the user is still viewing.
+      if (planModeTurnRef.current) {
+        planModeTurnRef.current = false;
+        const assistantText = typeof message?.content === 'string' ? message.content : '';
+        if (
+          assistantText.trim().length > 0 &&
+          convId === viewedConvIdRef.current &&
+          looksLikePlanText(assistantText)
+        ) {
+          useChatStore.getState().setPlanGatePrompt(assistantText);
+        }
+      }
       setComputerUseDock(INITIAL_COMPUTER_USE_DOCK_STATE);
       computerUsePermissionsCheckedRef.current = false;
 
@@ -1364,6 +1885,17 @@ When the user asks you to make changes:
         delete toolActivityRef.current['current'];
         toolActivityRef.current[finishedMessageId] = currentActivity;
         setToolActivityMap({ ...toolActivityRef.current });
+      }
+      // Same remap for the structured tool-call records so enriched cards
+      // survive the in-memory conversation switch (persisted snapshots keep
+      // the synthesized tool invocations, which degrade gracefully).
+      if (finishedMessageId && toolCallRecordsRef.current['current']) {
+        const currentRecords = toolCallRecordsRef.current['current'];
+        const { current: _droppedCurrent, ...restRecords } = toolCallRecordsRef.current;
+        const remapped = { ...restRecords, [finishedMessageId]: currentRecords };
+        toolCallRecordsRef.current = remapped;
+        setToolCallRecordsState(remapped);
+        useHermesStore.getState().setToolCallRecords(panelId, remapped);
       }
       if (finishedMessageId && serverToolEventsRef.current['current']) {
         const currentEvents = serverToolEventsRef.current['current'];
@@ -1879,7 +2411,16 @@ When the user asks you to make changes:
       delete toolActivityRef.current.current;
       delete serverToolEventsRef.current.current;
       delete serverToolEventKeysRef.current.current;
+      clearStreamRetryIndicator();
       setAgentStatus(null);
+      // Loop mode: a failed stream must release the phase too, or the toggle
+      // stays stuck mid-loop with no way to tell it's dead.
+      {
+        const loop = useHermesStore.getState().getLoop(panelId);
+        if (loop.enabled && loop.phase !== 'idle') {
+          useHermesStore.getState().setLoopStatus(panelId, { phase: 'idle', iteration: 0 });
+        }
+      }
       const errorMessage = getErrorMessage(err);
       console.error('[useChat:onError] Chat error:', errorMessage, 'provider:', effectiveProvider, 'model:', effectiveModel);
       if (errorMessage.includes('not configured')) {
@@ -2662,8 +3203,14 @@ When the user asks you to make changes:
     serverToolEventsRef.current = {};
     serverToolEventKeysRef.current = {};
     serverSideToolsDetectedRef.current = false;
+    toolCallRecordsRef.current = {};
+    setToolCallRecordsState({});
+    useHermesStore.getState().setToolCallRecords(panelId, {});
+    visibleRetryCountRef.current = 0;
+    retriedToolsRef.current.clear();
+    clearStreamRetryIndicator();
 
-  }, [aiChatSessionId, chatSessionId, conversationId, safeSetMessages, panelId, resetPanelFileState, restoreFileState, saveConversationFiles, hydrateConversationMessages, isStreaming, scopeId, sessionLock]);
+  }, [aiChatSessionId, chatSessionId, clearStreamRetryIndicator, conversationId, safeSetMessages, panelId, resetPanelFileState, restoreFileState, saveConversationFiles, hydrateConversationMessages, isStreaming, scopeId, sessionLock, stop]);
 
   // Auto-save file state (debounced) whenever the panel's file state changes
   useEffect(() => {
@@ -2718,6 +3265,12 @@ When the user asks you to make changes:
     isSendingRef.current = true;
     const clearDraft = options?.clearDraft ?? false;
 
+    // A new user message supersedes any pending plan gate / checklist —
+    // the user is steering again, so no consent panel may linger.
+    useChatStore.getState().setPlanGatePrompt(null);
+    useChatStore.getState().setPlanSteps(null);
+    planModeTurnRef.current = false;
+
     const providerInfo = PROVIDERS[effectiveProvider as keyof typeof PROVIDERS];
 
     // Check if API key is needed but missing
@@ -2732,7 +3285,9 @@ When the user asks you to make changes:
     repoStopRetryRef.current = 0;
     userStoppedRef.current = false;
 
-    let convId = conversationId ?? pendingConversationIdRef.current;
+    let convId = options?.forceNewConversation
+      ? null
+      : (conversationId ?? pendingConversationIdRef.current);
 
     // Create conversation if needed
     if (!convId) {
@@ -2740,6 +3295,12 @@ When the user asks you to make changes:
       // lock is applied synchronously. Any re-render that happens before the
       // conversation id propagates down through props will still read the
       // locked session id and keep the streaming buffer intact.
+      // forceNewConversation (plan-gate "clear context") starts a fresh epoch
+      // so the new thread gets its own bucket instead of reusing the draft
+      // bucket of an earlier thread.
+      if (options?.forceNewConversation) {
+        draftEpochRef.current += 1;
+      }
       setSessionLock(`draft-${draftEpochRef.current}:${panelId}`);
       try {
         convId = await createConversation(effectiveProvider, effectiveModel, defaultSystemPrompt);
@@ -2845,6 +3406,19 @@ When the user asks you to make changes:
     delete serverToolEventKeysRef.current.current;
     serverSideToolsDetectedRef.current = false;
     setAgentStatus(null);
+    visibleRetryCountRef.current = 0;
+    retriedToolsRef.current.clear();
+    if (toolCallRecordsRef.current.current) {
+      const { current: _droppedCurrent, ...restRecords } = toolCallRecordsRef.current;
+      toolCallRecordsRef.current = restRecords;
+      setToolCallRecordsState(restRecords);
+      useHermesStore.getState().setToolCallRecords(panelId, restRecords);
+    }
+    clearStreamRetryIndicator();
+    // Plan gate: remember whether this turn was a plan-mode send so onFinish
+    // can park the delivered plan text for the implementation gate. Captured
+    // from live store state — the same value buildRequestBody reads below.
+    planModeTurnRef.current = useChatStore.getState().planMode;
     activeRequestBodyRef.current = buildRequestBody({
       conversationId: convId,
       repoFileTree: repoFileTreeForRequest,
@@ -2887,7 +3461,7 @@ When the user asks you to make changes:
     }
 
     return true;
-  }, [activeRepo, append, buildRequestBody, config, conversationId, createConversation, defaultSystemPrompt, effectiveModel, effectiveProvider, ensureRepoFileTreeLoaded, isRepoMode, onConversationCreated, renameConversation, saveConversationFiles, scopeId, safeSetMessages, sanitizeRetryMessages]);
+  }, [activeRepo, append, buildRequestBody, clearStreamRetryIndicator, config, conversationId, createConversation, defaultSystemPrompt, effectiveModel, effectiveProvider, ensureRepoFileTreeLoaded, isRepoMode, onConversationCreated, panelId, renameConversation, saveConversationFiles, scopeId, safeSetMessages, sanitizeRetryMessages]);
 
   const handleSend = useCallback(() => {
     if (effectiveBusy) {
@@ -2904,6 +3478,33 @@ When the user asks you to make changes:
     }
     void sendMessage(content);
   }, [effectiveBusy, queueMessage, sendMessage]);
+
+  /**
+   * Plan gate decision: send "implement this plan" into the current
+   * conversation, or (clearContext) into a brand-new one. Reuses sendMessage
+   * — the new thread rides the exact draft→conversation promotion path
+   * (createConversation + onConversationCreated binding).
+   */
+  const handleImplementPlan = useCallback((clearContext: boolean) => {
+    const prompt = useChatStore.getState().planGatePrompt;
+    if (!prompt) return;
+    useChatStore.getState().setPlanGatePrompt(null);
+    useChatStore.getState().setPlanSteps(null);
+    // The implementation turn must not run under plan-mode tool filtering.
+    useChatStore.getState().setPlanMode(false);
+    const content = `Here is the approved plan — implement it now:\n\n${prompt}`;
+    void sendMessage(content, {
+      clearDraft: true,
+      forceNewConversation: clearContext,
+      repoEditIntentOverride: true,
+    });
+  }, [sendMessage]);
+
+  const handleCancelPlanGate = useCallback(() => {
+    // Stay in plan mode: dismiss the gate but keep the checklist as the
+    // record of the proposed plan.
+    useChatStore.getState().setPlanGatePrompt(null);
+  }, []);
 
   const clearHermesSessionAttachment = useCallback(() => {
     hermesSessionIdOverrideRef.current = null;
@@ -2978,6 +3579,162 @@ When the user asks you to make changes:
     })();
   }, [effectiveBusy, queuedMessages, sendMessage]);
 
+  // ─── Explicit tool retry / message edit / approval audit actions ──────────
+  // Chat components enqueue these through the hermes store (panel-scoped);
+  // the effect below consumes them. This keeps the runtime reachable even
+  // when the panel runtime only forwards the props it knows about.
+
+  const handleRetryToolInternal = useCallback((request: { toolName: string; callId?: string }) => {
+    if (isStreamingRef.current || isSendingRef.current) {
+      return;
+    }
+    if (visibleRetryCountRef.current >= MAX_VISIBLE_TOOL_RETRIES) {
+      console.warn('[useChat:retryTool] Retry cap reached for this message');
+      return;
+    }
+    const convId = convIdRef.current ?? pendingConversationIdRef.current;
+    if (!convId) {
+      console.warn('[useChat:retryTool] No conversation bound — cannot retry');
+      return;
+    }
+    // Idempotency: one explicit retry per tool call per turn — a queued
+    // duplicate click is consumed silently.
+    const retryKey = request.callId ? `call:${request.callId}` : `name:${request.toolName}`;
+    if (retriedToolsRef.current.has(retryKey)) {
+      return;
+    }
+    retriedToolsRef.current.add(retryKey);
+    const name = request.toolName;
+    const invocation = findToolInvocationArgs(messagesRef.current, request.callId, name);
+    const argsJson = invocation?.args ? truncateArgsJson(JSON.stringify(invocation.args)) : null;
+    visibleRetryCountRef.current += 1;
+    // Reuse the auto-continue injection mechanism (300ms debounced system
+    // append) so the retry is explicit but rides the exact same append path.
+    scheduleAutoContinue({
+      conversationId: convId,
+      content: argsJson
+        ? `The previous tool call ${name} failed. Retry it with the same arguments: ${argsJson}`
+        : `The previous tool call ${name} failed. Retry it with the same arguments.`,
+      continuingApprovedProposal: approvedProposalContinuationRef.current !== null,
+      forceRepoEditIntent: repoEditIntentRef.current,
+    });
+  }, [scheduleAutoContinue]);
+
+  const handleEditMessageInternal = useCallback(async (content: string) => {
+    const trimmed = content.trim();
+    if (!trimmed || isStreamingRef.current) {
+      return;
+    }
+    const current = messagesRef.current;
+    const userIdx = current.findLastIndex(
+      (m) => m.role === 'user' && typeof m.content === 'string' && m.content.trim().length > 0,
+    );
+    if (userIdx < 0) {
+      return;
+    }
+    const convId = convIdRef.current ?? pendingConversationIdRef.current;
+    if (!convId) {
+      return;
+    }
+    // Drop the edited user message and every message below it from the live
+    // buffer; sendMessage re-appends the edited text and streams a fresh
+    // response. Sync messagesRef synchronously so the append path doesn't
+    // read a stale buffer before the next render.
+    messagesRef.current = current.slice(0, userIdx);
+    safeSetMessages(messagesRef.current, true);
+    // Rewrite the persisted tail so a reload shows the edited thread: delete
+    // the conversation's messages and re-add everything above the edit point.
+    try {
+      const stored = await db.messages.getByConversation(convId);
+      const storedUserIdx = stored.findLastIndex(
+        (m) => m.role === 'user' && typeof m.content === 'string' && m.content.trim().length > 0,
+      );
+      if (storedUserIdx >= 0) {
+        const kept = stored.slice(0, storedUserIdx);
+        await db.messages.deleteByConversation(convId);
+        for (const message of kept) {
+          await db.messages.add(message);
+        }
+      }
+    } catch (error) {
+      console.error('[useChat:editMessage] Failed to rewrite persisted messages:', error);
+    }
+    await sendMessage(trimmed);
+  }, [safeSetMessages, sendMessage]);
+
+  const handleApprovalAuditInternal = useCallback(async (entry: {
+    tool: string;
+    command?: string;
+    approved: boolean;
+  }) => {
+    const convId = convIdRef.current ?? pendingConversationIdRef.current;
+    if (!convId) {
+      return;
+    }
+    const commandPrefix = entry.command ? getCommandDisplayPrefix(entry.command) : '';
+    const text = entry.approved
+      ? `✓ You approved ${entry.tool}${commandPrefix ? ` ${commandPrefix}` : ''}`
+      : `✗ You did not approve ${entry.tool}`;
+    const messageId = crypto.randomUUID();
+    const auditMessage = {
+      id: messageId,
+      role: 'assistant' as const,
+      content: '',
+      parts: [{ type: 'tool_approval' as const, text, approved: entry.approved }],
+      timestamp: new Date().toISOString(),
+    };
+    // Only mirror into the live buffer when the user is still viewing the
+    // conversation the decision belongs to — the DB write below is the
+    // source of truth and rehydrates on switch.
+    if (convId === viewedConvIdRef.current) {
+      messagesRef.current = [...messagesRef.current, auditMessage as unknown as AIMessage];
+      setMessages(messagesRef.current);
+    }
+    try {
+      await upsertStoredMessage({
+        id: messageId,
+        conversationId: convId,
+        role: 'assistant',
+        content: '',
+        parts: auditMessage.parts,
+        timestamp: auditMessage.timestamp,
+      });
+      await db.conversations.update(convId, { updatedAt: new Date().toISOString() });
+      await loadConversations();
+    } catch (error) {
+      console.error('[useChat:approvalAudit] Failed to persist audit entry:', error);
+    }
+  }, [loadConversations, setMessages]);
+
+  const pendingChatActions = useHermesStore((s) => s.pendingChatActions[panelId] ?? null);
+
+  useEffect(() => {
+    if (!pendingChatActions || pendingChatActions.length === 0) {
+      return;
+    }
+    const [next, ...rest] = pendingChatActions;
+    // Retry/edit need an idle stream; the audit line can append mid-stream
+    // (the approval decision resolves a parked tool call).
+    if ((next.kind === 'retry_tool' || next.kind === 'edit_message') && isStreamingRef.current) {
+      return;
+    }
+    useHermesStore.getState().setPendingChatActions(panelId, rest);
+    if (next.kind === 'retry_tool') {
+      handleRetryToolInternal(next);
+    } else if (next.kind === 'edit_message') {
+      void handleEditMessageInternal(next.content);
+    } else {
+      void handleApprovalAuditInternal(next);
+    }
+  }, [
+    handleApprovalAuditInternal,
+    handleEditMessageInternal,
+    handleRetryToolInternal,
+    isStreaming,
+    panelId,
+    pendingChatActions,
+  ]);
+
   useEffect(() => {
     setQueuedMessages([]);
     autoSendingQueuedRef.current = null;
@@ -2986,6 +3743,11 @@ When the user asks you to make changes:
     approvedProposalContinuationRef.current = null;
     pausedProposalKeyRef.current = null;
     contentProposalStabilityRef.current = { key: null, cycles: 0 };
+    // A conversation switch invalidates the previous thread's plan gate,
+    // checklist and plan-mode turn tracking.
+    useChatStore.getState().setPlanGatePrompt(null);
+    useChatStore.getState().setPlanSteps(null);
+    planModeTurnRef.current = false;
   }, [conversationId]);
 
   const handleRegenerate = useCallback(() => {
@@ -3017,6 +3779,8 @@ When the user asks you to make changes:
     setInput: setDraftInput,
     handleSend,
     handleQuickSend,
+    handleImplementPlan,
+    handleCancelPlanGate,
     handleResumeSession,
     clearHermesSessionAttachment,
     queuedMessages,
@@ -3036,6 +3800,7 @@ When the user asks you to make changes:
     activeProvider: effectiveProvider,
     activeModel: effectiveModel,
     toolActivityMap,
+    toolCallRecords,
     agentStatus,
     transportStatusMessage,
     computerUseDock,
@@ -3043,5 +3808,16 @@ When the user asks you to make changes:
     handleComputerUseDockCollapse,
     conversationAutoApproveEnabled,
     setConversationAutoApprove: setConversationAutoApproveEnabled,
+    // Enqueued through the hermes store so components can trigger them even
+    // when the panel runtime doesn't forward callback props.
+    handleRetryTool: (toolName: string, callId?: string) => {
+      useHermesStore.getState().requestChatAction(panelId, { kind: 'retry_tool', toolName, callId });
+    },
+    handleEditMessage: (content: string) => {
+      useHermesStore.getState().requestChatAction(panelId, { kind: 'edit_message', content });
+    },
+    handleApprovalAudit: (entry: { tool: string; command?: string; approved: boolean }) => {
+      useHermesStore.getState().requestChatAction(panelId, { kind: 'approval_audit', ...entry });
+    },
   };
 }

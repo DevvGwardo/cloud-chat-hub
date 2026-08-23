@@ -1,0 +1,1 @@
+- [2026-08-23 12:54] fix(build): workbench-data counting globs pulled server code into browser bundle — `?url` query on import.meta.glob; gate green (typecheck+lint+829 tests+vite build)
