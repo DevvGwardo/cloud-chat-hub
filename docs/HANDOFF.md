@@ -472,3 +472,14 @@ per retry test — failure accumulation across tests was opening the circuit mid
 ## Next slice
 <!-- architect writes; small enough for one PR -->
 See docs/SLICE.md.
+
+### Factory mount (2026-08-31)
+| Gate | Result |
+|---|---|
+| typecheck | pass — tsc 3 configs |
+| lint | pass — 0 warnings (after fixing any) |
+| vitest | 829 passed (134 files) |
+| factory routes | /api/factory/status, /api/factory/dispatch, /api/factory/queue, /api/factory/kanban/sync added to HEALTH_ROUTES |
+| adapter | server/routes/factory.ts lazy-imports ~/software-factory/src/adapters/cloud-chat-hub.ts |
+| work | server/index.ts +2 lines import +1 line register +4 health routes |
+| source | ~/software-factory 36/36 gates, mount verified via typecheck |

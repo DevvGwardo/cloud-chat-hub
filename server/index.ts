@@ -31,6 +31,7 @@ import { registerHermesStreamResumeRoute } from './lib/hermes';
 import { registerRemoteRevivalRoutes } from './routes/remote-revival';
 import { registerBridgeRoutes } from './routes/bridge';
 import { registerWorkspaceRoutes } from './routes/workspace';
+import { registerFactoryRoutes } from './routes/factory';
 import { startManagedBridge, stopManagedBridge } from './lib/bridge-manager';
 import { taskOrchestrator } from './task-orchestrator';
 import { shutdownTeamCoordinator } from './team-coordinator';
@@ -131,6 +132,10 @@ export const HEALTH_ROUTES = [
   '/api/remote/ping-bridge',
   '/api/remote/smart-plug',
   '/functions/v1/transcribe',
+  '/api/factory/status',
+  '/api/factory/dispatch',
+  '/api/factory/queue',
+  '/api/factory/kanban/sync',
 ] as const;
 
 export function createApp(opts?: { serveFrontend?: boolean }) {
@@ -258,6 +263,7 @@ export function createApp(opts?: { serveFrontend?: boolean }) {
   registerRemoteRevivalRoutes(app);
   registerBridgeRoutes(app);
   registerWorkspaceRoutes(app);
+  registerFactoryRoutes(app);
 
   // Workspace search lives in registerWorkspaceRoutes (hardened root checks).
   // ─── Health check ──────────────────────────────────────────────────────────
