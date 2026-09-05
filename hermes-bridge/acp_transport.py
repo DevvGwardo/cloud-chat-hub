@@ -477,6 +477,21 @@ def _safe_conversation_id(conversation_id: str) -> str:
     return (safe or "unknown")[:40]
 
 
+def _same_dir(a: str, b: str) -> bool:
+    """True when two cwd strings denote the same directory.
+
+    realpath collapses symlinks (notably /tmp -> /private/tmp on macOS);
+    normcase guards case-insensitive filesystems. Falls back to string
+    equality when either side is unresolvable.
+    """
+    try:
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(
+            os.path.realpath(b)
+        )
+    except OSError:
+        return (a or "") == (b or "")
+
+
 async def ensure_session(
     *,
     loop: asyncio.AbstractEventLoop,
@@ -501,8 +516,24 @@ async def ensure_session(
     async with _sessions_lock:
         handle = _sessions.get(conversation_id)
         if handle is not None and handle.proc.returncode is None:
-            handle.touch()
-            return handle
+            if _same_dir(handle.cwd, cwd):
+                handle.touch()
+                return handle
+            # The conversation moved to a different checkout (repo switch) —
+            # a reused session would resolve relative reads/searches against
+            # the old cwd and fail every one. Tear down and respawn there.
+            _sessions.pop(conversation_id, None)
+            loop.create_task(_close_handle_quietly(handle))
+            handle = None
+            emit(
+                "stream_retry",
+                stream_retry_event(
+                    attempt=1,
+                    max_attempts=ACP_SPAWN_MAX_ATTEMPTS,
+                    reason="acp-transport-cwd-switch",
+                    delay_ms=0,
+                ),
+            )
         if handle is not None:
             # The previous hermes-acp process died — drop the handle and
             # release its stderr log fd in the background before respawning.

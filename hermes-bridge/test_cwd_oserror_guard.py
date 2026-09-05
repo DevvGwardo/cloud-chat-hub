@@ -59,9 +59,12 @@ def test_getcwd_oserror_falls_back_to_home():
     assert _FakeAcpTransport.last_kwargs["cwd"] == main.os.path.expanduser("~")
 
 
-def test_repo_root_header_wins_over_broken_cwd():
-    """When a repo-root header is present, it is used as cwd even if
-    os.getcwd() is broken — and it is NOT overwritten by the home fallback."""
+def test_repo_root_header_wins_over_broken_cwd(tmp_path):
+    """When a repo-root header points at a REAL directory, it is used as cwd
+    even if os.getcwd() is broken — and it is NOT overwritten by the home
+    fallback. (A header pointing at a nonexistent path is ignored and falls
+    through to the managed-clone lookup, so a stale client path can never
+    become a dead cwd — see test_missing_header_dir_falls_through.)"""
     fake = _FakeAcpTransport()
 
     body = main.ChatCompletionRequest.model_validate({
@@ -71,7 +74,7 @@ def test_repo_root_header_wins_over_broken_cwd():
     })
     request = _FakeRequest({
         "authorization": "Bearer test",
-        "x-hermes-repo-root": "/tmp/some-repo-root",
+        "x-hermes-repo-root": str(tmp_path),
         "x-hermes-execution-mode": "acp",
     })
 
@@ -84,7 +87,37 @@ def test_repo_root_header_wins_over_broken_cwd():
         response, _payload = asyncio.run(_invoke_chat_and_read_stream(request, body))
 
     assert response.status_code == 200
-    assert _FakeAcpTransport.last_kwargs["cwd"] == "/tmp/some-repo-root"
+    assert _FakeAcpTransport.last_kwargs["cwd"] == str(tmp_path)
+
+
+def test_missing_header_dir_falls_through_to_home(tmp_path):
+    """A repo-root header pointing at a nonexistent path must NOT become the
+    cwd (every relative read/search would miss). With no managed clone
+    matching either, the home fallback applies."""
+    fake = _FakeAcpTransport()
+
+    body = main.ChatCompletionRequest.model_validate({
+        "model": "auto",
+        "messages": [{"role": "user", "content": "test"}],
+        "stream": True,
+    })
+    missing = str(tmp_path / "no-such-checkout")
+    request = _FakeRequest({
+        "authorization": "Bearer test",
+        "x-hermes-repo-root": missing,
+        "x-hermes-execution-mode": "acp",
+    })
+
+    def _boom():
+        import errno
+        raise FileNotFoundError(errno.ENOENT, "cwd does not exist")
+
+    with patch.dict(sys.modules, {"acp_transport": fake.module()}), \
+         patch.object(main.os, "getcwd", side_effect=_boom):
+        response, _payload = asyncio.run(_invoke_chat_and_read_stream(request, body))
+
+    assert response.status_code == 200
+    assert _FakeAcpTransport.last_kwargs["cwd"] == main.os.path.expanduser("~")
 
 
 def test_healthy_getcwd_still_used_when_no_repo_header():

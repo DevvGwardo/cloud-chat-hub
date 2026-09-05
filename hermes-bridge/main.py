@@ -6265,6 +6265,43 @@ def _format_plan_text(entries) -> str:
 # added tokens while still giving the model real paths on attempt #1).
 _ACP_REPO_TREE_PREVIEW_LIMIT = 150
 
+# Managed local checkouts (see server/repo-clone-manager.ts MANAGED_REPOS_ROOT).
+_MANAGED_REPOS_ROOT = os.path.join(os.path.expanduser("~"), ".cloudchat", "repos")
+
+# Owner/name segments must be single plain directory names — never a traversal.
+_SAFE_REPO_SEGMENT_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
+
+
+def _resolve_acp_repo_root(
+    repo_root_header: str = "",
+    repo_owner: str = "",
+    repo_name: str = "",
+) -> str:
+    """Resolve the ACP session cwd to a real repo checkout.
+
+    Preference: explicit X-Hermes-Repo-Root header (when it exists on disk),
+    then the managed clone at ~/.cloudchat/repos/<owner>/<name> (covers turns
+    where the client sent owner/name but no root — previously these fell back
+    to the bridge process cwd, so every relative read/search missed and the
+    model probed blind). Returns "" when nothing resolves; callers fall back
+    to getcwd()/home as before.
+    """
+    header = (repo_root_header or "").strip()
+    if header and os.path.isdir(header):
+        return header
+    owner = (repo_owner or "").strip()
+    name = (repo_name or "").strip()
+    if (
+        owner
+        and name
+        and _SAFE_REPO_SEGMENT_RE.fullmatch(owner)
+        and _SAFE_REPO_SEGMENT_RE.fullmatch(name)
+    ):
+        candidate = os.path.join(_MANAGED_REPOS_ROOT, owner, name)
+        if os.path.isdir(candidate):
+            return candidate
+    return ""
+
 
 def _build_acp_repo_context_prefix(
     *,
@@ -6291,6 +6328,18 @@ def _build_acp_repo_context_prefix(
     lines = [f"[Repo context: {label}."]
     if root:
         lines.append(f"Local checkout at: {root} (this is your working directory).")
+        # Name the real session tools with exact arg shapes. The server-side
+        # repo prompt teaches `read_repo_file` (a loop/SDK tool that does not
+        # exist in this ACP session); without this mapping the model emits
+        # empty-path `read` calls that render as `read: ?` and fail, and never
+        # discovers file search at all.
+        lines.append(
+            "File tools in this session: `read_file` {path} reads a file; "
+            "`search_files` {pattern, path} searches contents (ripgrep-backed — "
+            "use it instead of grep). If your instructions mention "
+            "`read_repo_file`, that is `read_file` here: always pass a real "
+            "`path` from the list below, never an empty one."
+        )
     if tree:
         shown = tree[:_ACP_REPO_TREE_PREVIEW_LIMIT]
         lines.append(f"Known files ({len(tree)} total{', showing ' + str(len(shown)) if len(tree) > len(shown) else ''}):")
@@ -6346,14 +6395,19 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
 
     workspace_id = _resolve_workspace_id(request, body)
     session_id = workspace_id
-    # The bridge process can outlive its original working directory (a build
-    # or cleanup step may delete it). os.getcwd() then raises FileNotFoundError
-    # and every chat request 500s — fall back to the home directory so requests
-    # keep working regardless of what happens to the launch cwd.
+    # Resolve the session cwd to a real checkout: explicit header first, then
+    # the managed clone for owner/name, then the historical fallbacks. (The
+    # bridge process can outlive its original working directory — a build or
+    # cleanup step may delete it. os.getcwd() then raises FileNotFoundError
+    # and every chat request 500s — fall back to the home directory so
+    # requests keep working regardless of what happens to the launch cwd.)
+    resolved_repo_root = _resolve_acp_repo_root(
+        repo_root_header, repo_owner, repo_name
+    )
     try:
-        cwd = repo_root_header or os.getcwd()
+        cwd = resolved_repo_root or os.getcwd()
     except OSError:
-        cwd = repo_root_header or os.path.expanduser("~")
+        cwd = resolved_repo_root or os.path.expanduser("~")
     # Plan mode: passed to hermes-acp as an env hint + prompt suffix (the real
     # agent owns its tool registration; this is best-effort enforcement).
     plan_mode = bool((body.model_extra or {}).get("plan_mode"))
@@ -6377,9 +6431,10 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
     repo_context_prefix = _build_acp_repo_context_prefix(
         repo_owner=repo_owner,
         repo_name=repo_name,
-        # Header-gated on purpose: `cwd` always has a value (getcwd/home
-        # fallback), and non-repo turns must stay byte-identical to before.
-        repo_root=repo_root_header,
+        # Resolved root (not just the header): the prefix must describe the
+        # checkout the session actually runs in. Non-repo turns still get ""
+        # (no owner/name/root/tree), so they stay byte-identical to before.
+        repo_root=resolved_repo_root,
         repo_file_tree=repo_file_tree_raw if isinstance(repo_file_tree_raw, list) else None,
     )
     if repo_context_prefix and user_message.strip():
