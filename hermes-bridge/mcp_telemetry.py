@@ -321,7 +321,7 @@ def _remember_names(status: List[dict]) -> None:
 def _live_status() -> List[dict]:
     """Live connection status from the in-process agent MCP layer."""
     try:
-        from tools.mcp_tool import get_mcp_status
+        from tools.mcp_tool_discovery import get_mcp_status
         status = get_mcp_status()
         return status if isinstance(status, list) else []
     except Exception:
