@@ -1087,7 +1087,11 @@ function ToolInvocationDisplay({
           <span className="text-[11px] text-foreground/60">({affectedPaths.length} files)</span>
         )}
         {isInProgress && (
-          <span className="rounded-full border border-primary/20 bg-primary/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em] text-primary/80 ml-auto">
+          <span className="ml-auto inline-flex items-center gap-1.5 flex-shrink-0 whitespace-nowrap text-[10px] font-medium text-primary/70">
+            <span className="relative flex h-1.5 w-1.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/50" />
+              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-primary/80" />
+            </span>
             {progressLabel}
           </span>
         )}

@@ -41,6 +41,14 @@ export default defineConfig({
   },
   renderer: {
     root: '.',
+    // Dedicated port so the electron dev renderer never collides with other
+    // projects' vite servers on the default 5173 — a collision shifts the
+    // renderer to a random port and breaks the server's CORS allowlist.
+    // strictPort: fail loudly instead of silently drifting.
+    server: {
+      port: 5175,
+      strictPort: true
+    },
     build: {
       rollupOptions: {
         input: resolve(__dirname, 'index.html')

@@ -104,3 +104,83 @@ def test_healthy_getcwd_still_used_when_no_repo_header():
 
     assert response.status_code == 200
     assert _FakeAcpTransport.last_kwargs["cwd"] == "/normal/working/dir"
+
+
+# ── ACP repo-context preamble (Sep 2026 "every read fails / read: ?") ────────
+# The ACP transport forwards only the last user message to hermes-acp, so repo
+# signals that arrived as headers/body never reached the model and its first
+# tool batch was context-free probing (read_file with empty args). The bridge
+# now inlines a short preamble (owner/name, checkout path, capped file tree).
+
+def _acp_body(content="Analyze this for optimizations", **extra):
+    payload = {
+        "model": "auto",
+        "messages": [{"role": "user", "content": content}],
+        "stream": True,
+    }
+    payload.update(extra)
+    return main.ChatCompletionRequest.model_validate(payload)
+
+
+def _run_acp_prompt(request, body):
+    fake = _FakeAcpTransport()
+    _FakeAcpTransport.last_kwargs = None
+    with patch.dict(sys.modules, {"acp_transport": fake.module()}):
+        response, _payload = asyncio.run(_invoke_chat_and_read_stream(request, body))
+    assert response.status_code == 200
+    return _FakeAcpTransport.last_kwargs
+
+
+def test_no_repo_signals_leaves_prompt_untouched():
+    """Non-repo turns must stay byte-identical to before the preamble."""
+    request = _FakeRequest({"authorization": "Bearer test", "x-hermes-execution-mode": "acp"})
+    kwargs = _run_acp_prompt(request, _acp_body())
+    assert kwargs["user_message"] == "Analyze this for optimizations"
+
+
+def test_repo_headers_are_inlined_into_prompt():
+    """Owner/name + repo-root header reach the model as a preamble."""
+    request = _FakeRequest({
+        "authorization": "Bearer test",
+        "x-hermes-execution-mode": "acp",
+        "x-hermes-repo-owner": "DevvGwardo",
+        "x-hermes-repo-name": "grok-glm-flash",
+        "x-hermes-repo-root": "/Users/devgwardo/.cloudchat/repos/DevvGwardo/grok-glm-flash",
+    })
+    kwargs = _run_acp_prompt(request, _acp_body())
+    prompt = kwargs["user_message"]
+    assert "DevvGwardo/grok-glm-flash" in prompt
+    assert "/Users/devgwardo/.cloudchat/repos/DevvGwardo/grok-glm-flash" in prompt
+    assert prompt.endswith("Analyze this for optimizations")
+
+
+def test_repo_file_tree_is_inlined_and_capped():
+    """A forwarded file tree gives the model real paths (bounded)."""
+    tree = [f"src/file{i}.ts" for i in range(400)] + ["package.json", "README.md"]
+    request = _FakeRequest({
+        "authorization": "Bearer test",
+        "x-hermes-execution-mode": "acp",
+        "x-hermes-repo-owner": "DevvGwardo",
+        "x-hermes-repo-name": "grok-glm-flash",
+        "x-hermes-repo-root": "/repo",
+    })
+    kwargs = _run_acp_prompt(request, _acp_body(repo_file_tree=tree))
+    prompt = kwargs["user_message"]
+    assert "Known files" in prompt
+    assert "- src/file0.ts" in prompt
+    assert "- src/file399.ts" not in prompt  # capped at the preview limit
+    assert f"{len(tree)} total" in prompt
+
+
+def test_prefix_builder_empty_without_signals():
+    assert main._build_acp_repo_context_prefix() == ""
+    assert main._build_acp_repo_context_prefix(repo_owner="", repo_name="") == ""
+
+
+def test_prefix_builder_ignores_non_string_tree_entries():
+    prefix = main._build_acp_repo_context_prefix(
+        repo_owner="o", repo_name="n", repo_root="/repo",
+        repo_file_tree=["a.ts", None, 42, ""],
+    )
+    assert "- a.ts" in prefix
+    assert "None" not in prefix

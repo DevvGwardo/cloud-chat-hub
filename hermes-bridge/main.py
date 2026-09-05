@@ -1961,6 +1961,18 @@ def _models_for_custom_base_url(base_url: str, hermes_home: Optional[Path] = Non
     return models
 
 
+def _has_pool_entry(provider_name: str) -> bool:
+    if not provider_name:
+        return False
+    try:
+        auth_path = os.path.expanduser("~/.hermes/auth.json")
+        with open(auth_path, "r") as f:
+            auth = json.load(f)
+        pool = auth.get("credential_pool", {}).get(provider_name, [])
+        return bool(pool)
+    except Exception:
+        return False
+
 def _cli_custom_endpoint_credentialed(cfg: dict, hermes_home: Optional[Path] = None) -> bool:
     """True when the CLI custom base_url has its own key (not OpenClaw gateway alone).
 
@@ -1971,10 +1983,19 @@ def _cli_custom_endpoint_credentialed(cfg: dict, hermes_home: Optional[Path] = N
     if (cfg.get("api_key") or "").strip():
         return True
     provider = (cfg.get("provider") or "").strip().lower()
-    if provider and _get_credential_pool_key(provider):
+    if provider and (_get_credential_pool_key(provider) or _has_pool_entry(provider)):
         return True
+    if provider:
+        env_key = provider.upper().replace("-", "_").replace(":", "_") + "_API_KEY"
+        if os.environ.get(env_key):
+            return True
+        # OPENCODE_* keys only prove credentials for opencode providers — a
+        # generic custom host (e.g. api.bullinf.fun) must not inherit them.
+        if provider.startswith("opencode") or provider.startswith("custom:opencode"):
+            if os.environ.get("OPENCODE_GO_API_KEY") or os.environ.get("OPENCODE_API_KEY"):
+                return True
     custom_id = _synthetic_cli_provider_id(cfg)
-    if _get_credential_pool_key(custom_id) or _get_credential_pool_key("custom"):
+    if _get_credential_pool_key(custom_id) or _get_credential_pool_key("custom") or _has_pool_entry(custom_id) or _has_pool_entry("custom"):
         return True
     base_norm = (cfg.get("base_url") or "").strip().rstrip("/").lower()
     if not base_norm:
@@ -2879,6 +2900,28 @@ def _get_nous_agent_key() -> Optional[str]:
     return None
 
 
+_HERMES_DOTENV_CACHE: Optional[dict] = None
+
+def _read_hermes_dotenv_var(name: str) -> str:
+    """Read one var from ~/.hermes/.env (KEY=value lines, no quotes stripping
+    beyond what dotenv does). Cached per-process; returns "" when absent."""
+    global _HERMES_DOTENV_CACHE
+    if _HERMES_DOTENV_CACHE is None:
+        _HERMES_DOTENV_CACHE = {}
+        try:
+            dotenv_path = os.path.expanduser("~/.hermes/.env")
+            with open(dotenv_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    _HERMES_DOTENV_CACHE[k.strip()] = v.strip().strip('"').strip("'")
+        except Exception:
+            pass
+    return _HERMES_DOTENV_CACHE.get(name, "")
+
+
 def _get_credential_pool_key(provider_name: str) -> Optional[str]:
     """Read an API key from ~/.hermes/auth.json credential_pool[provider_name].
 
@@ -2899,6 +2942,21 @@ def _get_credential_pool_key(provider_name: str) -> Optional[str]:
             key = cred.get("access_token", "")
             if key and key != "***":
                 return key
+            # Env-sourced pool entries (source: "env:VARNAME") don't persist the
+            # secret in auth.json — only a fingerprint. Resolve by reading the
+            # referenced env var at lookup time, mirroring hermes_cli.auth.
+            # When the bridge is spawned by Electron it may not inherit the
+            # user's shell exports — fall back to ~/.hermes/.env (hermes loads
+            # that file itself, and it takes precedence over stale shell vars).
+            source = str(cred.get("source") or "").strip()
+            if source.startswith("env:"):
+                env_var = source.split(":", 1)[1].strip()
+                if env_var:
+                    env_key = os.environ.get(env_var, "")
+                    if not env_key or env_key == "***":
+                        env_key = _read_hermes_dotenv_var(env_var)
+                    if env_key and env_key != "***":
+                        return env_key
     except Exception:
         pass
     return None
@@ -5243,11 +5301,23 @@ async def _chat_completions_impl(request: Request, body: ChatCompletionRequest):
                 or ""
             )
         else:
-            # Generic provider: try credential pool first, then env var
+            # Generic provider: try credential pool first, then env var.
+            # Pool-only providers (opencode-go, opencode-zen, custom:*) aren't
+            # in _PROVIDER_CONFIG, so provider_cfg.get("env_var", "") is "" —
+            # fall back to the well-known OPENCODE_* env vars by resolved_provider.
             auth_provider = provider_cfg.get("auth_json_provider", resolved_provider)
+            env_var = provider_cfg.get("env_var", "")
+            if not env_var:
+                if resolved_provider in ("opencode-go", "custom:opencode-go"):
+                    env_var = "OPENCODE_GO_API_KEY"
+                elif resolved_provider in ("opencode-zen", "custom:opencode-zen", "custom:opencode.ai"):
+                    env_var = "OPENCODE_API_KEY"
             agent_api_key = (
                 _get_credential_pool_key(auth_provider)
-                or os.environ.get(provider_cfg.get("env_var", ""), "")
+                or os.environ.get(env_var, "")
+                or (os.environ.get("OPENCODE_API_KEY") or os.environ.get("OPENCODE_GO_API_KEY")
+                    if resolved_provider.startswith("opencode") or resolved_provider.startswith("custom:opencode")
+                    else "")
                 or _get_local_gateway_key()
                 or ""
             )
@@ -6191,6 +6261,44 @@ def _format_plan_text(entries) -> str:
     return "\n".join(lines) + "\n" if len(lines) > 1 else ""
 
 
+# Cap for the repo file-tree preview injected into the ACP prompt (bounds the
+# added tokens while still giving the model real paths on attempt #1).
+_ACP_REPO_TREE_PREVIEW_LIMIT = 150
+
+
+def _build_acp_repo_context_prefix(
+    *,
+    repo_owner: str = "",
+    repo_name: str = "",
+    repo_root: str = "",
+    repo_file_tree: Optional[list] = None,
+) -> str:
+    """Build a short repo-context preamble for the ACP user prompt.
+
+    The ACP transport forwards only the last user message to hermes-acp, so
+    without this the model starts repo turns blind (no checkout path, no file
+    list) and its first tool batch is context-free probing — e.g. reads with
+    empty args that render as ``read: ?`` and fail. Returns "" when there is
+    no repo signal so non-repo turns are byte-identical to before.
+    """
+    owner = (repo_owner or "").strip()
+    name = (repo_name or "").strip()
+    root = (repo_root or "").strip()
+    tree = [p for p in (repo_file_tree or []) if isinstance(p, str) and p.strip()]
+    if not owner and not name and not root and not tree:
+        return ""
+    label = f"{owner}/{name}" if owner and name else (owner or name or "attached repo")
+    lines = [f"[Repo context: {label}."]
+    if root:
+        lines.append(f"Local checkout at: {root} (this is your working directory).")
+    if tree:
+        shown = tree[:_ACP_REPO_TREE_PREVIEW_LIMIT]
+        lines.append(f"Known files ({len(tree)} total{', showing ' + str(len(shown)) if len(tree) > len(shown) else ''}):")
+        lines.extend(f"- {path}" for path in shown)
+    lines.append("Read real paths from the list above; do not guess blind paths.]")
+    return "\n".join(lines)
+
+
 async def _acp_chat_completions_impl(request: Request, body: ChatCompletionRequest):
     """Chat completions via the ACP transport (real hermes-agent)."""
     import acp_transport
@@ -6261,6 +6369,21 @@ async def _acp_chat_completions_impl(request: Request, body: ChatCompletionReque
         if last_user_idx is not None
         else ""
     )
+    # The ACP session only receives this one prompt string (history lives in
+    # the hermes-acp session server-side), so repo signals that the server
+    # sent as headers/body must be inlined here — otherwise the model starts
+    # repo turns with no checkout path and no file list.
+    repo_file_tree_raw = (body.model_extra or {}).get("repo_file_tree")
+    repo_context_prefix = _build_acp_repo_context_prefix(
+        repo_owner=repo_owner,
+        repo_name=repo_name,
+        # Header-gated on purpose: `cwd` always has a value (getcwd/home
+        # fallback), and non-repo turns must stay byte-identical to before.
+        repo_root=repo_root_header,
+        repo_file_tree=repo_file_tree_raw if isinstance(repo_file_tree_raw, list) else None,
+    )
+    if repo_context_prefix and user_message.strip():
+        user_message = f"{repo_context_prefix}\n\n{user_message}"
     if not user_message.strip():
         _mark_request_finished(model=body.model, success=False, summary=f"model={body.model} mode=acp error=empty-prompt")
         return _single_message_sse(body.model, "Nothing to run — the latest user message is empty.")
@@ -7619,7 +7742,8 @@ def _reload_agent_mcp() -> bool:
     """Best-effort in-process reload of the installed agent's MCP layer so a
     freshly-installed server connects without a full bridge restart."""
     try:
-        from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools
+        from tools.mcp_tool_lifecycle import shutdown_mcp_servers
+        from tools.mcp_tool_discovery import discover_mcp_tools
 
         shutdown_mcp_servers()
         discover_mcp_tools()
@@ -7641,7 +7765,8 @@ def _build_mcp_tool_index(hermes_home: Path) -> list[dict]:
     }
 
     try:
-        from tools.mcp_tool import discover_mcp_tools, _mcp_tool_server_names, _lock as _agent_lock
+        from tools.mcp_tool_discovery import discover_mcp_tools
+        from tools.mcp_tool import _mcp_tool_server_names, _lock as _agent_lock
         from tools.registry import registry
 
         discover_mcp_tools()

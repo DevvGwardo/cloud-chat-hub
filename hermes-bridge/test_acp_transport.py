@@ -7,6 +7,7 @@ here on purpose.
 """
 
 import asyncio
+import json
 import time
 import unittest
 from unittest import mock
@@ -40,6 +41,43 @@ async def _noop_async(*args, **kwargs):
 
 async def _noop_async_ok(*args, **kwargs):
     return True
+
+
+class BuildSessionModelIdTests(unittest.TestCase):
+    """custom:<pool> triples must not reach hermes set_session_model.
+
+    parse_model_input only re-joins `custom:<name>:<model>` for config.yaml
+    custom providers, so `custom:opencode-go:muse-spark-1.3-contributor`
+    resolved to ("custom", "opencode-go:muse-...") and the upstream 400'd
+    with "opencode-go:muse-spark-1.3-contributor is not a valid model ID".
+    """
+
+    def test_pool_custom_prefix_is_stripped(self):
+        self.assertEqual(
+            at.build_session_model_id("custom:opencode-go", "muse-spark-1.3-contributor"),
+            "opencode-go:muse-spark-1.3-contributor",
+        )
+
+    def test_non_pool_custom_prefix_is_kept(self):
+        # config.yaml custom providers rely on the triple syntax.
+        self.assertEqual(
+            at.build_session_model_id("custom:my-endpoint", "some-model"),
+            "custom:my-endpoint:some-model",
+        )
+
+    def test_native_provider_untouched(self):
+        self.assertEqual(
+            at.build_session_model_id("opencode-go", "muse-spark-1.3-contributor"),
+            "opencode-go:muse-spark-1.3-contributor",
+        )
+        self.assertEqual(
+            at.build_session_model_id("openrouter", "anthropic/claude-3"),
+            "openrouter:anthropic/claude-3",
+        )
+
+    def test_model_none_returns_provider_only(self):
+        self.assertEqual(at.build_session_model_id("custom:opencode-go", None), "opencode-go")
+        self.assertEqual(at.build_session_model_id("openrouter", None), "openrouter")
 
 
 class SafeConversationIdTests(unittest.TestCase):
@@ -213,6 +251,49 @@ class ShutdownAllTests(unittest.TestCase):
 
         asyncio.run(at.shutdown_all())
         self.assertEqual(at._sessions, {})
+
+
+class ToolInputFromLocationsTests(unittest.TestCase):
+    """Regression tests for the Sep 2026 "read: ?" transcript.
+
+    hermes sends read_file start updates with ``content=None`` by design, so
+    ``_tool_input_for_display`` used to yield "" and the UI could never
+    attribute a running read to its file. The path lives in ``locations`` —
+    surface it as ``{"path": ...}`` JSON (the shape UI label parsing and
+    start-text summaries expect via ``args.path``).
+    """
+
+    def test_locations_path_becomes_json_input(self):
+        update = SimpleNamespace(
+            raw_input=None,
+            content=None,
+            locations=[SimpleNamespace(path="/repo/package.json", line=None)],
+        )
+        parsed = json.loads(at._tool_input_for_display(update))
+        self.assertEqual(parsed["path"], "/repo/package.json")
+
+    def test_locations_line_preserved_when_positive(self):
+        update = SimpleNamespace(
+            raw_input=None,
+            content=None,
+            locations=[SimpleNamespace(path="/repo/a.ts", line=12)],
+        )
+        parsed = json.loads(at._tool_input_for_display(update))
+        self.assertEqual(parsed, {"path": "/repo/a.ts", "line": 12})
+
+    def test_empty_locations_stays_empty(self):
+        update = SimpleNamespace(raw_input=None, content=None, locations=[])
+        self.assertEqual(at._tool_input_for_display(update), "")
+
+    def test_raw_input_still_wins(self):
+        update = SimpleNamespace(
+            raw_input={"command": "ls"},
+            content=None,
+            locations=[SimpleNamespace(path="/repo/a.ts", line=None)],
+        )
+        self.assertEqual(
+            json.loads(at._tool_input_for_display(update)), {"command": "ls"}
+        )
 
 
 if __name__ == "__main__":

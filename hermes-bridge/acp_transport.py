@@ -126,7 +126,15 @@ def _tool_output(update: Any) -> str:
 
 def _tool_input_for_display(update: Any) -> str:
     """Compact input string for tool_activity events. hermes sends tool starts
-    without ``raw_input``, so derive it from the content blocks when present."""
+    without ``raw_input``, so derive it from the content blocks when present.
+
+    File tools (``read_file``/``search_files``/…) intentionally send
+    ``content=None`` on start — the path lives in ``locations`` instead. Fall
+    back to the first location as ``{"path": ...}`` JSON so tool_activity
+    consumers (UI label parsing via ``args.path``, start-text summaries) can
+    attribute the call to its file. Without this every read renders as an
+    unattributed ``read: ?`` line.
+    """
     raw = getattr(update, "raw_input", None)
     if isinstance(raw, (str, dict, list)):
         try:
@@ -134,7 +142,22 @@ def _tool_input_for_display(update: Any) -> str:
         except (TypeError, ValueError):
             return str(raw)
     text = _block_text(getattr(update, "content", None))
-    return text or ""
+    if text:
+        return text
+    locations = getattr(update, "locations", None)
+    if isinstance(locations, (list, tuple)) and locations:
+        first = locations[0]
+        path = getattr(first, "path", None)
+        if isinstance(path, str) and path.strip():
+            payload: dict[str, Any] = {"path": path.strip()}
+            line = getattr(first, "line", None)
+            if isinstance(line, int) and line > 0:
+                payload["line"] = line
+            try:
+                return json.dumps(payload, ensure_ascii=False)
+            except (TypeError, ValueError):
+                return path.strip()
+    return ""
 
 
 # ── The ACP client ──────────────────────────────────────────────────────────
@@ -416,6 +439,37 @@ ACP_SPAWN_BACKOFF_BASE_MS = max(0, int(os.environ.get("HERMES_ACP_SPAWN_BACKOFF_
 # filename (they can carry path separators / traversal sequences).
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
 
+# Bare pool-only provider ids that the bridge/CLI surface as synthetic
+# `custom:<name>` rows. hermes knows each bare id natively (provider catalog +
+# credential pool), so `custom:opencode-go` must be handed to set_session_model
+# as `opencode-go` — a `custom:<name>:<model>` triple for a non-config.yaml
+# provider is parsed as ("custom", "<name>:<model>") and the upstream 400s
+# with "<name>:<model> is not a valid model ID".
+_POOL_ONLY_BARE_PROVIDERS = frozenset({
+    "opencode-go",
+    "opencode-zen",
+    "opencode.ai",
+})
+
+
+def build_session_model_id(provider: str, model: Optional[str]) -> str:
+    """Compose the `provider:model` id handed to hermes set_session_model.
+
+    Pool-only synthetic rows (custom:opencode-go, custom:opencode.ai, …) are a
+    bridge/CLI routing concept. hermes' parse_model_input only re-joins
+    `custom:<name>:<model>` triples for config.yaml custom providers, so a
+    triple like `custom:opencode-go:muse-spark-1.3-contributor` resolves to
+    ("custom", "opencode-go:muse-spark-1.3-contributor") and the upstream
+    400s with "<prefixed> is not a valid model ID". The bare pool provider is
+    a known hermes provider — strip the synthetic prefix before composing.
+    """
+    session_provider = provider
+    if session_provider.startswith("custom:"):
+        bare = session_provider[len("custom:"):]
+        if bare in _POOL_ONLY_BARE_PROVIDERS:
+            session_provider = bare
+    return f"{session_provider}:{model}" if model else session_provider
+
 
 def _safe_conversation_id(conversation_id: str) -> str:
     """Sanitize a conversation id for use in filenames (safe charset, capped)."""
@@ -583,7 +637,7 @@ async def _spawn_session(
             raise RuntimeError("hermes-acp returned no session id")
 
         if provider and provider not in ("auto", "default"):
-            model_id = f"{provider}:{model}" if model else provider
+            model_id = build_session_model_id(provider, model)
             try:
                 await conn.set_session_model(model_id, session_id)
             except Exception as exc:

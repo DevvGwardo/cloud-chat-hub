@@ -3,7 +3,7 @@ import type express from 'express';
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
 export const ALLOWED_ORIGINS = new Set(
-  (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:5174,http://localhost:3000,http://localhost:8080,http://127.0.0.1:5173,http://127.0.0.1:5174,http://127.0.0.1:3000,http://127.0.0.1:8080,app://.')
+  (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:5174,http://localhost:5175,http://localhost:3000,http://localhost:8080,http://127.0.0.1:5173,http://127.0.0.1:5174,http://127.0.0.1:5175,http://127.0.0.1:3000,http://127.0.0.1:8080,app://.')
     .split(',')
     .map(s => s.trim())
     .filter(Boolean)
